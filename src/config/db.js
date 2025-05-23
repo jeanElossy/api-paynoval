@@ -12,22 +12,26 @@ async function connectTransactionsDB() {
     useNewUrlParser:    true,
     useUnifiedTopology: true,
     serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
+    socketTimeoutMS:     45000,
   };
 
-  // connexion “Users” sur le client mongoose par défaut
+  // Connexion à la base Users sur la connexion mongoose par défaut
   await mongoose.connect(uriUsers, opts);
   console.log(`✅ DB Users (par défaut) connecté : ${mongoose.connection.name}`);
 
-  // connexion distincte “Transactions”
+  // Création d'une connexion distincte pour Transactions
   txConn = mongoose.createConnection(uriTx, opts);
-  txConn.once('open', () => {
+  txConn.on('connected', () => {
     console.log(`✅ DB Transactions connecté : ${txConn.db.databaseName}`);
   });
+  txConn.on('error', err => {
+    console.error('❌ Erreur connexion Transactions DB :', err);
+  });
 
-  // charger le schéma Transaction sur txConn
+  // Charger les modèles
+  // Le modèle Transaction doit être défini comme une fonction qui prend la connexion en argument
   require('../models/Transaction')(txConn);
-  // charger User sur la connexion par défaut
+  // Le modèle User sera automatiquement lié à la connexion par défaut
   require('../models/User');
 }
 
@@ -39,5 +43,3 @@ function getTxConn() {
 }
 
 module.exports = { connectTransactionsDB, getTxConn };
-
-

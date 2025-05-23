@@ -1,4 +1,3 @@
-/* src/models/User.js */
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
 
@@ -30,6 +29,20 @@ const userSchema = new Schema({
 }, {
   versionKey: false,
   timestamps: true
+});
+
+// Index explicite sur email
+userSchema.index({ email: 1 }, { unique: true });
+
+// Activer getters et nettoyage à la sérialisation
+userSchema.set('toJSON', {
+  getters: true,
+  transform(doc, ret) {
+    ret.id = ret._id;
+    delete ret._id;
+    delete ret.__v;
+    return ret;
+  }
 });
 
 module.exports = mongoose.model('User', userSchema);
