@@ -21,15 +21,13 @@ const sanitize = text =>
     .replace(/[<>\\/{};]/g, '')
     .trim();
 
+/**
+ * Notify both sender and receiver via email, push and in-app
+ */
 async function notifyParties(tx, status, session) {
-  // Fetch sender and receiver
   const [sender, receiver] = await Promise.all([
-    User.findById(tx.sender)
-      .select('email pushToken')
-      .session(session),
-    User.findById(tx.receiver)
-      .select('email pushToken')
-      .session(session)
+    User.findById(tx.sender).select('email pushToken').session(session),
+    User.findById(tx.receiver).select('email pushToken').session(session)
   ]);
 
   const subjectMap = {
@@ -37,11 +35,7 @@ async function notifyParties(tx, status, session) {
     confirmed: 'Transaction confirmée',
     cancelled: 'Transaction annulée'
   };
-  const templateMap = {
-    initiated: initiatedTemplate,
-    confirmed: confirmedTemplate,
-    cancelled: cancelledTemplate
-  };
+  const templateMap = { initiatedTemplate, confirmedTemplate, cancelledTemplate };
   const subject = subjectMap[status];
 
   const commonData = {
@@ -60,7 +54,7 @@ async function notifyParties(tx, status, session) {
     }
   }
 
-  // Prepare push notifications
+  // Prepare and send push notifications
   const messages = [];
   for (const userObj of [sender, receiver]) {
     if (userObj?.pushToken && Expo.isExpoPushToken(userObj.pushToken)) {
@@ -73,12 +67,11 @@ async function notifyParties(tx, status, session) {
       });
     }
   }
-  // Send in chunks
   for (const chunk of expo.chunkPushNotifications(messages)) {
     try {
       await expo.sendPushNotificationsAsync(chunk);
-    } catch (pushErr) {
-      console.error('Erreur Expo push :', pushErr);
+    } catch (err) {
+      console.error('Erreur Expo push :', err);
     }
   }
 
@@ -99,7 +92,9 @@ async function notifyParties(tx, status, session) {
   }
 }
 
-// Initiate a new transaction
+/**
+ * Initiate a new transaction
+ */
 exports.initiateController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -109,37 +104,40 @@ exports.initiateController = async (req, res, next) => {
     const senderId = req.user.id;
 
     // Find receiver by email
-    const receiver = await User.findOne({ email: sanitize(toEmail) })
-      .session(session);
+    const receiver = await User.findOne({ email: sanitize(toEmail) }).session(session);
     if (!receiver) throw createError(404, 'Destinataire introuvable');
 
     if (receiver._id.toString() === senderId) {
       throw createError(400, 'Impossible de transférer vers votre propre compte');
     }
 
-    const decAmount = mongoose.Types.Decimal128.fromString(
-      parseFloat(amount).toFixed(2)
-    );
+    // Parse amount
+    const amountFloat = parseFloat(amount);
+    if (isNaN(amountFloat) || amountFloat <= 0) {
+      throw createError(400, 'Montant invalide');
+    }
+
+    // Convert to Decimal128
+    const decAmount = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
 
     // Check sender balance
     const sender = await User.findById(senderId).session(session);
     if (!sender) throw createError(404, 'Expéditeur introuvable');
-    if (sender.balance.lessThan(decAmount)) {
+    const currentBalance = parseFloat(sender.balance.toString());
+    if (currentBalance < amountFloat) {
       throw createError(400, 'Solde insuffisant');
     }
 
     // Create transaction
     const token = Transaction.generateVerificationToken();
-    const [tx] = await Transaction.create(
-      [{
-        sender:            senderId,
-        receiver:          receiver._id,
-        amount:            decAmount,
+    const [tx] = await Transaction.create([
+      {
+        sender, receiver: receiver._id,
+        amount: decAmount,
         verificationToken: token,
-        description:       sanitize(description)
-      }],
-      { session }
-    );
+        description: sanitize(description)
+      }
+    ], { session });
 
     // Notify parties
     await notifyParties(tx, 'initiated', session);
@@ -154,7 +152,9 @@ exports.initiateController = async (req, res, next) => {
   }
 };
 
-// Confirm an existing transaction
+/**
+ * Confirm an existing transaction
+ */
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
