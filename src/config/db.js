@@ -2,7 +2,6 @@
 const mongoose = require('mongoose');
 const config   = require('../config');
 
-let userConn;
 let txConn;
 
 async function connectTransactionsDB() {
@@ -17,21 +16,17 @@ async function connectTransactionsDB() {
     socketTimeoutMS: 45000,
   };
 
-  // Connexion à la base Users
-  userConn = mongoose.createConnection(uriUsers, options);
-  userConn.once('open', () => {
-    console.log(`✅ DB Users connecté : ${userConn.name}`);
-  });
+  // Connexion par défaut Mongoose à la base Users pour valider le JWT
+  await mongoose.connect(uriUsers, options);
+  console.log(`✅ Default mongoose connecté à la DB Users : ${mongoose.connection.name}`);
 
-  // Connexion à la base Transactions
-  txConn = mongoose.createConnection(uriTx, options);
-  txConn.once('open', () => {
-    console.log(`✅ DB Transactions connecté : ${txConn.name}`);
-  });
+  // Connexion distincte pour la base Transactions
+  txConn = await mongoose.createConnection(uriTx, options);
+  console.log(`✅ DB Transactions connecté : ${txConn.db.databaseName}`);
 
-  // Charger les modèles
-  require('../models/User')(userConn);
+  // Charger modèles (User sur default, Transaction sur txConn)
+  require('../models/User');
   require('../models/Transaction')(txConn);
 }
 
-module.exports = { connectTransactionsDB, userConn, txConn };
+module.exports = { connectTransactionsDB, txConn };
