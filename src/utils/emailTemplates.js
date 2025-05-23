@@ -175,8 +175,10 @@ function cancelledTemplate({ amount, senderEmail, receiverEmail, transactionId, 
 `;
 }
 
+
 module.exports = {
   initiatedTemplate,
   confirmedTemplate,
   cancelledTemplate
 };
+
