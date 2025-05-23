@@ -65,6 +65,11 @@ app.get('/health', (_req, res) =>
 // ─── Routes API ───────────────────────────────────────────────────────────────
 app.use('/api/v1/transactions', transactionRoutes);
 
+
+app.get('/', (req, res) => {
+  res.send('🚀 API PayNoval Transactions Service is running');
+});
+
 // ─── 404 si aucune route ne matche ────────────────────────────────────────────
 app.use((req, res) =>
   res.status(404).json({ success: false, error: 'Ressource non trouvée' })
