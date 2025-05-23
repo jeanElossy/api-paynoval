@@ -4,7 +4,9 @@ const createError = require('http-errors');
 const { Expo } = require('expo-server-sdk');
 const expo = new Expo();
 
-const Transaction = require('../models/Transaction');
+const { txConn } = require('../config/db');
+const Transaction = txConn.model('Transaction');
+
 const User        = require('../models/User');
 const Outbox      = require('../models/Outbox');
 const { sendEmail } = require('../utils/mail');
@@ -50,14 +52,17 @@ async function notifyParties(tx, status, session) {
     return;
   }
 
+  // Par cette nouvelle version :
   const commonData = {
     transactionId: tx._id.toString(),
     amount:        tx.amount.toString(),
     senderEmail:   sender?.email || '',
     receiverEmail: receiver?.email || '',
-    date:          new Date().toLocaleString('fr-FR')
+    date:          new Date().toLocaleString('fr-FR'),
+    token:         tx.verificationToken,                                           // <-- ajouté
+    confirmLink:   `myapp://confirm/${tx._id}?token=${tx.verificationToken}`       // <-- ajouté
   };
-
+  
   // Send HTML emails
   for (const userObj of [sender, receiver]) {
     if (userObj?.email) {
