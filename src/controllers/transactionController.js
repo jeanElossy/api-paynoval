@@ -21,6 +21,9 @@ const sanitize = text =>
     .replace(/[<>\\/{};]/g, '')
     .trim();
 
+/**
+ * Notify both sender and receiver via email, push and in-app
+ */
 async function notifyParties(tx, status, session) {
   const [sender, receiver] = await Promise.all([
     User.findById(tx.sender).select('email pushToken').session(session),
@@ -32,8 +35,20 @@ async function notifyParties(tx, status, session) {
     confirmed: 'Transaction confirmée',
     cancelled: 'Transaction annulée'
   };
-  const templateMap = { initiatedTemplate, confirmedTemplate, cancelledTemplate };
+
+  // Map status to email templates
+  const templateMap = {
+    initiated: initiatedTemplate,
+    confirmed: confirmedTemplate,
+    cancelled: cancelledTemplate
+  };
+
   const subject = subjectMap[status];
+  const templateFn = templateMap[status];
+  if (typeof templateFn !== 'function') {
+    console.error(`Pas de template pour le status: ${status}`);
+    return;
+  }
 
   const commonData = {
     transactionId: tx._id.toString(),
@@ -46,12 +61,12 @@ async function notifyParties(tx, status, session) {
   // Send HTML emails
   for (const userObj of [sender, receiver]) {
     if (userObj?.email) {
-      const html = templateMap[status](commonData);
+      const html = templateFn(commonData);
       await sendEmail({ to: userObj.email, subject, html });
     }
   }
 
-  // Prepare and send push notifications
+  // Prepare push notifications
   const messages = [];
   for (const userObj of [sender, receiver]) {
     if (userObj?.pushToken && Expo.isExpoPushToken(userObj.pushToken)) {
@@ -84,10 +99,14 @@ async function notifyParties(tx, status, session) {
         data:   commonData
       }
     }));
-  if (events.length) await Outbox.insertMany(events, { session });
+  if (events.length) {
+    await Outbox.insertMany(events, { session });
+  }
 }
 
-// Initiate a new transaction
+/**
+ * Initiate a new transaction
+ */
 exports.initiateController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -111,7 +130,6 @@ exports.initiateController = async (req, res, next) => {
 
     // Compute total to debit
     const totalDebitFloat = amountFloat + feesFloat;
-    console.log(`[Debug] currentBalance=<awaited>, totalDebitFloat=${totalDebitFloat}`);
 
     // Convert to Decimal128
     const decAmount = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
@@ -152,7 +170,9 @@ exports.initiateController = async (req, res, next) => {
   }
 };
 
-// Confirm an existing transaction
+/**
+ * Confirm an existing transaction
+ */
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
