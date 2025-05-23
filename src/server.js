@@ -84,6 +84,11 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'UP', timestamp: new Date().toISOString() });
 });
 
+// === Remettre la route racine ===
+app.get('/', (_req, res) => {
+  res.send('🚀 API PayNoval Transactions Service is running');
+});
+
 // Transactions routes
 app.use('/api/v1/transactions', transactionRoutes);
 
