@@ -1,20 +1,20 @@
 // src/controllers/transactionController.js
-const mongoose   = require('mongoose');
+const mongoose = require('mongoose');
 const createError = require('http-errors');
-const { Expo }   = require('expo-server-sdk');
-const expo        = new Expo();
+const { Expo } = require('expo-server-sdk');
+const expo = new Expo();
 
-// On récupère la connexion transactions sans l'initialiser trop tôt
-const db = require('../config/db');
-function getTransactionModel() {
-  if (!db.txConn) {
-    throw new Error('Transactions DB non initialisée');
-  }
-  return db.txConn.model('Transaction');
-}
+// On récupère dynamiquement la connexion TX
+declare const getTxConn: () => import('mongoose').Connection;
+const { getTxConn } = require('../config/db');
+// Récupération du modèle Transaction sur la connexion TX
+const Transaction = () => {
+  const conn = getTxConn();
+  return conn.model('Transaction');
+};
 
-const User        = require('../models/User');
-const Outbox      = require('../models/Outbox');
+const User   = require('../models/User');
+const Outbox = require('../models/Outbox');
 const { sendEmail } = require('../utils/mail');
 const {
   initiatedTemplate,
@@ -33,8 +33,6 @@ const sanitize = text =>
  * Notify both sender and receiver via email, push and in-app
  */
 async function notifyParties(tx, status, session) {
-  const Transaction = getTransactionModel();
-
   const [sender, receiver] = await Promise.all([
     User.findById(tx.sender).select('email pushToken').session(session),
     User.findById(tx.receiver).select('email pushToken').session(session)
@@ -45,12 +43,14 @@ async function notifyParties(tx, status, session) {
     confirmed: 'Transaction confirmée',
     cancelled: 'Transaction annulée'
   };
+
   const templateMap = {
     initiated: initiatedTemplate,
     confirmed: confirmedTemplate,
     cancelled: cancelledTemplate
   };
-  const subject    = subjectMap[status];
+
+  const subject = subjectMap[status];
   const templateFn = templateMap[status];
   if (typeof templateFn !== 'function') {
     console.error(`Pas de template pour le status: ${status}`);
@@ -67,7 +67,7 @@ async function notifyParties(tx, status, session) {
     confirmLink:   `myapp://confirm/${tx._id}?token=${tx.verificationToken}`
   };
 
-  // Emails
+  // Send HTML emails
   for (const userObj of [sender, receiver]) {
     if (userObj?.email) {
       const html = templateFn(commonData);
@@ -75,7 +75,7 @@ async function notifyParties(tx, status, session) {
     }
   }
 
-  // Push
+  // Push notifications
   const messages = [];
   for (const userObj of [sender, receiver]) {
     if (userObj?.pushToken && Expo.isExpoPushToken(userObj.pushToken)) {
@@ -96,7 +96,7 @@ async function notifyParties(tx, status, session) {
     }
   }
 
-  // In-app
+  // In-app notifications via Outbox
   const events = [sender, receiver]
     .filter(u => u)
     .map(u => ({
@@ -120,29 +120,31 @@ exports.initiateController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-    const Transaction = getTransactionModel();
 
     const { toEmail, amount, description, transactionFees } = req.body;
     const senderId = req.user.id;
 
-    // Receiver
+    // Find receiver by email
     const receiver = await User.findOne({ email: sanitize(toEmail) }).session(session);
     if (!receiver) throw createError(404, 'Destinataire introuvable');
     if (receiver._id.toString() === senderId) {
       throw createError(400, 'Impossible de transférer vers votre propre compte');
     }
 
-    // Montants
+    // Parse amounts
     const amountFloat = parseFloat(amount);
     const feesFloat   = parseFloat(transactionFees) || 0;
     if (isNaN(amountFloat) || amountFloat <= 0) throw createError(400, 'Montant invalide');
     if (isNaN(feesFloat)   || feesFloat < 0)   throw createError(400, 'Frais invalides');
 
+    // Compute total to debit
     const totalDebitFloat = amountFloat + feesFloat;
+
+    // Convert to Decimal128
     const decAmount = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
     const decFees   = mongoose.Types.Decimal128.fromString(feesFloat.toFixed(2));
 
-    // Sender
+    // Check sender balance
     const sender = await User.findById(senderId).session(session);
     if (!sender) throw createError(404, 'Expéditeur introuvable');
     const currentBalance = parseFloat(sender.balance.toString());
@@ -150,16 +152,20 @@ exports.initiateController = async (req, res, next) => {
       throw createError(400, 'Solde insuffisant');
     }
 
-    // Create
-    const token = Transaction.generateVerificationToken();
-    const [tx] = await Transaction.create([{
-      sender, receiver: receiver._id,
-      amount: decAmount, transactionFees: decFees,
-      verificationToken: token,
-      description: sanitize(description)
-    }], { session });
+    // Create transaction
+    const token = Transaction().generateVerificationToken();
+    const [tx] = await Transaction().create([
+      {
+        sender:            senderId,
+        receiver:          receiver._id,
+        amount:            decAmount,
+        transactionFees:   decFees,
+        verificationToken: token,
+        description:       sanitize(description)
+      }
+    ], { session });
 
-    // Notify
+    // Notify parties
     await notifyParties(tx, 'initiated', session);
 
     await session.commitTransaction();
@@ -179,10 +185,9 @@ exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-    const Transaction = getTransactionModel();
 
     const { transactionId, token } = req.body;
-    const tx = await Transaction.findById(transactionId)
+    const tx = await Transaction().findById(transactionId)
       .select('+verificationToken')
       .session(session);
     if (!tx || tx.status !== 'pending') {
@@ -195,6 +200,8 @@ exports.confirmController = async (req, res, next) => {
     }
 
     const decAmount = tx.amount;
+
+    // Debit sender
     const sender = await User.findOneAndUpdate(
       { _id: tx.sender, balance: { $gte: decAmount } },
       { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${decAmount.toString()}`) } },
@@ -205,6 +212,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(400, 'Solde insuffisant ou expéditeur introuvable');
     }
 
+    // Credit receiver
     const receiver = await User.findByIdAndUpdate(
       tx.receiver,
       { $inc: { balance: decAmount } },

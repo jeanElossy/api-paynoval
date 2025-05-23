@@ -16,29 +16,27 @@ async function connectTransactionsDB() {
     socketTimeoutMS: 45000,
   };
 
-  // Connexion par défaut Mongoose à la base Users pour Auth/JWT
-  try {
-    await mongoose.connect(uriUsers, options);
-    console.log(`✅ Default mongoose connecté à la DB Users : ${mongoose.connection.name}`);
-  } catch (err) {
-    console.error('❌ Échec connexion Users DB :', err.message);
-    throw err;
-  }
+  // Connexion par défaut Mongoose à la base Users pour valider le JWT
+  await mongoose.connect(uriUsers, options);
+  console.log(`✅ Default mongoose connecté à la DB Users : ${mongoose.connection.name}`);
 
   // Connexion distincte pour la base Transactions
   txConn = mongoose.createConnection(uriTx, options);
-  txConn.on('error', err => {
-    console.error('❌ Erreur connexion Transactions DB :', err.message);
-  });
   txConn.once('open', () => {
     console.log(`✅ DB Transactions connecté : ${txConn.db.databaseName}`);
   });
 
-  // Charger modèles
-  // User sur la connexion par défaut
+  // Charger modèles (User sur default, Transaction sur txConn)
   require('../models/User');
-  // Transaction sur txConn
   require('../models/Transaction')(txConn);
 }
 
-module.exports = { connectTransactionsDB, txConn };
+/**
+ * Retourne la connexion Transactions, ou lève une erreur si non initialisée
+ */
+function getTxConn() {
+  if (!txConn) throw new Error('Transactions DB non initialisée');
+  return txConn;
+}
+
+module.exports = { connectTransactionsDB, getTxConn };
