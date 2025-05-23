@@ -5,6 +5,7 @@ const expo          = new Expo();
 
 const { getTxConn } = require('../config/db');
 const Transaction   = () => getTxConn().model('Transaction'); // dynamique
+const logger        = require('../utils/logger');
 
 const User          = require('../models/User');
 const Outbox        = require('../models/Outbox');
@@ -39,7 +40,7 @@ async function notifyParties(tx, status, session) {
   const subject    = subjectMap[status];
   const templateFn = templateMap[status];
   if (typeof templateFn !== 'function') {
-    console.error(`Pas de template pour "${status}"`);
+    logger.error(`Pas de template pour "${status}"`);
     return;
   }
 
@@ -78,7 +79,7 @@ async function notifyParties(tx, status, session) {
     try {
       await expo.sendPushNotificationsAsync(chunk);
     } catch (err) {
-      console.error('Expo push error:', err);
+      logger.error('Expo push error:', err);
     }
   }
 
@@ -125,12 +126,23 @@ exports.initiateController = async (req, res, next) => {
     if (!sender) throw createError(404, 'Expéditeur introuvable');
     const balFloat      = parseFloat(sender.balance.toString());
     const totalDebit    = amt + fees;
-    if (balFloat < totalDebit) throw createError(400, 'Solde insuffisant');
+
+    const balStr   = balFloat.toFixed(2);
+    const debitStr = totalDebit.toFixed(2);
+    logger.debug(`Solde : ${balStr}€, Total débit : ${debitStr}€`);
+    logger.debug(`Vérif solde — dispo : ${balFloat}, totalDébit : ${totalDebit}`);
+
+    if (balFloat < totalDebit) {
+      throw createError(
+        400,
+        `Solde insuffisant : ${balStr}€ disponibles, ${debitStr}€ requis`
+      );
+    }
 
     // convertir Decimal128
-    const decAmt = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decAmt  = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const token = Transaction().generateVerificationToken();
+    const token   = Transaction().generateVerificationToken();
 
     // créer la transaction
     const [tx] = await Transaction().create([{
