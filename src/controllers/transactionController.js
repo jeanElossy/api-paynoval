@@ -1,20 +1,13 @@
-// src/controllers/transactionController.js
-const mongoose = require('mongoose');
-const createError = require('http-errors');
-const { Expo } = require('expo-server-sdk');
-const expo = new Expo();
+const mongoose      = require('mongoose');
+const createError   = require('http-errors');
+const { Expo }      = require('expo-server-sdk');
+const expo          = new Expo();
 
-// On récupère dynamiquement la connexion TX
-declare const getTxConn: () => import('mongoose').Connection;
 const { getTxConn } = require('../config/db');
-// Récupération du modèle Transaction sur la connexion TX
-const Transaction = () => {
-  const conn = getTxConn();
-  return conn.model('Transaction');
-};
+const Transaction   = () => getTxConn().model('Transaction'); // dynamique
 
-const User   = require('../models/User');
-const Outbox = require('../models/Outbox');
+const User          = require('../models/User');
+const Outbox        = require('../models/Outbox');
 const { sendEmail } = require('../utils/mail');
 const {
   initiatedTemplate,
@@ -22,16 +15,10 @@ const {
   cancelledTemplate
 } = require('../utils/emailTemplates');
 
-// Helper to sanitize strings
 const sanitize = text =>
-  text
-    .toString()
-    .replace(/[<>\\/{};]/g, '')
-    .trim();
+  text.toString().replace(/[<>\\/{};]/g, '').trim();
 
-/**
- * Notify both sender and receiver via email, push and in-app
- */
+/** Notifications email, push & in-app */
 async function notifyParties(tx, status, session) {
   const [sender, receiver] = await Promise.all([
     User.findById(tx.sender).select('email pushToken').session(session),
@@ -43,17 +30,16 @@ async function notifyParties(tx, status, session) {
     confirmed: 'Transaction confirmée',
     cancelled: 'Transaction annulée'
   };
-
   const templateMap = {
     initiated: initiatedTemplate,
     confirmed: confirmedTemplate,
     cancelled: cancelledTemplate
   };
 
-  const subject = subjectMap[status];
+  const subject    = subjectMap[status];
   const templateFn = templateMap[status];
   if (typeof templateFn !== 'function') {
-    console.error(`Pas de template pour le status: ${status}`);
+    console.error(`Pas de template pour "${status}"`);
     return;
   }
 
@@ -67,20 +53,20 @@ async function notifyParties(tx, status, session) {
     confirmLink:   `myapp://confirm/${tx._id}?token=${tx.verificationToken}`
   };
 
-  // Send HTML emails
-  for (const userObj of [sender, receiver]) {
-    if (userObj?.email) {
+  // emails
+  for (const u of [sender, receiver]) {
+    if (u?.email) {
       const html = templateFn(commonData);
-      await sendEmail({ to: userObj.email, subject, html });
+      await sendEmail({ to: u.email, subject, html });
     }
   }
 
-  // Push notifications
+  // push Expo
   const messages = [];
-  for (const userObj of [sender, receiver]) {
-    if (userObj?.pushToken && Expo.isExpoPushToken(userObj.pushToken)) {
+  for (const u of [sender, receiver]) {
+    if (u?.pushToken && Expo.isExpoPushToken(u.pushToken)) {
       messages.push({
-        to:    userObj.pushToken,
+        to:    u.pushToken,
         sound: 'default',
         title: subject,
         body:  `Montant : ${commonData.amount} €`,
@@ -92,13 +78,13 @@ async function notifyParties(tx, status, session) {
     try {
       await expo.sendPushNotificationsAsync(chunk);
     } catch (err) {
-      console.error('Erreur Expo push :', err);
+      console.error('Expo push error:', err);
     }
   }
 
-  // In-app notifications via Outbox
+  // in-app via Outbox
   const events = [sender, receiver]
-    .filter(u => u)
+    .filter(Boolean)
     .map(u => ({
       service: 'notifications',
       event:   'notification.created',
@@ -113,59 +99,50 @@ async function notifyParties(tx, status, session) {
   }
 }
 
-/**
- * Initiate a new transaction
- */
+/** POST /transactions/initiate */
 exports.initiateController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-
     const { toEmail, amount, description, transactionFees } = req.body;
     const senderId = req.user.id;
 
-    // Find receiver by email
+    // lookup destinataire
     const receiver = await User.findOne({ email: sanitize(toEmail) }).session(session);
     if (!receiver) throw createError(404, 'Destinataire introuvable');
     if (receiver._id.toString() === senderId) {
-      throw createError(400, 'Impossible de transférer vers votre propre compte');
+      throw createError(400, 'Vous ne pouvez pas vous auto-transférer');
     }
 
-    // Parse amounts
-    const amountFloat = parseFloat(amount);
-    const feesFloat   = parseFloat(transactionFees) || 0;
-    if (isNaN(amountFloat) || amountFloat <= 0) throw createError(400, 'Montant invalide');
-    if (isNaN(feesFloat)   || feesFloat < 0)   throw createError(400, 'Frais invalides');
+    // parse & valider montants
+    const amt  = parseFloat(amount);
+    const fees = parseFloat(transactionFees) || 0;
+    if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
+    if (isNaN(fees) || fees < 0) throw createError(400, 'Frais invalides');
 
-    // Compute total to debit
-    const totalDebitFloat = amountFloat + feesFloat;
-
-    // Convert to Decimal128
-    const decAmount = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
-    const decFees   = mongoose.Types.Decimal128.fromString(feesFloat.toFixed(2));
-
-    // Check sender balance
-    const sender = await User.findById(senderId).session(session);
+    // vérifier solde
+    const sender        = await User.findById(senderId).session(session);
     if (!sender) throw createError(404, 'Expéditeur introuvable');
-    const currentBalance = parseFloat(sender.balance.toString());
-    if (currentBalance < totalDebitFloat) {
-      throw createError(400, 'Solde insuffisant');
-    }
+    const balFloat      = parseFloat(sender.balance.toString());
+    const totalDebit    = amt + fees;
+    if (balFloat < totalDebit) throw createError(400, 'Solde insuffisant');
 
-    // Create transaction
+    // convertir Decimal128
+    const decAmt = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
     const token = Transaction().generateVerificationToken();
-    const [tx] = await Transaction().create([
-      {
-        sender:            senderId,
-        receiver:          receiver._id,
-        amount:            decAmount,
-        transactionFees:   decFees,
-        verificationToken: token,
-        description:       sanitize(description)
-      }
-    ], { session });
 
-    // Notify parties
+    // créer la transaction
+    const [tx] = await Transaction().create([{
+      sender,
+      receiver: receiver._id,
+      amount: decAmt,
+      transactionFees: decFees,
+      verificationToken: token,
+      description: sanitize(description)
+    }], { session });
+
+    // notifier expéditeur & destinataire
     await notifyParties(tx, 'initiated', session);
 
     await session.commitTransaction();
@@ -178,14 +155,11 @@ exports.initiateController = async (req, res, next) => {
   }
 };
 
-/**
- * Confirm an existing transaction
- */
+/** POST /transactions/confirm */
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-
     const { transactionId, token } = req.body;
     const tx = await Transaction().findById(transactionId)
       .select('+verificationToken')
@@ -193,18 +167,15 @@ exports.confirmController = async (req, res, next) => {
     if (!tx || tx.status !== 'pending') {
       throw createError(400, 'Transaction invalide ou déjà traitée');
     }
-
     if (!tx.verifyToken(sanitize(token))) {
       await notifyParties(tx, 'cancelled', session);
       throw createError(401, 'Code de confirmation incorrect');
     }
 
-    const decAmount = tx.amount;
-
-    // Debit sender
+    // débit expéditeur
     const sender = await User.findOneAndUpdate(
-      { _id: tx.sender, balance: { $gte: decAmount } },
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${decAmount.toString()}`) } },
+      { _id: tx.sender, balance: { $gte: tx.amount } },
+      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${tx.amount.toString()}`) } },
       { new: true, session }
     );
     if (!sender) {
@@ -212,10 +183,10 @@ exports.confirmController = async (req, res, next) => {
       throw createError(400, 'Solde insuffisant ou expéditeur introuvable');
     }
 
-    // Credit receiver
+    // crédit destinataire
     const receiver = await User.findByIdAndUpdate(
       tx.receiver,
-      { $inc: { balance: decAmount } },
+      { $inc: { balance: tx.amount } },
       { new: true, session }
     );
     if (!receiver) {
@@ -223,7 +194,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(404, 'Destinataire introuvable');
     }
 
-    tx.status      = 'confirmed';
+    tx.status = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
