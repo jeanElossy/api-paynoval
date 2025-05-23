@@ -63,7 +63,7 @@ app.get('/health', (_req, res) =>
 );
 
 // ─── Routes API ───────────────────────────────────────────────────────────────
-app.use('/api/v1/transactions', transactionRoutes);
+app.use('/api/v1/transactions', require('./routes/transactionsRoutes'));
 
 
 app.get('/', (req, res) => {

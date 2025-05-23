@@ -1,4 +1,4 @@
-/* src/models/Transaction.js */
+// src/models/Transaction.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { Schema } = mongoose;
@@ -17,7 +17,10 @@ const transactionSchema = new Schema({
   amount: {
     type: Schema.Types.Decimal128,
     required: true,
-    min: 0.01
+    validate: {
+      validator: v => parseFloat(v.toString()) >= 0.01,
+      message: props => `Le montant doit être au moins 0.01, reçu ${props.value}`
+    }
   },
   status: {
     type: String,
@@ -27,31 +30,52 @@ const transactionSchema = new Schema({
   verificationToken: {
     type: String,
     required: true,
-    select: false // Never return token by default
+    select: false,
+    unique: true
   },
   confirmedAt: {
-    type: Date
+    type: Date,
+    default: null
   }
 }, {
   versionKey: false,
   timestamps: true // createdAt & updatedAt
 });
 
-// Compound indexes for efficient queries
+// Indexes for efficient queries
 transactionSchema.index({ sender: 1, createdAt: -1 });
 transactionSchema.index({ receiver: 1, status: 1 });
 
-// Static method to generate a cryptographically secure token
+// Transform output for toJSON/toObject
+transactionSchema.set('toJSON', {
+  transform(doc, ret) {
+    ret.id = ret._id;
+    ret.amount = parseFloat(ret.amount.toString());
+    delete ret._id;
+    delete ret.verificationToken;
+    return ret;
+  }
+});
+
+// Pre-validate hook: generate token for new transactions
+transactionSchema.pre('validate', function(next) {
+  if (this.isNew) {
+    this.verificationToken = crypto.randomBytes(32).toString('hex');
+  }
+  next();
+});
+
+// Static method: generateVerificationToken
 transactionSchema.statics.generateVerificationToken = function() {
   return crypto.randomBytes(32).toString('hex');
 };
 
-// Instance method to verify a provided token
+// Instance method: verifyToken
 transactionSchema.methods.verifyToken = function(token) {
   if (!token || !this.verificationToken) return false;
-  const provided = Buffer.from(token);
-  const stored = Buffer.from(this.verificationToken);
   try {
+    const provided = Buffer.from(token, 'hex');
+    const stored = Buffer.from(this.verificationToken, 'hex');
     return crypto.timingSafeEqual(provided, stored);
   } catch (err) {
     return false;
