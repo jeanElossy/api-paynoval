@@ -111,28 +111,17 @@ exports.initiateController = async (req, res, next) => {
 
     // Compute total to debit
     const totalDebitFloat = amountFloat + feesFloat;
+    console.log(`[Debug] currentBalance=<awaited>, totalDebitFloat=${totalDebitFloat}`);
 
-// Convert to Decimal128
-const decAmount = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
-const decFees   = mongoose.Types.Decimal128.fromString(feesFloat.toFixed(2));
-
-// Check sender balance
-const sender = await User.findById(senderId).session(session);
-if (!sender) throw createError(404, 'Expéditeur introuvable');
-const currentBalance = parseFloat(sender.balance.toString());
-// Debug log for balances
-console.log(`[Debug] currentBalance=${currentBalance}, totalDebitFloat=${totalDebitFloat}`);
-
-if (currentBalance < totalDebitFloat) {
-  throw createError(400, 'Solde insuffisant');
-}
- = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
+    // Convert to Decimal128
+    const decAmount = mongoose.Types.Decimal128.fromString(amountFloat.toFixed(2));
     const decFees   = mongoose.Types.Decimal128.fromString(feesFloat.toFixed(2));
 
     // Check sender balance
     const sender = await User.findById(senderId).session(session);
     if (!sender) throw createError(404, 'Expéditeur introuvable');
     const currentBalance = parseFloat(sender.balance.toString());
+    console.log(`[Debug] currentBalance=${currentBalance}, totalDebitFloat=${totalDebitFloat}`);
     if (currentBalance < totalDebitFloat) {
       throw createError(400, 'Solde insuffisant');
     }
