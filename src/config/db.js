@@ -1,32 +1,29 @@
-// src/config/db.js
 const mongoose = require('mongoose');
-// On remonte d’un niveau pour charger correctement config.js
-const config = require('../config');
+const config   = require('./config');
+
+let userConn;
+let txConn;
 
 async function connectTransactionsDB() {
-  const uri = config.mongo.transactions;
-  if (!uri) {
-    throw new Error('⚠️ MONGO_URI_API_TRANSACTIONS non défini dans config.mongo.transactions');
-  }
+  const { users: uriUsers, transactions: uriTx } = config.mongo;
+  if (!uriUsers) throw new Error('MONGO_URI_USERS non défini');
+  if (!uriTx)   throw new Error('MONGO_URI_TRANSACTIONS non défini');
 
-  try {
-    // Connexion à MongoDB
-    const conn = await mongoose.connect(uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+  const options = {
+    useNewUrlParser:    true,
+    useUnifiedTopology: true,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  };
+  userConn = await mongoose.createConnection(uriUsers, options);
+  console.log(`✅ DB Users connecté : ${userConn.host}/${userConn.name}`);
 
-    console.log(
-      `✅ MongoDB Transactions DB connecté : ` +
-      `${conn.connection.host}/${conn.connection.name}`
-    );
-  } catch (err) {
-    console.error(
-      '❌ Erreur de connexion à MongoDB Transactions DB :',
-      err.message
-    );
-    throw err;
-  }
+  txConn = await mongoose.createConnection(uriTx, options);
+  console.log(`✅ DB Transactions connecté : ${txConn.host}/${txConn.name}`);
+
+  // Charger modèles
+  require('../models/User')(userConn);
+  require('../models/Transaction')(txConn);
 }
 
-module.exports = { connectTransactionsDB };
+module.exports = { connectTransactionsDB, userConn, txConn };

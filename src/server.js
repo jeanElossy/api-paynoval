@@ -1,98 +1,87 @@
-/* src/server.js */
 require('dotenv-safe').config();
-const express          = require('express');
-const helmet           = require('helmet');
-const cors             = require('cors');
-const compression      = require('compression');
-const rateLimit        = require('express-rate-limit');
-const mongoSanitize    = require('express-mongo-sanitize');
-const xssClean         = require('xss-clean');
-const hpp              = require('hpp');
-const morgan           = require('morgan');
-const cookieParser     = require('cookie-parser');
-const timeout          = require('connect-timeout');
-const { connectTransactionsDB } = require('./config/db');
-const config           = require('./config');
+const express       = require('express');
+const helmet        = require('helmet');
+const hsts          = require('helmet').hsts;
+const compression   = require('compression');
+const cookieParser  = require('cookie-parser');
+const mongoSanitize = require('express-mongo-sanitize');
+const xssClean      = require('xss-clean');
+const hpp           = require('hpp');
+const morgan        = require('morgan');
+const { createClient } = require('redis');
+const rateLimit     = require('express-rate-limit');
+const RedisStore    = require('rate-limit-redis');
+const enforceSSL    = require('express-sslify').HTTPS;
 
+const config       = require('./config');
+const { connectTransactionsDB } = require('./config/db');
 const transactionRoutes = require('./routes/transactionsRoutes');
 const errorHandler     = require('./middleware/errorHandler');
 
+// Initialise Express
 const app = express();
 app.set('trust proxy', 1);
 
-// ─── Sécurité HTTP Headers ───────────────────────────────────────────────────
-app.use(helmet({ contentSecurityPolicy: false }));
+// Sécurité
+app.use(helmet({ contentSecurityPolicy: {
+  directives: {
+    defaultSrc: ["'self'"],
+  }
+}}));
+app.use(hsts({ maxAge: 31536000 }));
+if (config.env === 'production') app.use(enforceSSL({ trustProtoHeader: true }));
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
-app.use(cors({
-  origin: config.corsOrigin || '*',
-  credentials: true
-}));
+// CORS strict
+app.use(require('cors')({ origin: config.cors.origin, credentials: true }));
 
-// ─── Body parsing ─────────────────────────────────────────────────────────────
+// Parsing & sanitization
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-app.use(cookieParser());
-
-// ─── Protection NoSQL / XSS / HPP ─────────────────────────────────────────────
+app.use(cookieParser({
+  httpOnly: true,
+  secure: config.env === 'production',
+  sameSite: 'strict',
+}));
 app.use(mongoSanitize());
 app.use(xssClean());
 app.use(hpp());
 
-// ─── Compression & Logging ────────────────────────────────────────────────────
+// Compression & logging
 app.use(compression());
-app.use(morgan('combined'));
 
-// ─── Timeout des requêtes ─────────────────────────────────────────────────────
-app.use(timeout('30s'));
-app.use((req, res, next) => req.timedout ? null : next());
+// Winston logger pour Morgan
+const winston = require('winston');
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.json(),
+  transports: [ new winston.transports.Console() ],
+});
+app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
-// ─── Rate limiter global (100 requêtes / 15 minutes) ──────────────────────────
+// Rate limiter via Redis
+const redisClient = createClient({ url: config.redis.url });
+redisClient.connect().catch(console.error);
 app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: {
-    success: false,
-    error: 'Trop de requêtes, veuillez réessayer plus tard.'
-  }
+  windowMs: config.rateLimit.windowMs,
+  max: config.rateLimit.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: new RedisStore({ sendCommand: (...args) => redisClient.sendCommand(args) }),
+  message: { success: false, error: 'Trop de requêtes, réessayez plus tard.' }
 }));
 
-// ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) =>
-  res.json({ status: 'UP', timestamp: new Date().toISOString() })
-);
+// Routes
+app.get('/health', (_req, res) => res.json({ status: 'UP', timestamp: new Date().toISOString() }));
+app.use('/api/v1/transactions', transactionRoutes);
 
-// ─── Routes API ───────────────────────────────────────────────────────────────
-app.use('/api/v1/transactions', require('./routes/transactionsRoutes'));
+// 404
+app.use((req, res) => res.status(404).json({ success: false, error: 'Ressource non trouvée' }));
 
-
-app.get('/', (req, res) => {
-  res.send('🚀 API PayNoval Transactions Service is running');
-});
-
-// ─── 404 si aucune route ne matche ────────────────────────────────────────────
-app.use((req, res) =>
-  res.status(404).json({ success: false, error: 'Ressource non trouvée' })
-);
-
-// ─── Middleware global de gestion d’erreurs ──────────────────────────────────
+// Error handler
 app.use(errorHandler);
 
-// ─── Lancement du serveur après connexion à la DB ─────────────────────────────
+// Connexion DB et lancement serveur
 (async () => {
-  try {
-    await connectTransactionsDB();  // <-- plus d’argument ici
-    app.listen(config.port, () =>
-      console.log(`🚀 Service transactions lancé sur le port ${config.port}`)
-    );
-  } catch (err) {
-    console.error('Échec de la connexion DB ou du démarrage du serveur :', err);
-    process.exit(1);
-  }
+  await connectTransactionsDB();
+  app.listen(config.port, () => logger.info(`🚀 Service transactions sur port ${config.port}`));
 })();
-
-// ─── Catch des promesses non gérées ───────────────────────────────────────────
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Optionnel : notifier ou shutdown si besoin
-});
