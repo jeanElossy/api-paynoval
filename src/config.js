@@ -1,35 +1,30 @@
 // src/config.js
 const path = require('path');
 
-
+// On autorise les variables manquantes (car ce service n’a besoin que de MONGO_URI_API_TRANSACTIONS)
 require('dotenv-safe').config({
   example: path.resolve(__dirname, '../.env.example'),
-  allowEmptyValues: false,
+  allowEmptyValues: true,
 });
 
 module.exports = {
-  // Environnement d'exécution
   env: process.env.NODE_ENV || 'development',
-
-  // Port d'écoute du serveur
   port: Number(process.env.PORT) || 3000,
 
-  // ─── 2. MongoDB ────────────────────────────────────────────────────────────────
+  // ─── MongoDB ────────────────────────────────────────────────────────────────
   mongo: {
-    // Base de données principale (users, cagnottes, etc.)
-    main: process.env.MONGO_URI,
-    // Base de données pour le micro-service Transactions
+    // Remarquez qu’on ne réclame plus MONGO_URI ici
     transactions: process.env.MONGO_URI_API_TRANSACTIONS,
   },
 
-  // ─── 3. JWT ───────────────────────────────────────────────────────────────────
+  // ─── JWT ───────────────────────────────────────────────────────────────────
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
 
-  // ─── 4. HMAC (vérification des payloads de transaction)────────────────────────
+  // ─── HMAC ──────────────────────────────────────────────────────────────────
   hmacSecret: process.env.HMAC_SECRET,
 
-  // ─── 5. SMTP pour envoi d'emails ───────────────────────────────────────────────
+  // ─── SMTP pour envoi d'emails ───────────────────────────────────────────────
   email: {
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT) || 587,
@@ -40,6 +35,9 @@ module.exports = {
     },
   },
 
-  // ─── 6. (Optionnel) URL d'un micro-service d'envoi de mails ────────────────────
+  // ─── (Optionnel) URL d'un micro-service d'envoi de mails ────────────────────
   emailMicroserviceUrl: process.env.EMAIL_MICROSERVICE_URL,
+
+  // ─── CORS (facultatif) ──────────────────────────────────────────────────────
+  corsOrigin: process.env.CORS_ORIGIN,
 };
