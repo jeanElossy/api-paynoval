@@ -1,29 +1,32 @@
-// Fichier : src/config/transactionsDb.js
+// src/config/db.js
 const mongoose = require('mongoose');
+// On remonte d’un niveau pour charger correctement config.js
+const config = require('../config');
 
-/**
- * Établit la connexion à la base MongoDB dédiée aux transactions.
- * Utilise la variable d'environnement MONGO_URI_TRANSACTIONS.
- * En cas d'erreur de connexion, le processus s'arrête.
- */
-const connectTransactionsDB = async () => {
-  const uri = process.env.MONGO_URI_API_TRANSACTIONS;
+async function connectTransactionsDB() {
+  const uri = config.mongo.transactions;
   if (!uri) {
-    console.error('❌ La variable MONGO_URI_API_TRANSACTIONS n\'est pas définie');
-    process.exit(1);
+    throw new Error('⚠️ MONGO_URI_API_TRANSACTIONS non défini dans config.mongo.transactions');
   }
-  try {
-    // createConnection crée une connexion séparée de mongoose.connect
-    const conn = await mongoose.createConnection(uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    });
-    console.log(`✅ MongoDB Transactions DB connecté : ${conn.host}/${conn.name}`);
-    return conn;
-  } catch (err) {
-    console.error('❌ Échec de connexion à la base Transactions :', err.message);
-    process.exit(1);
-  }
-};
 
-module.exports = connectTransactionsDB;
+  try {
+    // Connexion à MongoDB
+    const conn = await mongoose.connect(uri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+
+    console.log(
+      `✅ MongoDB Transactions DB connecté : ` +
+      `${conn.connection.host}/${conn.connection.name}`
+    );
+  } catch (err) {
+    console.error(
+      '❌ Erreur de connexion à MongoDB Transactions DB :',
+      err.message
+    );
+    throw err;
+  }
+}
+
+module.exports = { connectTransactionsDB };
