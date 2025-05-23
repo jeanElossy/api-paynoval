@@ -21,8 +21,10 @@ async function connectTransactionsDB() {
   console.log(`✅ Default mongoose connecté à la DB Users : ${mongoose.connection.name}`);
 
   // Connexion distincte pour la base Transactions
-  txConn = await mongoose.createConnection(uriTx, options);
-  console.log(`✅ DB Transactions connecté : ${txConn.db.databaseName}`);
+  txConn = mongoose.createConnection(uriTx, options);
+  txConn.once('open', () => {
+    console.log(`✅ DB Transactions connecté : ${txConn.db.databaseName}`);
+  });
 
   // Charger modèles (User sur default, Transaction sur txConn)
   require('../models/User');
