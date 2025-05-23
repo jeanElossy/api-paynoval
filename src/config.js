@@ -1,5 +1,6 @@
 const path = require('path');
 
+
 // Charge et valide les vars d’environnement, permet des valeurs vides si besoin
 require('dotenv-safe').config({
   example: path.resolve(__dirname, '../.env.example'),
@@ -13,7 +14,7 @@ module.exports = {
   // ─── MongoDB ────────────────────────────────────────────────────────────────
   mongo: {
     users:        process.env.MONGO_URI_USERS,
-    transactions: process.env.MONGO_URI_API_TRANSACTIONS,
+    transactions: process.env.MONGO_URI_TRANSACTIONS,
   },
 
   // ─── Redis (pour rate limiting partagé) ─────────────────────────────────────
