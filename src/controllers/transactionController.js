@@ -4,11 +4,12 @@ const { Expo }      = require('expo-server-sdk');
 const expo          = new Expo();
 
 const { getTxConn } = require('../config/db');
-const Transaction   = () => getTxConn().model('Transaction'); // dynamique
+const Transaction   = () => getTxConn().model('Transaction'); // utilise txConn
 const logger        = require('../utils/logger');
 
-const User          = require('../models/User');
-const Outbox        = require('../models/Outbox');
+// User est lié à la connexion par défaut → Base Users
+const User   = require('../models/User');
+const Outbox = require('../models/Outbox');
 const { sendEmail } = require('../utils/mail');
 const {
   initiatedTemplate,
@@ -108,7 +109,7 @@ exports.initiateController = async (req, res, next) => {
     const { toEmail, amount, description, transactionFees } = req.body;
     const senderId = req.user.id;
 
-    // lookup destinataire
+    // lookup destinataire dans la base Users
     const receiver = await User.findOne({ email: sanitize(toEmail) }).session(session);
     if (!receiver) throw createError(404, 'Destinataire introuvable');
     if (receiver._id.toString() === senderId) {
@@ -121,16 +122,15 @@ exports.initiateController = async (req, res, next) => {
     if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
     if (isNaN(fees) || fees < 0) throw createError(400, 'Frais invalides');
 
-    // vérifier solde
-    const sender        = await User.findById(senderId).session(session);
+    // récupérer solde depuis la base Users
+    const sender = await User.findById(senderId).select('balance').session(session);
     if (!sender) throw createError(404, 'Expéditeur introuvable');
-    const balFloat      = parseFloat(sender.balance.toString());
-    const totalDebit    = amt + fees;
+    const balFloat   = parseFloat(sender.balance.toString());
+    const totalDebit = amt + fees;
 
     const balStr   = balFloat.toFixed(2);
     const debitStr = totalDebit.toFixed(2);
-    logger.debug(`Solde : ${balStr}€, Total débit : ${debitStr}€`);
-    logger.debug(`Vérif solde — dispo : ${balFloat}, totalDébit : ${totalDebit}`);
+    logger.debug(`Solde Users : ${balStr}€, Total débit : ${debitStr}€`);
 
     if (balFloat < totalDebit) {
       throw createError(
@@ -139,12 +139,12 @@ exports.initiateController = async (req, res, next) => {
       );
     }
 
-    // convertir Decimal128
+    // convertir en Decimal128 pour la base Transactions
     const decAmt  = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
     const token   = Transaction().generateVerificationToken();
 
-    // créer la transaction
+    // créer la transaction dans la base Transactions
     const [tx] = await Transaction().create([{
       sender,
       receiver: receiver._id,
@@ -184,7 +184,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(401, 'Code de confirmation incorrect');
     }
 
-    // débit expéditeur
+    // débit dans la base Users pour vérifier et maintenir la cohérence
     const sender = await User.findOneAndUpdate(
       { _id: tx.sender, balance: { $gte: tx.amount } },
       { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${tx.amount.toString()}`) } },
@@ -195,10 +195,10 @@ exports.confirmController = async (req, res, next) => {
       throw createError(400, 'Solde insuffisant ou expéditeur introuvable');
     }
 
-    // crédit destinataire
+    // crédit dans la base Users
     const receiver = await User.findByIdAndUpdate(
       tx.receiver,
-      { $inc: { balance: tx.amount } },
+      { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
       { new: true, session }
     );
     if (!receiver) {
@@ -206,6 +206,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(404, 'Destinataire introuvable');
     }
 
+    // marquer transaction comme confirmée
     tx.status = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
