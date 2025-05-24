@@ -48,6 +48,7 @@ async function notifyParties(tx, status, session) {
   const commonData = {
     transactionId: tx._id.toString(),
     amount:        tx.amount.toString(),
+    fees:          tx.transactionFees?.toString() || '0.00',
     senderEmail:   sender?.email || '',
     receiverEmail: receiver?.email || '',
     date:          new Date().toLocaleString('fr-FR'),
@@ -72,7 +73,7 @@ async function notifyParties(tx, status, session) {
         sound: 'default',
         title: subject,
         body:  `Montant : ${commonData.amount} €`,
-        data:  { transactionId: commonData.transactionId, status }
+        data:  commonData
       });
     }
   }
@@ -128,21 +129,19 @@ exports.initiateController = async (req, res, next) => {
     const balFloat   = parseFloat(sender.balance.toString());
     const totalDebit = amt + fees;
 
-    const balStr   = balFloat.toFixed(2);
-    const debitStr = totalDebit.toFixed(2);
-    logger.debug(`Solde Users : ${balStr}€, Total débit : ${debitStr}€`);
+    logger.debug(`Solde Users : ${balFloat.toFixed(2)}€, Total débit : ${totalDebit.toFixed(2)}€`);
 
     if (balFloat < totalDebit) {
       throw createError(
         400,
-        `Solde insuffisant : ${balStr}€ disponibles, ${debitStr}€ requis`
+        `Solde insuffisant : ${balFloat.toFixed(2)}€ disponibles, ${totalDebit.toFixed(2)}€ requis`
       );
     }
 
     // convertir en Decimal128 pour la base Transactions
-    const decAmt  = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-    const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const token   = Transaction().generateVerificationToken();
+    const decAmt    = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees   = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
+    const token     = Transaction().generateVerificationToken();
 
     // créer la transaction dans la base Transactions
     const [tx] = await Transaction().create([{
@@ -158,7 +157,7 @@ exports.initiateController = async (req, res, next) => {
     await notifyParties(tx, 'initiated', session);
 
     await session.commitTransaction();
-    return res.status(201).json({ success: true, transactionId: tx._id });
+    return res.status(201).json({ success: true, transactionId: tx._id, verificationToken: token });
   } catch (err) {
     await session.abortTransaction();
     return next(err);
@@ -174,8 +173,9 @@ exports.confirmController = async (req, res, next) => {
     session.startTransaction();
     const { transactionId, token } = req.body;
     const tx = await Transaction().findById(transactionId)
-      .select('+verificationToken')
+      .select('+verificationToken +transactionFees')
       .session(session);
+
     if (!tx || tx.status !== 'pending') {
       throw createError(400, 'Transaction invalide ou déjà traitée');
     }
@@ -184,10 +184,15 @@ exports.confirmController = async (req, res, next) => {
       throw createError(401, 'Code de confirmation incorrect');
     }
 
-    // débit dans la base Users pour vérifier et maintenir la cohérence
+    // Débit total = amount + fees
+    const amtFloat  = parseFloat(tx.amount.toString());
+    const feesFloat = parseFloat(tx.transactionFees.toString());
+    const totalDebit = amtFloat + feesFloat;
+
+    // Enlever montant + frais de l'expéditeur dans la base Users
     const sender = await User.findOneAndUpdate(
-      { _id: tx.sender, balance: { $gte: tx.amount } },
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${tx.amount.toString()}`) } },
+      { _id: tx.sender, balance: { $gte: totalDebit } },
+      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } },
       { new: true, session }
     );
     if (!sender) {
@@ -195,7 +200,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(400, 'Solde insuffisant ou expéditeur introuvable');
     }
 
-    // crédit dans la base Users
+    // Créditer uniquement le montant au destinataire
     const receiver = await User.findByIdAndUpdate(
       tx.receiver,
       { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
@@ -206,7 +211,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(404, 'Destinataire introuvable');
     }
 
-    // marquer transaction comme confirmée
+    // Marquer transaction comme confirmée
     tx.status = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });

@@ -23,6 +23,15 @@ module.exports = conn => {
         message: props => `Le montant doit être au moins 0.01, reçu ${props.value}`
       }
     },
+    transactionFees: {
+      type: Schema.Types.Decimal128,
+      required: true,
+      default: mongoose.Types.Decimal128.fromString('0.00'),
+      validate: {
+        validator: v => parseFloat(v.toString()) >= 0.00,
+        message: props => `Les frais doivent être au moins 0.00, reçus ${props.value}`
+      }
+    },
     status: {
       type: String,
       enum: ['pending', 'confirmed', 'cancelled'],
@@ -52,6 +61,7 @@ module.exports = conn => {
     transform(doc, ret) {
       ret.id = ret._id;
       ret.amount = parseFloat(ret.amount.toString());
+      ret.transactionFees = parseFloat(ret.transactionFees.toString());
       delete ret._id;
       delete ret.verificationToken;
       return ret;
