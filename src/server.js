@@ -14,10 +14,11 @@ const morgan        = require('morgan');
 const rateLimit     = require('express-rate-limit');
 const cors          = require('cors');
 
-const config               = require('./config');
+const config                   = require('./config');
 const { connectTransactionsDB } = require('./config/db');
-const transactionRoutes    = require('./routes/transactionsRoutes');
-const errorHandler         = require('./middleware/errorHandler');
+const transactionRoutes        = require('./routes/transactionsRoutes');
+const notificationRoutes       = require('./routes/notificationRoutes');
+const errorHandler             = require('./middleware/errorHandler');
 
 // Initialise Express
 const app = express();
@@ -33,7 +34,7 @@ app.use(helmet({
   }
 }));
 app.use(hsts({ maxAge: 31536000 }));
-//Si vous souhaitez forcer HTTPS en production, installez express-sslify et décommentez :
+// Forcer HTTPS en production
 const enforceSSL = require('express-sslify').HTTPS;
 if (config.env === 'production') app.use(enforceSSL({ trustProtoHeader: true }));
 
@@ -84,13 +85,14 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'UP', timestamp: new Date().toISOString() });
 });
 
-// === Remettre la route racine ===
+// Route racine
 app.get('/', (_req, res) => {
   res.send('🚀 API PayNoval Transactions Service is running');
 });
 
-// Transactions routes
+// Mount routes
 app.use('/api/v1/transactions', transactionRoutes);
+app.use('/api/v1/notifications', notificationRoutes);
 
 // 404 handler
 app.use((req, res) => {

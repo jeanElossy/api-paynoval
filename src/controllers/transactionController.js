@@ -8,8 +8,9 @@ const Transaction   = () => getTxConn().model('Transaction'); // utilise txConn
 const logger        = require('../utils/logger');
 
 // User est lié à la connexion par défaut → Base Users
-const User   = require('../models/User');
-const Outbox = require('../models/Outbox');
+const User         = require('../models/User');
+const Outbox       = require('../models/Outbox');
+const Notification = require('../models/Notification');
 const { sendEmail } = require('../utils/mail');
 const {
   initiatedTemplate,
@@ -99,6 +100,15 @@ async function notifyParties(tx, status, session) {
     }));
   if (events.length) {
     await Outbox.insertMany(events, { session });
+
+    // === création immédiate en base pour notifications in-app ===
+    const inAppDocs = events.map(e => ({
+      recipient: e.payload.userId,
+      type:      e.payload.type,
+      data:      e.payload.data,
+      read:      false
+    }));
+    await Notification.insertMany(inAppDocs, { session });
   }
 }
 
@@ -144,7 +154,7 @@ exports.initiateController = async (req, res, next) => {
     const token     = Transaction().generateVerificationToken();
 
     // créer la transaction dans la base Transactions
-    const [tx] = await Transaction().create([{
+    const [tx] = await Transaction().create([{        
       sender,
       receiver: receiver._id,
       amount: decAmt,
