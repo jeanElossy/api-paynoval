@@ -13,13 +13,13 @@ const Outbox       = require('../models/Outbox');
 const Notification = require('../models/Notification');
 const { sendEmail } = require('../utils/mail');
 const {
-  initiatedTemplate,
-  confirmedTemplate,
-  cancelledTemplate
+    initiatedTemplate,
+    confirmedTemplate,
+    cancelledTemplate
 } = require('../utils/emailTemplates');
 
 const sanitize = text =>
-  text.toString().replace(/[<>\\/{};]/g, '').trim();
+    text.toString().replace(/[<>\\/{};]/g, '').trim();
 
 /** Notifications email, push & in-app */
 async function notifyParties(tx, status, session) {
@@ -103,13 +103,13 @@ async function notifyParties(tx, status, session) {
 
     // === création immédiate en base pour notifications in-app ===
     const inAppDocs = events.map(e => ({
-      recipient: e.payload.userId,
-      type:      e.payload.type,
-      data:      e.payload.data,
-      read:      false
+    recipient: e.payload.userId,
+    type:      e.payload.type,
+    data:      e.payload.data,
+    read:      false
     }));
     await Notification.insertMany(inAppDocs, { session });
-  }
+    }
 }
 
 /** POST /transactions/initiate */
@@ -178,61 +178,61 @@ exports.initiateController = async (req, res, next) => {
 
 /** POST /transactions/confirm */
 exports.confirmController = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
-    const { transactionId, token } = req.body;
-    const tx = await Transaction().findById(transactionId)
-      .select('+verificationToken +transactionFees')
-      .session(session);
+    const session = await mongoose.startSession();
+    try {
+        session.startTransaction();
+        const { transactionId, token } = req.body;
+        const tx = await Transaction().findById(transactionId)
+        .select('+verificationToken +transactionFees')
+        .session(session);
 
-    if (!tx || tx.status !== 'pending') {
-      throw createError(400, 'Transaction invalide ou déjà traitée');
+        if (!tx || tx.status !== 'pending') {
+        throw createError(400, 'Transaction invalide ou déjà traitée');
+        }
+        if (!tx.verifyToken(sanitize(token))) {
+        await notifyParties(tx, 'cancelled', session);
+        throw createError(401, 'Code de confirmation incorrect');
+        }
+
+        // Débit total = amount + fees
+        const amtFloat  = parseFloat(tx.amount.toString());
+        const feesFloat = parseFloat(tx.transactionFees.toString());
+        const totalDebit = amtFloat + feesFloat;
+
+        // Enlever montant + frais de l'expéditeur dans la base Users
+        const sender = await User.findOneAndUpdate(
+        { _id: tx.sender, balance: { $gte: totalDebit } },
+        { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } },
+        { new: true, session }
+        );
+        if (!sender) {
+        await notifyParties(tx, 'cancelled', session);
+        throw createError(400, 'Solde insuffisant ou expéditeur introuvable');
+        }
+
+        // Créditer uniquement le montant au destinataire
+        const receiver = await User.findByIdAndUpdate(
+        tx.receiver,
+        { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
+        { new: true, session }
+        );
+        if (!receiver) {
+        await notifyParties(tx, 'cancelled', session);
+        throw createError(404, 'Destinataire introuvable');
+        }
+
+        // Marquer transaction comme confirmée
+        tx.status = 'confirmed';
+        tx.confirmedAt = new Date();
+        await tx.save({ session });
+
+        await notifyParties(tx, 'confirmed', session);
+        await session.commitTransaction();
+        return res.json({ success: true });
+    } catch (err) {
+        await session.abortTransaction();
+        return next(err);
+    } finally {
+        session.endSession();
     }
-    if (!tx.verifyToken(sanitize(token))) {
-      await notifyParties(tx, 'cancelled', session);
-      throw createError(401, 'Code de confirmation incorrect');
-    }
-
-    // Débit total = amount + fees
-    const amtFloat  = parseFloat(tx.amount.toString());
-    const feesFloat = parseFloat(tx.transactionFees.toString());
-    const totalDebit = amtFloat + feesFloat;
-
-    // Enlever montant + frais de l'expéditeur dans la base Users
-    const sender = await User.findOneAndUpdate(
-      { _id: tx.sender, balance: { $gte: totalDebit } },
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } },
-      { new: true, session }
-    );
-    if (!sender) {
-      await notifyParties(tx, 'cancelled', session);
-      throw createError(400, 'Solde insuffisant ou expéditeur introuvable');
-    }
-
-    // Créditer uniquement le montant au destinataire
-    const receiver = await User.findByIdAndUpdate(
-      tx.receiver,
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
-      { new: true, session }
-    );
-    if (!receiver) {
-      await notifyParties(tx, 'cancelled', session);
-      throw createError(404, 'Destinataire introuvable');
-    }
-
-    // Marquer transaction comme confirmée
-    tx.status = 'confirmed';
-    tx.confirmedAt = new Date();
-    await tx.save({ session });
-
-    await notifyParties(tx, 'confirmed', session);
-    await session.commitTransaction();
-    return res.json({ success: true });
-  } catch (err) {
-    await session.abortTransaction();
-    return next(err);
-  } finally {
-    session.endSession();
-  }
 };
