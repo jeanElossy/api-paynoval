@@ -19,7 +19,7 @@ const commonStyles = `
 
 /**
  * Email template pour l'expéditeur lors d'une transaction initiée
- * params: { amount, currency, name, transactionId, date }
+ * params: { amount, currency, name, transactionId, date, senderEmail, receiverEmail }
  */
 function initiatedSenderTemplate({ amount, currency, name, transactionId, date, senderEmail, receiverEmail }) {
   return `
