@@ -47,8 +47,8 @@ function initiatedSenderTemplate({
       <table class="details">
         <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
         <tr><th>Montant</th><td>${amount} ${localCurrencySymbol}</td></tr>
-        <tr><th>Expediteur</th><td>${senderEmail} ${localCurrencySymbol}</td></tr>
-        <tr><th>Destinataire</th><td>${receiverEmail} ${localCurrencySymbol}</td></tr>
+        <tr><th>Expediteur</th><td>${senderEmail}</td></tr>
+        <tr><th>Destinataire</th><td>${receiverEmail}</td></tr>
         <tr><th>Date</th><td>${date}</td></tr>
       </table>
 
@@ -86,7 +86,7 @@ function initiatedReceiverTemplate({
 </head>
 <body>
   <div class="container">
-    <div class="header" style="background-color:#FFA000;"><h1>Validation requise</h1></div>
+    <div class="header" style="background-color:#4CAF50;"><h1>Validation requise</h1></div>
     <div class="content">
       <p>Bonjour ${nameDestinataire},</p>
       <p>Vous avez reçu une transaction en attente de validation.</p>

@@ -32,6 +32,16 @@ module.exports = conn => {
         message: props => `Les frais doivent être au moins 0.00, reçus ${props.value}`
       }
     },
+    // Nouveau champ pour la devise locale
+    localCurrencySymbol: {
+      type: String,
+      required: true
+    },
+    // Nouveau champ pour stocker le nom saisi du destinataire
+    nameDestinataire: {
+      type: String,
+      required: true
+    },
     status: {
       type: String,
       enum: ['pending', 'confirmed', 'cancelled'],
@@ -62,6 +72,9 @@ module.exports = conn => {
       ret.id = ret._id;
       ret.amount = parseFloat(ret.amount.toString());
       ret.transactionFees = parseFloat(ret.transactionFees.toString());
+      // rendre la devise et le nom destinataire dans l'output
+      ret.localCurrencySymbol = ret.localCurrencySymbol;
+      ret.nameDestinataire = ret.nameDestinataire;
       delete ret._id;
       delete ret.verificationToken;
       return ret;
