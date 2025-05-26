@@ -25,32 +25,42 @@ const {
 const sanitize = text =>
   text.toString().replace(/[<>\\/{};]/g, '').trim();
 
-/** Notifications email, push & in-app */
-async function notifyParties(tx, status, session, senderCurrency) {
-  // Récupère expéditeur & destinataire
-  const [sender, receiver] = await Promise.all([
-    User.findById(tx.sender)
-      .select('email pushToken firstName')
-      .session(session),
-    User.findById(tx.receiver)
-      .select('email pushToken')
-      .session(session)
-  ]);
+/**
+ * Notifications email, push & in-app
+ * @param {Document} tx - Transaction Mongoose document
+ * @param {string} status - 'initiated' | 'confirmed' | 'cancelled'
+ * @param {ClientSession} session - Mongoose session
+ * @param {string} senderCurrency - symbole de la devise de l'expéditeur
+ */
 
+async function notifyParties(tx, status, session, senderCurrency) {
+  // 1) Récupération de l’expéditeur (profil principal) et du destinataire (DB Transactions)
+  const sender = await User.findById(tx.sender)
+    .select('email pushToken firstName lastName')
+    .session(session);
+  const receiver = await User.findById(tx.receiver)
+    .select('email pushToken')
+    .session(session);
+
+  // 2) Préparer la date et les liens de confirmation
   const commonDate = new Date().toLocaleString('fr-FR');
   const confirmLinkMobile = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
   const confirmLinkWeb    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
 
-  // Data pour l'expéditeur
+  // 3) Construire le nom complet de l’expéditeur
+  const fullNameSender = [sender.firstName, sender.lastName]
+    .filter(Boolean)
+    .join(' ');
+
+  // 4) Préparer les données spécifiques à chaque partie
   const dataSender = {
     transactionId: tx._id.toString(),
     amount:        tx.amount.toString(),
     currency:      senderCurrency,
-    name:          sender.firstName,
+    name:          fullNameSender,
     date:          commonDate
   };
 
-  // Data pour le destinataire
   const dataReceiver = {
     transactionId: tx._id.toString(),
     amount:        tx.localAmount.toString(),
@@ -61,7 +71,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
     confirmLink:   confirmLinkMobile
   };
 
-  // Envoi des emails
+  // 5) Envoi des emails
   if (sender.email) {
     let htmlSender;
     switch (status) {
@@ -75,7 +85,11 @@ async function notifyParties(tx, status, session, senderCurrency) {
         htmlSender = cancelledSenderTemplate({ ...dataSender, reason: tx.cancelReason });
         break;
     }
-    await sendEmail({ to: sender.email, subject: `Transaction ${status}`, html: htmlSender });
+    await sendEmail({
+      to:      sender.email,
+      subject: `Transaction ${status}`,
+      html:    htmlSender
+    });
   }
 
   if (receiver.email) {
@@ -91,10 +105,14 @@ async function notifyParties(tx, status, session, senderCurrency) {
         htmlReceiver = cancelledReceiverTemplate({ ...dataReceiver, reason: tx.cancelReason });
         break;
     }
-    await sendEmail({ to: receiver.email, subject: `Transaction ${status}`, html: htmlReceiver });
+    await sendEmail({
+      to:      receiver.email,
+      subject: `Transaction ${status}`,
+      html:    htmlReceiver
+    });
   }
 
-  // Push notifications
+  // 6) Push notifications via Expo
   const messages = [sender, receiver].reduce((acc, user) => {
     const isSender = user._id.equals(sender._id);
     const payload  = isSender ? dataSender : dataReceiver;
@@ -110,11 +128,14 @@ async function notifyParties(tx, status, session, senderCurrency) {
     return acc;
   }, []);
   for (const chunk of expo.chunkPushNotifications(messages)) {
-    try { await expo.sendPushNotificationsAsync(chunk); }
-    catch (err) { logger.error('Expo push error:', err); }
+    try {
+      await expo.sendPushNotificationsAsync(chunk);
+    } catch (err) {
+      logger.error('Expo push error:', err);
+    }
   }
 
-  // In-app notifications
+  // 7) Notifications in-app via Outbox & Notification
   const events = [sender, receiver].map(user => {
     const payload = user._id.equals(sender._id) ? dataSender : dataReceiver;
     return {
@@ -123,10 +144,17 @@ async function notifyParties(tx, status, session, senderCurrency) {
       payload: { userId: user._id, type: `transaction_${status}`, data: payload }
     };
   });
+
   await Outbox.insertMany(events, { session });
-  const docs = events.map(e => ({ recipient: e.payload.userId, type: e.payload.type, data: e.payload.data, read: false }));
-  await Notification.insertMany(docs, { session });
+  const inAppDocs = events.map(e => ({
+    recipient: e.payload.userId,
+    type:      e.payload.type,
+    data:      e.payload.data,
+    read:      false
+  }));
+  await Notification.insertMany(inAppDocs, { session });
 }
+
 
 /** POST /transactions/initiate */
 exports.initiateController = async (req, res, next) => {

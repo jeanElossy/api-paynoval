@@ -21,7 +21,7 @@ const commonStyles = `
  * Email template pour l'expéditeur lors d'une transaction initiée
  * params: { amount, currency, name, transactionId, date }
  */
-function initiatedSenderTemplate({ amount, currency, name, transactionId, date }) {
+function initiatedSenderTemplate({ amount, currency, name, transactionId, date, senderEmail, receiverEmail }) {
   return `
 <!DOCTYPE html>
 <html lang="fr">
@@ -40,6 +40,8 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date }
       <table class="details">
         <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
         <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+        <tr><th>Expéditeur</th><td>${senderEmail}</td></tr>
+        <tr><th>Destinataire</th><td>${receiverEmail}</td></tr>
         <tr><th>Date</th><td>${date}</td></tr>
       </table>
       <p>Demandez au destinataire de valider la transaction en saisissant la phrase secrète.</p>
@@ -80,7 +82,7 @@ function initiatedReceiverTemplate({ amount, currency, name, senderEmail, transa
       </table>
       <p>Vos transactions en attente seront annulées après 10 jours.</p>
       <p>Pour valider cette transaction, cliquez sur :</p>
-      <p><a href="${confirmLink}" class="button" style="background:#0D7E58;color:#fff;">Valider</a></p>
+      <p><a href="${confirmLink}" class="button" style="background:#0D7E58;color:#fff;">Valider la transaction</a></p>
     </div>
     <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
   </div>
