@@ -26,110 +26,106 @@ const sanitize = text =>
   text.toString().replace(/[<>\\/{};]/g, '').trim();
 
 /** Notifications email, push & in-app */
-async function notifyParties(tx, status, session) {
+async function notifyParties(tx, status, session, senderCurrency) {
   // Récupère expéditeur & destinataire
   const [sender, receiver] = await Promise.all([
     User.findById(tx.sender)
-      .select('email pushToken firstName currencySymbol')
+      .select('email pushToken firstName')
       .session(session),
     User.findById(tx.receiver)
-      .select('email pushToken firstName')
+      .select('email pushToken')
       .session(session)
   ]);
 
-  // Données communes
-  const commonData = {
-    transactionId:       tx._id.toString(),
-    amount:              tx.amount.toString(),
-    localCurrencySymbol: tx.localCurrencySymbol || sender.currencySymbol,
-    date:                new Date().toLocaleString('fr-FR'),
-    confirmLink:         `myapp://confirm/${tx._id}?token=${tx.verificationToken}`,
-    nameExpediteur:      sender.firstName,
-    nameDestinataire:    tx.nameDestinataire || receiver.firstName,
-    senderEmail:         sender.email,
-    receiverEmail:       receiver.email
+  const commonDate = new Date().toLocaleString('fr-FR');
+  const confirmLinkMobile = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
+  const confirmLinkWeb    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
+
+  // Data pour l'expéditeur
+  const dataSender = {
+    transactionId: tx._id.toString(),
+    amount:        tx.amount.toString(),
+    currency:      senderCurrency,
+    name:          sender.firstName,
+    date:          commonDate
+  };
+
+  // Data pour le destinataire
+  const dataReceiver = {
+    transactionId: tx._id.toString(),
+    amount:        tx.localAmount.toString(),
+    currency:      tx.localCurrencySymbol,
+    name:          tx.nameDestinataire,
+    senderEmail:   sender.email,
+    date:          commonDate,
+    confirmLink:   confirmLinkMobile
   };
 
   // Envoi des emails
-  // Expéditeur
   if (sender.email) {
-    let html;
+    let htmlSender;
     switch (status) {
       case 'initiated':
-        html = initiatedSenderTemplate(commonData);
+        htmlSender = initiatedSenderTemplate(dataSender);
         break;
       case 'confirmed':
-        html = confirmedSenderTemplate(commonData);
+        htmlSender = confirmedSenderTemplate(dataSender);
         break;
       case 'cancelled':
-        html = cancelledSenderTemplate({
-          ...commonData,
-          reason: tx.cancelReason
-        });
+        htmlSender = cancelledSenderTemplate({ ...dataSender, reason: tx.cancelReason });
         break;
     }
-    await sendEmail({ to: sender.email, subject: `Transaction ${status}`, html });
+    await sendEmail({ to: sender.email, subject: `Transaction ${status}`, html: htmlSender });
   }
 
-  // Destinataire
   if (receiver.email) {
-    let html;
+    let htmlReceiver;
     switch (status) {
       case 'initiated':
-        html = initiatedReceiverTemplate(commonData);
+        htmlReceiver = initiatedReceiverTemplate(dataReceiver);
         break;
       case 'confirmed':
-        html = confirmedReceiverTemplate(commonData);
+        htmlReceiver = confirmedReceiverTemplate(dataReceiver);
         break;
       case 'cancelled':
-        html = cancelledReceiverTemplate({
-          ...commonData,
-          reason: tx.cancelReason
-        });
+        htmlReceiver = cancelledReceiverTemplate({ ...dataReceiver, reason: tx.cancelReason });
         break;
     }
-    await sendEmail({ to: receiver.email, subject: `Transaction ${status}`, html });
+    await sendEmail({ to: receiver.email, subject: `Transaction ${status}`, html: htmlReceiver });
   }
 
   // Push notifications
-  const pushMessages = [sender, receiver].reduce((acc, u) => {
-    if (u?.pushToken && Expo.isExpoPushToken(u.pushToken)) {
+  const messages = [sender, receiver].reduce((acc, user) => {
+    const isSender = user._id.equals(sender._id);
+    const payload  = isSender ? dataSender : dataReceiver;
+    if (user.pushToken && Expo.isExpoPushToken(user.pushToken)) {
       acc.push({
-        to: u.pushToken,
+        to:    user.pushToken,
         sound: 'default',
         title: `Transaction ${status}`,
-        body: `Montant : ${commonData.amount} ${commonData.localCurrencySymbol}`,
-        data: commonData
+        body:  `Montant : ${payload.amount} ${payload.currency}`,
+        data:  payload
       });
     }
     return acc;
   }, []);
-  for (const chunk of expo.chunkPushNotifications(pushMessages)) {
-    try {
-      await expo.sendPushNotificationsAsync(chunk);
-    } catch (err) {
-      logger.error('Expo push error:', err);
-    }
+  for (const chunk of expo.chunkPushNotifications(messages)) {
+    try { await expo.sendPushNotificationsAsync(chunk); }
+    catch (err) { logger.error('Expo push error:', err); }
   }
 
   // In-app notifications
-  const events = [sender, receiver]
-    .filter(Boolean)
-    .map(u => ({
+  const events = [sender, receiver].map(user => {
+    const payload = user._id.equals(sender._id) ? dataSender : dataReceiver;
+    return {
       service: 'notifications',
       event:   `transaction_${status}`,
-      payload: { userId: u._id, type: `transaction_${status}`, data: commonData }
-    }));
-  if (events.length) {
-    await Outbox.insertMany(events, { session });
-    const inAppDocs = events.map(e => ({
-      recipient: e.payload.userId,
-      type:      e.payload.type,
-      data:      e.payload.data,
-      read:      false
-    }));
-    await Notification.insertMany(inAppDocs, { session });
-  }
+      payload: { userId: user._id, type: `transaction_${status}`, data: payload }
+    };
+  });
+  await Outbox.insertMany(events, { session });
+  const docs = events.map(e => ({ recipient: e.payload.userId, type: e.payload.type, data: e.payload.data, read: false }));
+  await Notification.insertMany(docs, { session });
 }
 
 /** POST /transactions/initiate */
@@ -142,51 +138,36 @@ exports.initiateController = async (req, res, next) => {
       amount,
       description,
       transactionFees,
+      localAmount,
       localCurrencySymbol,
-      recipientInfo
+      recipientInfo,
+      senderCurrencySymbol
     } = req.body;
     const senderId = req.user.id;
 
-    const receiver = await User.findOne({ email: sanitize(toEmail) })
-      .session(session);
+    const receiver = await User.findOne({ email: sanitize(toEmail) }).session(session);
     if (!receiver) throw createError(404, 'Destinataire introuvable');
-    if (receiver._id.toString() === senderId)
-      throw createError(400, 'Auto-transfert impossible');
+    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
 
     const amt  = parseFloat(amount);
     const fees = parseFloat(transactionFees) || 0;
     if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
 
-    const sender = await User.findById(senderId)
-      .select('balance firstName currencySymbol')
-      .session(session);
+    const sender = await User.findById(senderId).select('balance firstName').session(session);
     if (!sender) throw createError(404, 'Expéditeur introuvable');
 
     const balFloat = parseFloat(sender.balance.toString());
-    const totalDebit = amt + fees;
-    if (balFloat < totalDebit) {
-      throw createError(400, `Solde insuffisant : ${balFloat.toFixed(2)} disponible`);
-    }
+    if (balFloat < amt + fees) throw createError(400, `Solde insuffisant : ${balFloat.toFixed(2)} disponible`);
 
-    const decAmt  = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-    const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const token   = Transaction().generateVerificationToken();
+    const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
+    const decLocalAmt = mongoose.Types.Decimal128.fromString(localAmount.toFixed(2));
+    const token       = Transaction().generateVerificationToken();
+    const nameDest    = sanitize(recipientInfo.name) || receiver.firstName;
 
-    // Extraction du nom du destinataire depuis recipientInfo
-    const nameDestinataire = recipientInfo?.name || receiver.firstName;
+    const [tx] = await Transaction().create([{ sender: sender._id, receiver: receiver._id, amount: decAmt, transactionFees: decFees, localAmount: decLocalAmt, localCurrencySymbol, nameDestinataire: nameDest, verificationToken: token, description: sanitize(description) }], { session });
 
-    const [tx] = await Transaction().create([{
-      sender:            sender._id,
-      receiver:          receiver._id,
-      amount:            decAmt,
-      transactionFees:   decFees,
-      verificationToken: token,
-      description:       sanitize(description),
-      localCurrencySymbol,
-      nameDestinataire
-    }], { session });
-
-    await notifyParties(tx, 'initiated', session);
+    await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
     await session.commitTransaction();
     res.status(201).json({ success: true, transactionId: tx._id, verificationToken: token });
   } catch (err) {
@@ -202,16 +183,14 @@ exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-    const { transactionId, token } = req.body;
+    const { transactionId, token, senderCurrencySymbol } = req.body;
     const tx = await Transaction().findById(transactionId)
-      .select('+verificationToken +transactionFees +localCurrencySymbol +nameDestinataire')
+      .select('+verificationToken +transactionFees +localCurrencySymbol +nameDestinataire +localAmount')
       .session(session);
 
-    if (!tx || tx.status !== 'pending') {
-      throw createError(400, 'Transaction invalide ou déjà traitée');
-    }
+    if (!tx || tx.status !== 'pending') throw createError(400, 'Transaction invalide ou déjà traitée');
     if (!tx.verifyToken(sanitize(token))) {
-      await notifyParties(tx, 'cancelled', session);
+      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
       throw createError(401, 'Code de confirmation incorrect');
     }
 
@@ -219,31 +198,17 @@ exports.confirmController = async (req, res, next) => {
     const feesFloat = parseFloat(tx.transactionFees.toString());
     const totalDebit = amtFloat + feesFloat;
 
-    const sender = await User.findOneAndUpdate(
-      { _id: tx.sender, balance: { $gte: totalDebit } },
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } },
-      { new: true, session }
-    );
-    if (!sender) {
-      await notifyParties(tx, 'cancelled', session);
-      throw createError(400, 'Solde insuffisant');
-    }
+    const sender = await User.findOneAndUpdate({ _id: tx.sender, balance: { $gte: totalDebit } }, { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } }, { new: true, session });
+    if (!sender) { await notifyParties(tx, 'cancelled', session, senderCurrencySymbol); throw createError(400, 'Solde insuffisant'); }
 
-    const receiver = await User.findByIdAndUpdate(
-      tx.receiver,
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
-      { new: true, session }
-    );
-    if (!receiver) {
-      await notifyParties(tx, 'cancelled', session);
-      throw createError(404, 'Destinataire introuvable');
-    }
+    const receiver = await User.findByIdAndUpdate(tx.receiver, { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } }, { new: true, session });
+    if (!receiver) { await notifyParties(tx, 'cancelled', session, senderCurrencySymbol); throw createError(404, 'Destinataire introuvable'); }
 
     tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
-    await notifyParties(tx, 'confirmed', session);
+    await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
     await session.commitTransaction();
     res.json({ success: true });
   } catch (err) {

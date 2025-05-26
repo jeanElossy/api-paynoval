@@ -1,8 +1,12 @@
+// src/models/Transaction.js
+
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { Schema } = mongoose;
 
-// Fonction d'initialisation du modèle Transaction sur une connexion donnée
+/**
+ * Initialise le modèle Transaction sur la connexion passée en paramètre.
+ */
 module.exports = conn => {
   const transactionSchema = new Schema({
     sender: {
@@ -31,6 +35,11 @@ module.exports = conn => {
         validator: v => parseFloat(v.toString()) >= 0.00,
         message: props => `Les frais doivent être au moins 0.00, reçus ${props.value}`
       }
+    },
+    // Nouveau champ pour stocker le montant converti
+    localAmount: {
+      type: Schema.Types.Decimal128,
+      required: true
     },
     // Nouveau champ pour la devise locale
     localCurrencySymbol: {
@@ -62,26 +71,26 @@ module.exports = conn => {
     timestamps: true // createdAt & updatedAt
   });
 
-  // Indexes for efficient queries
+  // Indexes pour accélérer certaines requêtes
   transactionSchema.index({ sender: 1, createdAt: -1 });
   transactionSchema.index({ receiver: 1, status: 1 });
 
-  // Transform output for toJSON/toObject
+  // Transformation lors de toJSON/toObject
   transactionSchema.set('toJSON', {
     transform(doc, ret) {
-      ret.id = ret._id;
-      ret.amount = parseFloat(ret.amount.toString());
-      ret.transactionFees = parseFloat(ret.transactionFees.toString());
-      // rendre la devise et le nom destinataire dans l'output
+      ret.id                  = ret._id;
+      ret.amount              = parseFloat(ret.amount.toString());
+      ret.transactionFees     = parseFloat(ret.transactionFees.toString());
+      ret.localAmount         = parseFloat(ret.localAmount.toString());
       ret.localCurrencySymbol = ret.localCurrencySymbol;
-      ret.nameDestinataire = ret.nameDestinataire;
+      ret.nameDestinataire    = ret.nameDestinataire;
       delete ret._id;
       delete ret.verificationToken;
       return ret;
     }
   });
 
-  // Pre-validate hook: generate token for new transactions
+  // Avant validation, génère un token si nouveau document
   transactionSchema.pre('validate', function(next) {
     if (this.isNew) {
       this.verificationToken = crypto.randomBytes(32).toString('hex');
@@ -89,19 +98,19 @@ module.exports = conn => {
     next();
   });
 
-  // Static method: generateVerificationToken
+  // Méthode statique pour générer un token à la demande
   transactionSchema.statics.generateVerificationToken = function() {
     return crypto.randomBytes(32).toString('hex');
   };
 
-  // Instance method: verifyToken
+  // Méthode d'instance pour vérifier le token
   transactionSchema.methods.verifyToken = function(token) {
     if (!token || !this.verificationToken) return false;
     try {
       const provided = Buffer.from(token, 'hex');
-      const stored = Buffer.from(this.verificationToken, 'hex');
+      const stored   = Buffer.from(this.verificationToken, 'hex');
       return crypto.timingSafeEqual(provided, stored);
-    } catch (err) {
+    } catch {
       return false;
     }
   };
