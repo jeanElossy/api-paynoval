@@ -29,40 +29,40 @@ const sanitize = text =>
  * Notifications email, push & in-app
  * @param {Document} tx - Transaction Mongoose document
  * @param {string} status - 'initiated' | 'confirmed' | 'cancelled'
- * @param {ClientSession} session - Mongoose session
+ * @param {ClientSession} session - Mongoose session (pour les Transactions)
  * @param {string} senderCurrency - symbole de la devise de l'expéditeur
  */
 
 async function notifyParties(tx, status, session, senderCurrency) {
-  // 1) Récupération de l’expéditeur (profil principal) et du destinataire (DB Transactions)
+  // 1) Récupération de l’expéditeur et du destinataire depuis la DB principale (connexion par défaut)
   const sender = await User.findById(tx.sender)
     .select('email pushToken firstName lastName')
-    .session(session);
+    .exec();  // on n'utilise PAS session() car c'est la connexion principale
+
   const receiver = await User.findById(tx.receiver)
     .select('email pushToken')
-    .session(session);
+    .exec();
 
   // 2) Préparer la date et les liens de confirmation
-  const commonDate = new Date().toLocaleString('fr-FR');
+  const commonDate        = new Date().toLocaleString('fr-FR');
   const confirmLinkMobile = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
   const confirmLinkWeb    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
 
-  // 3) Construire le nom complet de l’expéditeur
+  // 3) Construire le nom complet de l'expéditeur
   const fullNameSender = [sender.firstName, sender.lastName]
     .filter(Boolean)
     .join(' ');
 
   // 4) Préparer les données spécifiques à chaque partie
-    const dataSender = {
-        transactionId:  tx._id.toString(),
-        amount:         tx.amount.toString(),
-        currency:       senderCurrency,
-        name:           fullNameSender,
-        senderEmail:    sender.email,
-        receiverEmail:  receiver.email,
-        date:           commonDate
-    };
-
+  const dataSender = {
+    transactionId:  tx._id.toString(),
+    amount:         tx.amount.toString(),
+    currency:       senderCurrency,
+    name:           fullNameSender,
+    senderEmail:    sender.email,
+    receiverEmail:  receiver.email,
+    date:           commonDate
+  };
 
   const dataReceiver = {
     transactionId: tx._id.toString(),
@@ -130,6 +130,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
     }
     return acc;
   }, []);
+
   for (const chunk of expo.chunkPushNotifications(messages)) {
     try {
       await expo.sendPushNotificationsAsync(chunk);
@@ -157,6 +158,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
   }));
   await Notification.insertMany(inAppDocs, { session });
 }
+
 
 
 /** POST /transactions/initiate */
