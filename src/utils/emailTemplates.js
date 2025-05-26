@@ -25,6 +25,8 @@ function initiatedSenderTemplate({
   localCurrencySymbol,
   nameExpediteur,
   transactionId,
+  senderEmail,
+  receiverEmail,
   date
 }) {
   return `
@@ -45,9 +47,15 @@ function initiatedSenderTemplate({
       <table class="details">
         <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
         <tr><th>Montant</th><td>${amount} ${localCurrencySymbol}</td></tr>
+        <tr><th>Expediteur</th><td>${senderEmail} ${localCurrencySymbol}</td></tr>
+        <tr><th>Destinataire</th><td>${receiverEmail} ${localCurrencySymbol}</td></tr>
         <tr><th>Date</th><td>${date}</td></tr>
       </table>
+
+      <p>Demander au destinataire de valider la transaction en saisissant la phrase secrete que vous lui aviez donnée.</p>
+      <p>Vos transactions en attente seront automatiquement annulées dans un delai de 10 jours, a compter du jour de lancement.</p>
     </div>
+
     <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
   </div>
 </body>
@@ -88,9 +96,11 @@ function initiatedReceiverTemplate({
         <tr><th>Expéditeur</th><td>${senderEmail}</td></tr>
         <tr><th>Date</th><td>${date}</td></tr>
       </table>
+      <p>Dans un delai de 10 jours vos transactions en attente seront automatiquement annulées</p>
       <p>Pour valider cette transaction, cliquez sur le bouton ci-dessous :</p>
       <p><a href="${confirmLink}" class="button" style="background:#0D7E58;color:#fff;">Valider</a></p>
     </div>
+
     <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
   </div>
 </body>
