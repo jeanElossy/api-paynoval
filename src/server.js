@@ -2,7 +2,6 @@
 require('dotenv-safe').config({
   allowEmptyValues: false,
 });
-const mongoose      = require('mongoose');
 const express       = require('express');
 const helmet        = require('helmet');
 const hsts          = require('helmet').hsts;
@@ -20,100 +19,66 @@ const { connectTransactionsDB } = require('./config/db');
 const transactionRoutes        = require('./routes/transactionsRoutes');
 const notificationRoutes       = require('./routes/notificationRoutes');
 const errorHandler             = require('./middleware/errorHandler');
+const winston                  = require('winston');
 
 // Initialise Express
 const app = express();
 app.set('trust proxy', 1);
 
-// Security headers + CSP
+// Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      // complétez selon vos besoins
     }
   }
 }));
 app.use(hsts({ maxAge: 31536000 }));
-// Forcer HTTPS en production
-const enforceSSL = require('express-sslify').HTTPS;
-if (config.env === 'production') app.use(enforceSSL({ trustProtoHeader: true }));
+if (config.env === 'production') {
+  const enforceSSL = require('express-sslify').HTTPS;
+  app.use(enforceSSL({ trustProtoHeader: true }));
+}
 
-// CORS strict
-app.use(cors({
-  origin: config.cors.origin,
-  credentials: true
-}));
+// CORS
+app.use(cors({ origin: config.cors.origin, credentials: true }));
 
 // Parsing & sanitization
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-app.use(cookieParser({
-  httpOnly: true,
-  secure: config.env === 'production',
-  sameSite: 'strict',
-}));
+app.use(cookieParser({ httpOnly: true, secure: config.env === 'production', sameSite: 'strict' }));
 app.use(mongoSanitize());
 app.use(xssClean());
 app.use(hpp());
 
 // Compression & logging
 app.use(compression());
-const winston = require('winston');
-const logger  = winston.createLogger({
-  level: 'info',
-  format: winston.format.json(),
-  transports: [ new winston.transports.Console() ],
-});
-app.use(morgan('combined', {
-  stream: { write: msg => logger.info(msg.trim()) }
-}));
+const logger = winston.createLogger({ level: 'info', format: winston.format.json(), transports: [ new winston.transports.Console() ] });
+app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
-// Rate limiter en mémoire
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    error: 'Trop de requêtes, veuillez réessayer plus tard.'
-  }
-}));
+// Rate limiter
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { success: false, error: 'Trop de requêtes, veuillez réessayer plus tard.' } }));
 
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'UP', timestamp: new Date().toISOString() });
-});
+// Health check & root
+app.get('/health', (_req, res) => res.json({ status: 'UP', timestamp: new Date().toISOString() }));
+app.get('/', (_req, res) => res.send('🚀 API PayNoval Transactions Service is running'));
 
-// Route racine
-app.get('/', (_req, res) => {
-  res.send('🚀 API PayNoval Transactions Service is running');
-});
-
-// Mount routes
+// Routes
 app.use('/api/v1/transactions', transactionRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 
 // 404 handler
-app.use((req, res) => {
-  res.status(404).json({ success: false, error: 'Ressource non trouvée' });
-});
+app.use((req, res) => res.status(404).json({ success: false, error: 'Ressource non trouvée' }));
 
-// Global error handler
+// Error handler
 app.use(errorHandler);
 
 // Connect DBs and start server
 (async () => {
   try {
-    // Connexion à la base principale (Users, Notifications, etc.)
-    await mongoose.connect(config.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-    logger.info('✅ DB principale connectée');
-
-    // Connexion à la base Transactions
+    // Connexion aux DB Users & Transactions
     await connectTransactionsDB();
-    logger.info('✅ DB Transactions connectée');
 
+    // Démarrage du serveur
     app.listen(config.port, () => {
       logger.info(`🚀 Service transactions démarré sur le port ${config.port}`);
     });
