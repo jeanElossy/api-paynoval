@@ -2,6 +2,7 @@
 require('dotenv-safe').config({
   allowEmptyValues: false,
 });
+const mongoose      = require('mongoose');
 const express       = require('express');
 const helmet        = require('helmet');
 const hsts          = require('helmet').hsts;
@@ -102,10 +103,17 @@ app.use((req, res) => {
 // Global error handler
 app.use(errorHandler);
 
-// Connect DB and start server
+// Connect DBs and start server
 (async () => {
   try {
+    // Connexion à la base principale (Users, Notifications, etc.)
+    await mongoose.connect(config.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+    logger.info('✅ DB principale connectée');
+
+    // Connexion à la base Transactions
     await connectTransactionsDB();
+    logger.info('✅ DB Transactions connectée');
+
     app.listen(config.port, () => {
       logger.info(`🚀 Service transactions démarré sur le port ${config.port}`);
     });

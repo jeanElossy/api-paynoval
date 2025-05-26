@@ -47,7 +47,7 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
           <h1>Transaction lancée</h1>
         </div>
         <div class="content">
-          <p class="greeting">Bonjour ${name},</p>
+          <p class="greeting">Bonjour ${name || 'utilisateur'},</p>
           <p class="message">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
           <table class="details">
             <tr><th>ID Transaction</th><td>${transactionId}</td></tr>

@@ -1,3 +1,4 @@
+// src/config/db.js
 const mongoose = require('mongoose');
 const config   = require('../config');
 
@@ -12,26 +13,28 @@ async function connectTransactionsDB() {
     useNewUrlParser:    true,
     useUnifiedTopology: true,
     serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS:     45000,
+    socketTimeoutMS:          45000,
   };
 
   // Connexion à la base Users sur la connexion mongoose par défaut
   await mongoose.connect(uriUsers, opts);
-  console.log(`✅ DB Users (par défaut) connecté : ${mongoose.connection.name}`);
+  console.log(`✅ DB Users (par défaut) connectée : ${mongoose.connection.name}`);
 
   // Création d'une connexion distincte pour Transactions
   txConn = mongoose.createConnection(uriTx, opts);
   txConn.on('connected', () => {
-    console.log(`✅ DB Transactions connecté : ${txConn.db.databaseName}`);
+    console.log(`✅ DB Transactions connectée : ${txConn.db.databaseName}`);
   });
   txConn.on('error', err => {
     console.error('❌ Erreur connexion Transactions DB :', err);
   });
 
-  // Charger les modèles
-  // Le modèle Transaction doit être défini comme une fonction qui prend la connexion en argument
+  // Charger les modèles sur txConn (Transactions, Outbox, Notification)
   require('../models/Transaction')(txConn);
-  // Le modèle User sera automatiquement lié à la connexion par défaut
+  require('../models/Outbox')(txConn);
+  require('../models/Notification')(txConn);
+
+  // Charger le modèle User côté connexion principale
   require('../models/User');
 }
 
