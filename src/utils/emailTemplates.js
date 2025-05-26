@@ -8,8 +8,8 @@ const commonStyles = `
     body { margin:0; padding:0; background-color:#f4f4f7; font-family: 'Helvetica Neue', Arial, sans-serif; color:#333; }
     .wrapper { width:100%; table-layout:fixed; background-color:#f4f4f7; padding: 40px 0; }
     .container { background-color:#fff; width:90%; max-width:600px; margin:0 auto; border-radius:8px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.1); }
-    .header { background-color:#0D7E58; padding:20px; display:flex; align-items:center; }
-    .logo { height:50px; margin-right:auto; }
+    .header { background-color:#0D7E58; padding:20px; display:flex; align-items:center; justify-content: center;}
+    .logo { height:60px; margin-right:auto; }
     .header h1 { margin:0 auto 0 0; color:#fff; font-size:24px; flex:1; text-align:center; }
     .content { padding:30px; }
     .greeting { font-size:18px; margin-bottom:20px; }
@@ -47,7 +47,7 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
           <h1>Transaction lancée</h1>
         </div>
         <div class="content">
-          <p class="greeting">Bonjour, </p>
+          <p class="greeting">Bonjour ${name},</p>
           <p class="message">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
           <table class="details">
             <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
@@ -66,6 +66,7 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
   </html>
   `;
 }
+
 
 /**
  * Template moderne pour le destinataire lors d'une transaction initiée

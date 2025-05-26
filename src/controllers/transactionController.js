@@ -51,6 +51,8 @@ async function notifyParties(tx, status, session, senderCurrency) {
   // 3) Utiliser fullName directement
   const fullNameSender = sender.fullName;
 
+  console.log('[DEBUG] sender.fullName =', sender.fullName);
+
   // 4) Préparer les données spécifiques à chaque partie
   const dataSender = {
     transactionId:  tx._id.toString(),
@@ -86,6 +88,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
         htmlSender = cancelledSenderTemplate({ ...dataSender, reason: tx.cancelReason });
         break;
     }
+    console.log('[DEBUG] HTML Sender Template:', htmlSender);
     await sendEmail({
       to:      sender.email,
       subject: `Transaction ${status}`,
