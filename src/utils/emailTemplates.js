@@ -43,11 +43,11 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
     <div class="wrapper">
       <div class="container">
         <div class="header">
-          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Transaction lancée</h1>
         </div>
         <div class="content">
-          <p class="greeting">Bonjour ${name},</p>
+          <p class="greeting">Bonjour ${name || senderEmail},</p>
           <p class="message">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
           <table class="details">
             <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
@@ -84,7 +84,7 @@ function initiatedReceiverTemplate({ amount, currency, name, senderEmail, transa
     <div class="wrapper">
       <div class="container">
         <div class="header">
-          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Validation requise</h1>
         </div>
         <div class="content">
@@ -124,7 +124,7 @@ function confirmedSenderTemplate({ amount, currency, name, transactionId, date }
     <div class="wrapper">
       <div class="container">
         <div class="header">
-          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Transaction confirmée</h1>
         </div>
         <div class="content">
@@ -159,7 +159,7 @@ function confirmedReceiverTemplate({ amount, currency, name, transactionId, date
     <div class="wrapper">
       <div class="container">
       <div class="header">
-          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Transaction confirmée</h1>
         </div>
         <div class="content">
@@ -194,7 +194,7 @@ function cancelledSenderTemplate({ amount, currency, name, transactionId, date, 
     <div class="wrapper">
       <div class="container">
         <div class="header">
-          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Transaction annulée</h1>
         </div>
         <div class="content">
@@ -229,7 +229,7 @@ function cancelledReceiverTemplate({ amount, currency, name, transactionId, date
     <div class="wrapper">
       <div class="container">
         <div class="header">
-          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Transaction annulée</h1>
         </div>
         <div class="content">
