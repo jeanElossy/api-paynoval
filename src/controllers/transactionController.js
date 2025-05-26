@@ -53,13 +53,16 @@ async function notifyParties(tx, status, session, senderCurrency) {
     .join(' ');
 
   // 4) Préparer les données spécifiques à chaque partie
-  const dataSender = {
-    transactionId: tx._id.toString(),
-    amount:        tx.amount.toString(),
-    currency:      senderCurrency,
-    name:          fullNameSender,
-    date:          commonDate
-  };
+    const dataSender = {
+        transactionId:  tx._id.toString(),
+        amount:         tx.amount.toString(),
+        currency:       senderCurrency,
+        name:           fullNameSender,
+        senderEmail:    sender.email,
+        receiverEmail:  receiver.email,
+        date:           commonDate
+    };
+
 
   const dataReceiver = {
     transactionId: tx._id.toString(),
