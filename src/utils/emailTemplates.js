@@ -1,226 +1,233 @@
 // src/utils/emailTemplates.js
 
 /**
- * Styles communs pour les emails
+ * Styles communs pour les emails (design moderne, style bancaire)
  */
 const commonStyles = `
   <style>
-    body { font-family: Arial, sans-serif; color: #333; margin: 0; padding: 0; }
-    .container { padding: 20px; }
-    .header { padding: 10px; text-align: center; color: white; }
-    .content { margin: 20px 0; }
-    .footer { font-size: 12px; color: #777; text-align: center; margin-top: 30px; }
-    .details { border-collapse: collapse; width: 100%; }
-    .details th, .details td { border: 1px solid #ddd; padding: 8px; }
-    .details th { background-color: #f2f2f2; }
-    .button { display: inline-block; padding: 10px 20px; border-radius: 4px; text-decoration: none; }
+    body { margin:0; padding:0; background-color:#f4f4f7; font-family: 'Helvetica Neue', Arial, sans-serif; color:#333; }
+    .wrapper { width:100%; table-layout:fixed; background-color:#f4f4f7; padding: 40px 0; }
+    .container { background-color:#fff; width:90%; max-width:600px; margin:0 auto; border-radius:8px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.1); }
+    .header { background-color:#004882; padding:20px; text-align:center; }
+    .header h1 { margin:0; color:#fff; font-size:24px; }
+    .content { padding:30px; }
+    .greeting { font-size:18px; margin-bottom:20px; }
+    .message { font-size:16px; line-height:1.5; margin-bottom:25px; }
+    .details { width:100%; margin-bottom:30px; border-collapse:separate; border-spacing:0 8px; }
+    .details th, .details td { padding:12px 15px; text-align:left; }
+    .details th { background-color:#f0f4f8; color:#555; font-weight:600; border-radius:4px 0 0 4px; }
+    .details td { background-color:#fafbfc; border-radius:0 4px 4px 0; }
+    .button-wrap { text-align:center; margin-bottom:30px; }
+    .button { background-color:#004882; color:#fff; text-decoration:none; padding:12px 25px; border-radius:4px; font-weight:600; display:inline-block; }
+    .notice { background-color:#fff4e5; border-left:4px solid #ffc107; padding:15px; margin-bottom:30px; font-size:14px; color:#5a4531; }
+    .footer { background-color:#f0f4f8; text-align:center; padding:20px; font-size:12px; color:#777; }
   </style>
 `;
 
 /**
- * Email template pour l'expéditeur lors d'une transaction initiée
- * params: { amount, currency, name, transactionId, date, senderEmail, receiverEmail }
+ * Template moderne pour l'expéditeur lors d'une transaction initiée
  */
 function initiatedSenderTemplate({ amount, currency, name, transactionId, date, senderEmail, receiverEmail }) {
   return `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Transaction lancée</title>
-  ${commonStyles}
-</head>
-<body>
-  <div class="container">
-    <div class="header" style="background-color:#4CAF50;"><h1>Transaction lancée</h1></div>
-    <div class="content">
-      <p>Bonjour ${name},</p>
-      <p>Votre transaction a bien été lancée. Les fonds seront débloqués une fois le destinataire l'aura validée.</p>
-      <table class="details">
-        <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
-        <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
-        <tr><th>Expéditeur</th><td>${senderEmail}</td></tr>
-        <tr><th>Destinataire</th><td>${receiverEmail}</td></tr>
-        <tr><th>Date</th><td>${date}</td></tr>
-      </table>
-      <p>Demandez au destinataire de valider la transaction en saisissant la phrase secrète.</p>
-      <p>Vos transactions en attente seront automatiquement annulées au bout de 10 jours.</p>
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction lancée</title>
+    ${commonStyles}
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="container">
+        <div class="header"><h1>Transaction lancée</h1></div>
+        <div class="content">
+          <p class="greeting">Bonjour ${name},</p>
+          <p class="message">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
+          <table class="details">
+            <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
+            <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+            <tr><th>Expéditeur</th><td>${senderEmail}</td></tr>
+            <tr><th>Destinataire</th><td>${receiverEmail}</td></tr>
+            <tr><th>Date</th><td>${date}</td></tr>
+          </table>
+          <p class="message">Vos transactions en attente seront automatiquement annulées après 10 jours.</p>
+          <div class="notice">⚠️ Ne partagez jamais vos codes confidentiels ou mots de passe. PayNoval ne vous contactera jamais pour vous les demander. En cas de doute, contactez notre support immédiatement.</div>
+        </div>
+        <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
+      </div>
     </div>
-    <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
-  </div>
-</body>
-</html>
-`;
+  </body>
+  </html>
+  `;
 }
 
 /**
- * Email template pour le destinataire lors d'une transaction initiée
- * params: { amount, currency, name, senderEmail, transactionId, date, confirmLink }
+ * Template moderne pour le destinataire lors d'une transaction initiée
  */
 function initiatedReceiverTemplate({ amount, currency, name, senderEmail, transactionId, date, confirmLink }) {
   return `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Validation requise</title>
-  ${commonStyles}
-</head>
-<body>
-  <div class="container">
-    <div class="header" style="background-color:#4CAF50;"><h1>Validation requise</h1></div>
-    <div class="content">
-      <p>Bonjour ${name},</p>
-      <p>Vous avez reçu une transaction en attente de validation.</p>
-      <table class="details">
-        <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
-        <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
-        <tr><th>Expéditeur</th><td>${senderEmail}</td></tr>
-        <tr><th>Date</th><td>${date}</td></tr>
-      </table>
-      <p>Vos transactions en attente seront annulées après 10 jours.</p>
-      <p>Pour valider cette transaction, cliquez sur :</p>
-      <p><a href="${confirmLink}" class="button" style="background:#0D7E58;color:#fff;">Valider la transaction</a></p>
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Validation requise</title>
+    ${commonStyles}
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="container">
+        <div class="header"><h1>Validation requise</h1></div>
+        <div class="content">
+          <p class="greeting">Bonjour ${name},</p>
+          <p class="message">Vous avez reçu une transaction en attente de validation.</p>
+          <table class="details">
+            <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
+            <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+            <tr><th>Expéditeur</th><td>${senderEmail}</td></tr>
+            <tr><th>Date</th><td>${date}</td></tr>
+          </table>
+          <div class="button-wrap"><a href="${confirmLink}" class="button">Valider la transaction</a></div>
+          <div class="notice">⚠️ PayNoval ne vous demandera jamais de codes confidentiels ou mots de passe par email. Ne partagez rien et signalez toute tentative de fraude.</div>
+        </div>
+        <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
+      </div>
     </div>
-    <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
-  </div>
-</body>
-</html>
-`;
+  </body>
+  </html>
+  `;
 }
 
 /**
- * Email template pour l'expéditeur lors d'une transaction confirmée
- * params: { amount, currency, name, transactionId, date }
+ * Autres templates confirmés et annulés suivent la même structure avec section notice.
  */
 function confirmedSenderTemplate({ amount, currency, name, transactionId, date }) {
   return `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Transaction confirmée</title>
-  ${commonStyles}
-</head>
-<body>
-  <div class="container">
-    <div class="header" style="background-color:#2196F3;"><h1>Transaction confirmée</h1></div>
-    <div class="content">
-      <p>Bonjour ${name},</p>
-      <p>Votre transaction a été validée par le destinataire.</p>
-      <table class="details">
-        <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
-        <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
-        <tr><th>Date</th><td>${date}</td></tr>
-      </table>
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction confirmée</title>
+    ${commonStyles}
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="container">
+        <div class="header" style="background-color:#0056b3;"><h1>Transaction confirmée</h1></div>
+        <div class="content">
+          <p class="greeting">Bonjour ${name},</p>
+          <p class="message">Votre transaction a été validée par le destinataire.</p>
+          <table class="details">
+            <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
+            <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+            <tr><th>Date</th><td>${date}</td></tr>
+          </table>
+          <div class="notice">⚠️ Pour votre sécurité, ne communiquez jamais vos données sensibles. En cas de doute, vérifiez auprès de PayNoval.</div>
+        </div>
+        <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
+      </div>
     </div>
-    <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
-  </div>
-</body>
-</html>
-`;
+  </body>
+  </html>
+  `;
 }
 
-/**
- * Email template pour le destinataire lors d'une transaction confirmée
- * params: { amount, currency, name, transactionId, date }
- */
 function confirmedReceiverTemplate({ amount, currency, name, transactionId, date }) {
   return `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Transaction confirmée</title>
-  ${commonStyles}
-</head>
-<body>
-  <div class="container">
-    <div class="header" style="background-color:#2196F3;"><h1>Transaction confirmée</h1></div>
-    <div class="content">
-      <p>Bonjour ${name},</p>
-      <p>Vous avez validé la transaction avec succès.</p>
-      <table class="details">
-        <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
-        <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
-        <tr><th>Date</th><td>${date}</td></tr>
-      </table>
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction confirmée</title>
+    ${commonStyles}
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="container">
+        <div class="header" style="background-color:#0056b3;"><h1>Transaction confirmée</h1></div>
+        <div class="content">
+          <p class="greeting">Bonjour ${name},</p>
+          <p class="message">Vous avez validé la transaction avec succès.</p>
+          <table class="details">
+            <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
+            <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+            <tr><th>Date</th><td>${date}</td></tr>
+          </table>
+          <div class="notice">⚠️ Soyez vigilant : PayNoval n’enverra jamais de liens non sécurisés. Vérifiez toujours l’URL.</div>
+        </div>
+        <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
+      </div>
     </div>
-    <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
-  </div>
-</body>
-</html>
-`;
+  </body>
+  </html>
+  `;
 }
 
-/**
- * Email template pour l'expéditeur lors d'une transaction annulée
- * params: { amount, currency, name, transactionId, date, reason }
- */
 function cancelledSenderTemplate({ amount, currency, name, transactionId, date, reason }) {
   return `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Transaction annulée</title>
-  ${commonStyles}
-</head>
-<body>
-  <div class="container">
-    <div class="header" style="background-color:#F44336;"><h1>Transaction annulée</h1></div>
-    <div class="content">
-      <p>Bonjour ${name},</p>
-      <p>Votre transaction a été annulée${reason ? ` : ${reason}` : '.'}</p>
-      <table class="details">
-        <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
-        <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
-        <tr><th>Date</th><td>${date}</td></tr>
-      </table>
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction annulée</title>
+    ${commonStyles}
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="container">
+        <div class="header" style="background-color:#b30000;"><h1>Transaction annulée</h1></div>
+        <div class="content">
+          <p class="greeting">Bonjour ${name},</p>
+          <p class="message">Votre transaction a été annulée${reason ? ` : ${reason}` : '.'}</p>
+          <table class="details">
+            <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
+            <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+            <tr><th>Date</th><td>${date}</td></tr>
+          </table>
+          <div class="notice">⚠️ Méfiez-vous des faux emails demandant une annulation. Contactez-nous via l’application.</div>
+        </div>
+        <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
+      </div>
     </div>
-    <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
-  </div>
-</body>
-</html>
-`;
+  </body>
+  </html>
+  `;
 }
 
-/**
- * Email template pour le destinataire lors d'une transaction annulée
- * params: { amount, currency, name, transactionId, date, reason }
- */
 function cancelledReceiverTemplate({ amount, currency, name, transactionId, date, reason }) {
   return `
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Transaction annulée</title>
-  ${commonStyles}
-</head>
-<body>
-  <div class="container">
-    <div class="header" style="background-color:#F44336;"><h1>Transaction annulée</h1></div>
-    <div class="content">
-      <p>Bonjour ${name},</p>
-      <p>La transaction a été annulée${reason ? ` : ${reason}` : '.'}</p>
-      <table class="details">
-        <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
-        <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
-        <tr><th>Date</th><td>${date}</td></tr>
-      </table>
+  <!DOCTYPE html>
+  <html lang="fr">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction annulée</title>
+    ${commonStyles}
+  </head>
+  <body>
+    <div class="wrapper">
+      <div class="container">
+        <div class="header" style="background-color:#b30000;"><h1>Transaction annulée</h1></div>
+        <div class="content">
+          <p class="greeting">Bonjour ${name},</p>
+          <p class="message">La transaction a été annulée${reason ? ` : ${reason}` : '.'}</p>
+          <table class="details">
+            <tr><th>ID Transaction</th><td>${transactionId}</td></tr>
+            <tr><th>Montant</th><td>${amount} ${currency}</td></tr>
+            <tr><th>Date</th><td>${date}</td></tr>
+          </table>
+          <div class="notice">⚠️ Ne jamais cliquer sur des liens suspects. Vérifiez toujours l’expéditeur.</div>
+        </div>
+        <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
+      </div>
     </div>
-    <div class="footer"><p>&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</p></div>
-  </div>
-</body>
-</html>
-`;
+  </body>
+  </html>
+  `;
 }
 
 module.exports = {

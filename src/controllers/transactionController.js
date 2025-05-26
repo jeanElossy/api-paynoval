@@ -36,8 +36,8 @@ const sanitize = text =>
 async function notifyParties(tx, status, session, senderCurrency) {
   // 1) Récupération de l’expéditeur et du destinataire depuis la DB principale (connexion par défaut)
   const sender = await User.findById(tx.sender)
-    .select('email pushToken firstName lastName')
-    .exec();  // on n'utilise PAS session() car c'est la connexion principale
+    .select('email pushToken fullName')
+    .exec(); // on n'utilise PAS session() car c'est la connexion principale
 
   const receiver = await User.findById(tx.receiver)
     .select('email pushToken')
@@ -48,10 +48,8 @@ async function notifyParties(tx, status, session, senderCurrency) {
   const confirmLinkMobile = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
   const confirmLinkWeb    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
 
-  // 3) Construire le nom complet de l'expéditeur
-  const fullNameSender = [sender.firstName, sender.lastName]
-    .filter(Boolean)
-    .join(' ');
+  // 3) Utiliser fullName directement
+  const fullNameSender = sender.fullName;
 
   // 4) Préparer les données spécifiques à chaque partie
   const dataSender = {
@@ -130,7 +128,6 @@ async function notifyParties(tx, status, session, senderCurrency) {
     }
     return acc;
   }, []);
-
   for (const chunk of expo.chunkPushNotifications(messages)) {
     try {
       await expo.sendPushNotificationsAsync(chunk);
