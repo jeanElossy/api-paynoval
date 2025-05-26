@@ -1,15 +1,16 @@
 // src/utils/emailTemplates.js
 
 /**
- * Styles communs pour les emails (design moderne, style bancaire)
+ * Styles communs pour les emails
  */
 const commonStyles = `
   <style>
     body { margin:0; padding:0; background-color:#f4f4f7; font-family: 'Helvetica Neue', Arial, sans-serif; color:#333; }
     .wrapper { width:100%; table-layout:fixed; background-color:#f4f4f7; padding: 40px 0; }
     .container { background-color:#fff; width:90%; max-width:600px; margin:0 auto; border-radius:8px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.1); }
-    .header { background-color:#004882; padding:20px; text-align:center; }
-    .header h1 { margin:0; color:#fff; font-size:24px; }
+    .header { background-color:#0D7E58; padding:20px; display:flex; align-items:center; }
+    .logo { height:40px; margin-right:auto; }
+    .header h1 { margin:0 auto 0 0; color:#fff; font-size:24px; flex:1; text-align:center; }
     .content { padding:30px; }
     .greeting { font-size:18px; margin-bottom:20px; }
     .message { font-size:16px; line-height:1.5; margin-bottom:25px; }
@@ -18,8 +19,9 @@ const commonStyles = `
     .details th { background-color:#f0f4f8; color:#555; font-weight:600; border-radius:4px 0 0 4px; }
     .details td { background-color:#fafbfc; border-radius:0 4px 4px 0; }
     .button-wrap { text-align:center; margin-bottom:30px; }
-    .button { background-color:#004882; color:#fff; text-decoration:none; padding:12px 25px; border-radius:4px; font-weight:600; display:inline-block; }
-    .notice { background-color:#fff4e5; border-left:4px solid #ffc107; padding:15px; margin-bottom:30px; font-size:14px; color:#5a4531; }
+    .button, .button a { background-color:#0D7E58; color:#fff !important; text-decoration:none; padding:12px 25px; border-radius:4px; font-weight:600; display:inline-block; }
+    a { color:#0D7E58; text-decoration:none; }
+    .notice { background-color:#e8f5e9; border-left:4px solid #43a047; padding:15px; margin-bottom:30px; font-size:14px; color:#2e7d32; }
     .footer { background-color:#f0f4f8; text-align:center; padding:20px; font-size:12px; color:#777; }
   </style>
 `;
@@ -40,7 +42,10 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
   <body>
     <div class="wrapper">
       <div class="container">
-        <div class="header"><h1>Transaction lancée</h1></div>
+        <div class="header">
+          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <h1>Transaction lancée</h1>
+        </div>
         <div class="content">
           <p class="greeting">Bonjour ${name},</p>
           <p class="message">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
@@ -51,7 +56,7 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
             <tr><th>Destinataire</th><td>${receiverEmail}</td></tr>
             <tr><th>Date</th><td>${date}</td></tr>
           </table>
-          <p class="message">Vos transactions en attente seront automatiquement annulées après 10 jours.</p>
+          <p class="message">Vos transactions en attente seront automatiquement annulées au bout de 10 jours.</p>
           <div class="notice">⚠️ Ne partagez jamais vos codes confidentiels ou mots de passe. PayNoval ne vous contactera jamais pour vous les demander. En cas de doute, contactez notre support immédiatement.</div>
         </div>
         <div class="footer">&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.</div>
@@ -78,7 +83,10 @@ function initiatedReceiverTemplate({ amount, currency, name, senderEmail, transa
   <body>
     <div class="wrapper">
       <div class="container">
-        <div class="header"><h1>Validation requise</h1></div>
+        <div class="header">
+          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <h1>Validation requise</h1>
+        </div>
         <div class="content">
           <p class="greeting">Bonjour ${name},</p>
           <p class="message">Vous avez reçu une transaction en attente de validation.</p>
@@ -115,7 +123,10 @@ function confirmedSenderTemplate({ amount, currency, name, transactionId, date }
   <body>
     <div class="wrapper">
       <div class="container">
-        <div class="header" style="background-color:#0056b3;"><h1>Transaction confirmée</h1></div>
+        <div class="header">
+          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <h1>Transaction confirmée</h1>
+        </div>
         <div class="content">
           <p class="greeting">Bonjour ${name},</p>
           <p class="message">Votre transaction a été validée par le destinataire.</p>
@@ -147,7 +158,10 @@ function confirmedReceiverTemplate({ amount, currency, name, transactionId, date
   <body>
     <div class="wrapper">
       <div class="container">
-        <div class="header" style="background-color:#0056b3;"><h1>Transaction confirmée</h1></div>
+      <div class="header">
+          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <h1>Transaction confirmée</h1>
+        </div>
         <div class="content">
           <p class="greeting">Bonjour ${name},</p>
           <p class="message">Vous avez validé la transaction avec succès.</p>
@@ -179,7 +193,10 @@ function cancelledSenderTemplate({ amount, currency, name, transactionId, date, 
   <body>
     <div class="wrapper">
       <div class="container">
-        <div class="header" style="background-color:#b30000;"><h1>Transaction annulée</h1></div>
+        <div class="header">
+          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <h1>Transaction annulée</h1>
+        </div>
         <div class="content">
           <p class="greeting">Bonjour ${name},</p>
           <p class="message">Votre transaction a été annulée${reason ? ` : ${reason}` : '.'}</p>
@@ -211,7 +228,10 @@ function cancelledReceiverTemplate({ amount, currency, name, transactionId, date
   <body>
     <div class="wrapper">
       <div class="container">
-        <div class="header" style="background-color:#b30000;"><h1>Transaction annulée</h1></div>
+        <div class="header">
+          <img src="https://panoval.com/logo.png" alt="PayNoval Logo" class="logo" />
+          <h1>Transaction annulée</h1>
+        </div>
         <div class="content">
           <p class="greeting">Bonjour ${name},</p>
           <p class="message">La transaction a été annulée${reason ? ` : ${reason}` : '.'}</p>
