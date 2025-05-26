@@ -28,7 +28,7 @@ const sanitize = text =>
 /**
  * Notifications email, push & in-app
  * @param {Document} tx - Transaction Mongoose document
- * @param {string} status - 'initiated' | 'confirmed' | 'cancelled'
+ * @param {string} status - 'en attente' | 'confirmée' | 'annulée'
  * @param {ClientSession} session - Mongoose session (pour les Transactions)
  * @param {string} senderCurrency - symbole de la devise de l'expéditeur
  */
@@ -76,13 +76,13 @@ async function notifyParties(tx, status, session, senderCurrency) {
   if (sender.email) {
     let htmlSender;
     switch (status) {
-      case 'initiated':
+      case 'en attente':
         htmlSender = initiatedSenderTemplate(dataSender);
         break;
-      case 'confirmed':
+      case 'confirmée':
         htmlSender = confirmedSenderTemplate(dataSender);
         break;
-      case 'cancelled':
+      case 'annulée':
         htmlSender = cancelledSenderTemplate({ ...dataSender, reason: tx.cancelReason });
         break;
     }
@@ -96,13 +96,13 @@ async function notifyParties(tx, status, session, senderCurrency) {
   if (receiver.email) {
     let htmlReceiver;
     switch (status) {
-      case 'initiated':
+      case 'en attente':
         htmlReceiver = initiatedReceiverTemplate(dataReceiver);
         break;
-      case 'confirmed':
+      case 'confirmée':
         htmlReceiver = confirmedReceiverTemplate(dataReceiver);
         break;
-      case 'cancelled':
+      case 'annulée':
         htmlReceiver = cancelledReceiverTemplate({ ...dataReceiver, reason: tx.cancelReason });
         break;
     }
