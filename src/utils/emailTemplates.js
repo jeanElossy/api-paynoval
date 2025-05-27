@@ -6,13 +6,16 @@
 const commonStyles = `
   <style>
     body { margin:0; padding:0; background-color:#f4f4f7; font-family:'Helvetica Neue',Arial,sans-serif; color:#333; }
-    .wrapper { width:100%; background-color:#f4f4f7; padding:40px 20px; }
+    .wrapper { width:100%; background-color:#f4f4f7; padding:40px 40px; }
     table[role="presentation"] { width:100%; max-width:600px; margin:0 auto; border-radius:20px; overflow:hidden; box-shadow:0 5px 14px rgba(0,0,0,0.1); border-collapse:collapse; }
+    .header { display:flex; align-items:center; justify-content:center; background-color:#0D7E58; padding:12px 20px; border-top-left-radius:20px; border-top-right-radius:20px; }
+    .header img { display:block; margin-right:10px; height:40px; }
+    .header h1 { margin:0; color:#fff; font-size:20px; line-height:1; }
     .card { background:#fff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.1); margin:20px 0; padding:15px; }
     td { font-size:16px; line-height:1.5; padding:0; }
     .button a { background-color:#0D7E58; color:#fff !important; text-decoration:none; padding:12px 25px; border-radius:4px; font-weight:600; display:inline-block; }
-    .notice { background-color:#e8f5e9; border-left:4px solid #43a047; padding:15px; font-size:14px; color:#2e7d32; }
-    h1 { margin:0; color:#fff; font-size:25px; }
+    .notice { background-color:#e8f5e9; border-left:4px solid #43a047; padding:15px; font-size:14px; color:#2e7d32; margin-bottom:15px; }
+    h1 { margin:0; }
     .footer-text { background-color:#f0f4f8; text-align:center; padding:20px; font-size:12px; color:#777; }
     th, td { padding:12px 15px; }
     th { background-color:#f0f4f8; color:#555; font-weight:600; text-align:left; }
@@ -37,13 +40,13 @@ function buildTableTemplate({ title, headerLogoUrl, headerTitleHtml, bodyHtml, f
     <div class="wrapper">
       <table role="presentation">
         <tr>
-          <td style="background-color:#0D7E58;padding:20px;text-align:center;">
-            <img src="${headerLogoUrl}" alt="Logo PayNoval" width="50" style="vertical-align:middle;margin-right:10px;">
+          <td class="header">
+            <img src="${headerLogoUrl}" alt="Logo PayNoval" />
             ${headerTitleHtml}
           </td>
         </tr>
         <tr>
-          <td style="background:#fff;padding:0 30px;">
+          <td style="background:#fff;padding:30px;">
             ${bodyHtml}
           </td>
         </tr>
@@ -193,6 +196,7 @@ function cancelledSenderTemplate(data) {
     footerHtml: `&copy; ${new Date().getFullYear()} PayNoval. Tous droits réservés.`
   });
 }
+
 
 /**
  * Template pour transaction annulée (destinataire)
