@@ -1,17 +1,14 @@
 // src/middleware/requestValidator.js
+
 const { validationResult } = require('express-validator');
+const createErrorRQ = require('http-errors');
 
 module.exports = (req, res, next) => {
-  const result = validationResult(req);
-  if (!result.isEmpty()) {
-    const formatted = result.array().map(({ param, msg }) => ({
-      field: param,
-      message: msg
-    }));
-    return res.status(400).json({
-      success: false,
-      errors: formatted
-    });
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    // Retour structuré des erreurs
+    const formatted = errors.array().map(e => ({ field: e.param, message: e.msg }));
+    return next(createErrorRQ(400, 'Validation échouée', { details: formatted }));
   }
   next();
 };
