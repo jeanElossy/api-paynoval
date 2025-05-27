@@ -3,30 +3,46 @@
 /**
  * Styles communs pour les emails
  */
-
 const commonStyles = `
   <style>
     body { margin:0; padding:0; background-color:#f4f4f7; font-family: 'Helvetica Neue', Arial, sans-serif; color:#333; }
     .wrapper { width:100%; table-layout:fixed; background-color:#f4f4f7; padding: 40px 0; border-radius: 5px; }
-    .container { background-color:#fff; width:90%; max-width:600px; margin:0 auto; border-radius:20px; overflow:hidden; box-shadow:0 5px 14px rgba(0,0,0,0.1); }
+    .container {
+      background-color:#fff;
+      width:90%; max-width:600px;
+      margin:0 auto;
+      border-radius:20px;
+      overflow:hidden;
+      box-shadow:0 5px 14px rgba(0,0,0,0.1);
+      /* Empêche la séparation du conteneur en plusieurs blocs */
+      page-break-inside: avoid;
+      -webkit-column-break-inside: avoid;
+      -moz-column-break-inside: avoid;
+    }
+    .header, .content, .footer {
+      /* Empêche la séparation des sections en plusieurs blocs */
+      page-break-inside: avoid;
+      -webkit-column-break-inside: avoid;
+      -moz-column-break-inside: avoid;
+    }
     .header {
       background-color:#0D7E58;
-      display: flex;
-      align-items: center;    /* alignement vertical */
-      justify-content: center; /* alignement horizontal */
-      padding: 20px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:20px;
     }
     .logo {
-      height: 50px;
-      margin: 0 10px 0 0;      /* petit écart à droite du logo */
+      height:50px;
+      margin:0 30px 0 0;
     }
     .header h1 {
-      margin: 0;
-      color: #fff;
-      font-size: 26px;
-      margin-top: 15px;
+      margin:0;
+      color:#fff;
+      font-size:25px;
+      margin-top:13px;
     }
-    .content { padding:30px; }
+    .content { padding: 30px; }
     .greeting { font-size:18px; margin-bottom:20px; }
     .message { font-size:16px; line-height:1.5; margin-bottom:25px; }
     .details { width:100%; margin-bottom:30px; border-collapse:separate; border-spacing:0 8px; }
@@ -41,19 +57,17 @@ const commonStyles = `
   </style>
 `;
 
-
-
 /**
  * Template moderne pour l'expéditeur lors d'une transaction initiée
  */
-function initiatedSenderTemplate({ amount, currency, name, transactionId, date, senderEmail, receiverEmail }) {
+function initiatedSenderTemplate({ amount, currency, name, transactionId, date, senderEmail, receiverEmail, confirmLinkWeb }) {
   return `
   <!DOCTYPE html>
   <html lang="fr">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Transaction lancée</title>
+    <title>Transaction en attente</title>
     ${commonStyles}
   </head>
   <body>
@@ -61,7 +75,7 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
       <div class="container">
         <div class="header">
           <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
-          <h1>Transaction lancée</h1>
+          <h1>Transaction en attente</h1>
         </div>
         <div class="content">
           <p class="greeting">Bonjour ${name || 'utilisateur'},</p>
@@ -73,6 +87,7 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
             <tr><th>Destinataire</th><td>${receiverEmail}</td></tr>
             <tr><th>Date</th><td>${date}</td></tr>
           </table>
+          <div class="button-wrap"><a href="${confirmLinkWeb}" class="button">Voir la transaction</a></div>
           <p class="message">Vos transactions en attente seront automatiquement annulées au bout de 10 jours.</p>
           <div class="notice">⚠️ Ne partagez jamais vos codes confidentiels ou mots de passe. PayNoval ne vous contactera jamais pour vous les demander. En cas de doute, contactez notre support immédiatement.</div>
         </div>
@@ -83,7 +98,6 @@ function initiatedSenderTemplate({ amount, currency, name, transactionId, date, 
   </html>
   `;
 }
-
 
 /**
  * Template moderne pour le destinataire lors d'une transaction initiée
@@ -126,7 +140,7 @@ function initiatedReceiverTemplate({ amount, currency, name, senderEmail, transa
 }
 
 /**
- * Autres templates confirmés et annulés suivent la même structure avec section notice.
+ * Templates confirmés et annulés
  */
 function confirmedSenderTemplate({ amount, currency, name, transactionId, date }) {
   return `
@@ -176,7 +190,7 @@ function confirmedReceiverTemplate({ amount, currency, name, transactionId, date
   <body>
     <div class="wrapper">
       <div class="container">
-      <div class="header">
+        <div class="header">
           <img src="https://i.imgur.com/vVCYZkM.png" alt="PayNoval Logo" class="logo" />
           <h1>Transaction confirmée</h1>
         </div>
