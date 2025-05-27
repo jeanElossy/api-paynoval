@@ -3,14 +3,28 @@
 /**
  * Styles communs pour les emails
  */
+
 const commonStyles = `
   <style>
     body { margin:0; padding:0; background-color:#f4f4f7; font-family: 'Helvetica Neue', Arial, sans-serif; color:#333; }
-    .wrapper { width:100%; table-layout:fixed; background-color:#f4f4f7; padding: 40px 0; }
-    .container { background-color:#fff; width:90%; max-width:600px; margin:0 auto; border-radius:8px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.1); }
-    .header { background-color:#0D7E58; padding:20px; display:flex; align-items:center; justify-content: center;}
-    .logo { height:60px; margin-right:auto; }
-    .header h1 { margin:0 auto 0 0; color:#fff; font-size:24px; flex:1; text-align:center; }
+    .wrapper { width:100%; table-layout:fixed; background-color:#f4f4f7; padding: 40px 0; border-radius: 5px; }
+    .container { background-color:#fff; width:90%; max-width:600px; margin:0 auto; border-radius:20px; overflow:hidden; box-shadow:0 5px 14px rgba(0,0,0,0.1); }
+    .header {
+      background-color:#0D7E58;
+      display: flex;
+      align-items: center;    /* alignement vertical */
+      justify-content: center; /* alignement horizontal */
+      padding: 20px;
+    }
+    .logo {
+      height: 50px;
+      margin: 0 10px 0 0;      /* petit écart à droite du logo */
+    }
+    .header h1 {
+      margin: 0;
+      color: #fff;
+      font-size: 26px;
+    }
     .content { padding:30px; }
     .greeting { font-size:18px; margin-bottom:20px; }
     .message { font-size:16px; line-height:1.5; margin-bottom:25px; }
@@ -25,6 +39,8 @@ const commonStyles = `
     .footer { background-color:#f0f4f8; text-align:center; padding:20px; font-size:12px; color:#777; }
   </style>
 `;
+
+
 
 /**
  * Template moderne pour l'expéditeur lors d'une transaction initiée
