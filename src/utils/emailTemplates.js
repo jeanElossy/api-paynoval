@@ -83,7 +83,7 @@ function initiatedSenderTemplate(data) {
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name || 'utilisateur'},</p>
+    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
     <p style="margin-bottom:24px; font-size:24px;line-height: 0.8;">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
     ${detailsTableHtml(rows)}
     <div style="text-align:center;margin-bottom:30px;" class="button"><a href="${data.confirmLinkWeb}">Voir la transaction</a></div>
@@ -110,7 +110,7 @@ function initiatedReceiverTemplate(data) {
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
+    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>, </p>
     <p style="margin-bottom:25px;font-size:24px;line-height: 0.8;">Vous avez reçu une transaction en attente de validation.</p>
     ${detailsTableHtml(rows)}
     <div style="text-align:center;margin-bottom:30px;" class="button"><a href="${data.confirmLink}">Valider la transaction</a></div>
@@ -135,7 +135,7 @@ function confirmedSenderTemplate(data) {
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
+    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
     <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">Votre transaction a été validée par le destinataire.</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Pour votre sécurité, ne communiquez jamais vos données sensibles. En cas de doute, vérifiez auprès de PayNoval.</div>
@@ -159,7 +159,7 @@ function confirmedReceiverTemplate(data) {
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
+    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
     <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">Vous avez validé la transaction avec succès.</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Soyez vigilant : PayNoval n’enverra jamais de liens non sécurisés. Vérifiez toujours l’URL.</div>
@@ -183,7 +183,7 @@ function cancelledSenderTemplate(data) {
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
+    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
     <p style="margin-bottom:25px;font-size:24px;line-height: 0.8;">Votre transaction a été annulée${data.reason ? ` : ${data.reason}` : '.'}</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Méfiez-vous des faux emails demandant une annulation. Contactez-nous via l’application.</div>
@@ -208,7 +208,7 @@ function cancelledReceiverTemplate(data) {
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
+    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
     <p style="margin-bottom:25px;font-size:24px;line-height: 0.8;">La transaction a été annulée${data.reason ? ` : ${data.reason}` : '.'}</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Ne jamais cliquer sur des liens suspects. Vérifiez toujours l’expéditeur.</div>
