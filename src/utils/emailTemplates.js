@@ -24,6 +24,7 @@ const commonStyles = `
       margin: 0;
       color: #fff;
       font-size: 26px;
+      margin-top: 15px;
     }
     .content { padding:30px; }
     .greeting { font-size:18px; margin-bottom:20px; }
