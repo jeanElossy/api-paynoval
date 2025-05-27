@@ -134,9 +134,9 @@ exports.initiateInternal = async (req, res, next) => {
     } = req.body;
 
     // Validation runtime
-    if (funds !== 'Solde PayNoVal') {
-      throw createError(400, 'Flux non pris en charge par ce contrôleur interne');
-    }
+    // if (funds !== 'Solde PayNoVal') {
+    //   throw createError(400, 'Flux non pris en charge par ce contrôleur interne');
+    // }
     if (description.length > MAX_DESC_LENGTH) {
       throw createError(400, 'Description trop longue');
     }
