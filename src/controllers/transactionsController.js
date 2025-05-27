@@ -1,4 +1,4 @@
-// src/controllers/transactionController.js
+// File: src/controllers/transactionController.js
 
 const mongoose        = require('mongoose');
 const createError     = require('http-errors');
@@ -114,6 +114,23 @@ async function notifyParties(tx, status, session, senderCurrency) {
 }
 
 /**
+ * GET /transactions
+ * Liste les transactions internes de l’utilisateur connecté
+ */
+exports.listInternal = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const txs = await TransactionModel()
+      .find({ sender: mongoose.Types.ObjectId(userId) })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, data: txs });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * POST /transactions/initiate
  * Flux interne PayNoVal → PayNoVal
  */
@@ -129,14 +146,9 @@ exports.initiateInternal = async (req, res, next) => {
       localCurrencySymbol,
       recipientInfo = {},
       senderCurrencySymbol,
-      funds,
       description = ''
     } = req.body;
 
-    // Validation runtime
-    // if (funds !== 'Solde PayNoVal') {
-    //   throw createError(400, 'Flux non pris en charge par ce contrôleur interne');
-    // }
     if (description.length > MAX_DESC_LENGTH) {
       throw createError(400, 'Description trop longue');
     }
@@ -156,7 +168,6 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)} disponible`);
     }
 
-    // Création Tx
     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
     const decLocalAmt = mongoose.Types.Decimal128.fromString(parseFloat(localAmount).toFixed(2));
@@ -203,7 +214,6 @@ exports.confirmController = async (req, res, next) => {
     if (!tx || tx.status !== 'pending') {
       throw createError(400, 'Transaction invalide ou déjà traitée');
     }
-    // Sécurité : l'utilisateur connecté doit être l'expéditeur
     if (tx.sender.toString() !== req.user.id) {
       throw createError(403, 'Interdit : vous n’êtes pas l’expéditeur de cette transaction');
     }
@@ -250,7 +260,6 @@ exports.confirmController = async (req, res, next) => {
     session.endSession();
   }
 };
-
 
 
 
