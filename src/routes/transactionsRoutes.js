@@ -81,15 +81,14 @@
 
 // module.exports = router;
 
-
 // src/routes/transactionRouter.js
 
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { body } = require('express-validator');
 const asyncHandler = require('express-async-handler');
-const { initiateInternal, confirmController } = require('../controllers/transactionsController');
+const { initiateInternal, confirmController } = require('../controllers/transactionController');
 const { protect } = require('../middleware/authMiddleware');
 const requestValidator = require('../middleware/requestValidator');
 const Notification = require('../models/Notification');
@@ -99,42 +98,42 @@ const router = express.Router();
 // Security: secure HTTP headers
 router.use(helmet());
 
-// Rate limiter to prevent brute-force or DoS
+// Rate limiter for initiate and confirm endpoints
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 10, // max 10 requests per IP per window
-  message: { success: false, message: 'Too many requests, please try again later.' }
+  max: 10, // limit each IP to 10 requests per window
+  message: { success: false, status: 429, message: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
 router.use(['/initiate', '/confirm'], limiter);
 
 /**
  * POST /transactions/initiate
- * Internal flow: PayNoVal balance → PayNoVal
+ * Internal flow: Solde PayNoval → PayNoval
  */
 router.post(
   '/initiate',
   protect,
   [
     body('toEmail')
-      .isEmail().withMessage('Invalid recipient email')
+      .isEmail().withMessage("Email destinataire invalide")
       .normalizeEmail(),
     body('amount')
-      .isFloat({ gt: 0 }).withMessage('Amount must be > 0')
+      .isFloat({ gt: 0 }).withMessage("Le montant doit être supérieur à 0")
       .toFloat(),
     body('transactionFees')
-      .optional().isFloat({ min: 0 }).withMessage('Fees must be ≥ 0')
+      .optional().isFloat({ min: 0 }).withMessage("Les frais doivent être ≥ 0")
       .toFloat(),
     body('localAmount')
-      .isFloat({ gt: 0 }).withMessage('Local amount must be > 0')
+      .isFloat({ gt: 0 }).withMessage("Le montant local doit être > 0")
       .toFloat(),
     body('funds')
-      .equals('Solde PayNoVal').withMessage('Invalid funds type for this flow'),
+      .equals('Solde PayNoval').withMessage("Type de fonds invalide pour ce flux"),
     body('destination')
-      .equals('PayNoVal').withMessage('Invalid destination for this flow'),
+      .equals('PayNoval').withMessage("Destination invalide pour ce flux"),
     body('localCurrencySymbol')
-      .notEmpty().withMessage('Local currency symbol is required').trim().escape(),
+      .notEmpty().withMessage("Symbole de devise locale requis").trim().escape(),
     body('senderCurrencySymbol')
-      .notEmpty().withMessage('Sender currency symbol is required').trim().escape(),
+      .notEmpty().withMessage("Symbole de devise expéditeur requis").trim().escape(),
     body('description')
       .optional().trim().escape(),
     body('recipientInfo.name')
@@ -153,12 +152,12 @@ router.post(
   protect,
   [
     body('transactionId')
-      .isMongoId().withMessage('Invalid transaction ID'),
+      .isMongoId().withMessage("ID de transaction invalide"),
     body('token')
-      .isLength({ min: 64, max: 64 }).withMessage('Invalid confirmation token')
+      .isLength({ min: 64, max: 64 }).withMessage("Token de confirmation invalide")
       .trim().escape(),
     body('senderCurrencySymbol')
-      .notEmpty().withMessage('Sender currency symbol is required')
+      .notEmpty().withMessage("Symbole de devise expéditeur requis")
       .trim().escape()
   ],
   requestValidator,
@@ -167,7 +166,7 @@ router.post(
 
 /**
  * GET /transactions/notifications
- * In-app notifications for the authenticated user
+ * In-app notifications for authenticated user
  */
 router.get(
   '/notifications',
