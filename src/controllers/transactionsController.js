@@ -114,16 +114,14 @@ async function notifyParties(tx, status, session, senderCurrency) {
 }
 
 /**
- * GET /transactions
+ * GET /api/v1/transactions
  * Liste les transactions internes de l’utilisateur connecté
  */
 exports.listInternal = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const txs = await TransactionModel()
-      .find({ sender: mongoose.Types.ObjectId(userId) })
-      .sort({ createdAt: -1 })
-      .lean();
+    const Transaction = TransactionModel();
+    const txs = await Transaction.find({ sender: userId }).sort({ createdAt: -1 }).lean();
     res.json({ success: true, data: txs });
   } catch (err) {
     next(err);
@@ -131,7 +129,7 @@ exports.listInternal = async (req, res, next) => {
 };
 
 /**
- * POST /transactions/initiate
+ * POST /api/v1/transactions/initiate
  * Flux interne PayNoVal → PayNoVal
  */
 exports.initiateInternal = async (req, res, next) => {
@@ -198,7 +196,7 @@ exports.initiateInternal = async (req, res, next) => {
 };
 
 /**
- * POST /transactions/confirm
+ * POST /api/v1/transactions/confirm
  * Confirmation interne PayNoVal → PayNoVal
  */
 exports.confirmController = async (req, res, next) => {
@@ -260,7 +258,6 @@ exports.confirmController = async (req, res, next) => {
     session.endSession();
   }
 };
-
 
 
 
