@@ -10,7 +10,7 @@ const commonStyles = `
     table[role="presentation"] { width:100%; max-width:600px; margin:0 auto; border-radius:20px; overflow:hidden; box-shadow:0 5px 14px rgba(0,0,0,0.1); border-collapse:collapse; }
     .header { display:flex; align-items:center; justify-content:center; background-color:#0D7E58; padding:12px 20px; border-top-left-radius:20px; border-top-right-radius:20px; }
     .header img { display:block; margin-right:30px; height:70px; }
-    .header h1 { margin-top: 18; color:#fff; font-size:40px; text-align:center;}
+    .header h1 { margin-top: 19; color:#fff; font-size:40px; text-align:center;}
     .card { background:#fff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.1); margin:20px 0; padding:15px; }
     td { font-size:20px; line-height: 2; padding:0; }
     .button a { background-color:#0D7E58; color:#fff !important; text-decoration:none; padding:14px 27px; border-radius:4px; font-weight:600; display:inline-block; }
@@ -18,8 +18,8 @@ const commonStyles = `
     h1 { margin:0; }
     .footer-text { background-color:#f0f4f8; text-align:center; padding:20px; font-size:17px; color:#777; }
     th, td { padding:14px 17px; }
-    th { background-color:#f0f4f8; color:#555; font-weight:600; text-align:left; }
-    td.detail { background-color:#fafbfc; }
+    th { background-color:#f0f4f8; color:#555; font-weight:600; text-align:left;font-size:20px; }
+    td.detail { background-color:#fafbfc;font-size:20px; }
   </style>
 `;
 
@@ -84,10 +84,10 @@ function initiatedSenderTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name || 'utilisateur'},</p>
-    <p style="margin-bottom:24px; font-size:24px;">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
+    <p style="margin-bottom:24px; font-size:24px;line-height: 0.8;">Votre transaction a été initiée avec succès. Les fonds seront débloqués une fois que le destinataire aura validé.</p>
     ${detailsTableHtml(rows)}
     <div style="text-align:center;margin-bottom:30px;" class="button"><a href="${data.confirmLinkWeb}">Voir la transaction</a></div>
-    <p style="margin-bottom:25px; font-size:25px;">Vos transactions en attente seront automatiquement annulées au bout de 10 jours.</p>
+    <p style="margin-bottom:25px; font-size:25px;line-height: 0.8;">Vos transactions en attente seront automatiquement annulées au bout de 10 jours.</p>
     <div class="notice">⚠️ Ne partagez jamais vos codes confidentiels ou mots de passe. PayNoval ne vous contactera jamais pour vous les demander.</div>
   `;
   return buildTableTemplate({
@@ -111,7 +111,7 @@ function initiatedReceiverTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
-    <p style="margin-bottom:25px;font-size:24px;">Vous avez reçu une transaction en attente de validation.</p>
+    <p style="margin-bottom:25px;font-size:24px;line-height: 0.8;">Vous avez reçu une transaction en attente de validation.</p>
     ${detailsTableHtml(rows)}
     <div style="text-align:center;margin-bottom:30px;" class="button"><a href="${data.confirmLink}">Valider la transaction</a></div>
     <div class="notice">⚠️ PayNoval ne vous demandera jamais de codes confidentiels ou mots de passe par email. Ne partagez rien et signalez toute tentative de fraude.</div>
@@ -136,7 +136,7 @@ function confirmedSenderTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
-    <p style="margin-bottom:25px; font-size:24px;">Votre transaction a été validée par le destinataire.</p>
+    <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">Votre transaction a été validée par le destinataire.</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Pour votre sécurité, ne communiquez jamais vos données sensibles. En cas de doute, vérifiez auprès de PayNoval.</div>
   `;
@@ -160,7 +160,7 @@ function confirmedReceiverTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
-    <p style="margin-bottom:25px; font-size:24px;">Vous avez validé la transaction avec succès.</p>
+    <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">Vous avez validé la transaction avec succès.</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Soyez vigilant : PayNoval n’enverra jamais de liens non sécurisés. Vérifiez toujours l’URL.</div>
   `;
@@ -184,7 +184,7 @@ function cancelledSenderTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
-    <p style="margin-bottom:25px;font-size:24px;">Votre transaction a été annulée${data.reason ? ` : ${data.reason}` : '.'}</p>
+    <p style="margin-bottom:25px;font-size:24px;line-height: 0.8;">Votre transaction a été annulée${data.reason ? ` : ${data.reason}` : '.'}</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Méfiez-vous des faux emails demandant une annulation. Contactez-nous via l’application.</div>
   `;
@@ -209,7 +209,7 @@ function cancelledReceiverTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour ${data.name},</p>
-    <p style="margin-bottom:25px;font-size:24px;">La transaction a été annulée${data.reason ? ` : ${data.reason}` : '.'}</p>
+    <p style="margin-bottom:25px;font-size:24px;line-height: 0.8;">La transaction a été annulée${data.reason ? ` : ${data.reason}` : '.'}</p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Ne jamais cliquer sur des liens suspects. Vérifiez toujours l’expéditeur.</div>
   `;
