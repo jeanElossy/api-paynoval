@@ -18,8 +18,8 @@ const commonStyles = `
     h1 { margin:0; }
     .footer-text { background-color:#f0f4f8; text-align:center; padding:20px; font-size:17px; color:#777; }
     th, td { padding:14px 17px; }
-    th { background-color:#f0f4f8; color:#555; font-weight:600; text-align:left;font-size:24px; }
-    td.detail { background-color:#fafbfc;font-size:24px; }
+    th { background-color:#f0f4f8; color:#555; font-weight:600; text-align:left;font-size:25px; }
+    td.detail { background-color:#fafbfc;font-size:25px; }
   </style>
 `;
 
