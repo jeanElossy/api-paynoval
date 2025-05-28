@@ -54,6 +54,11 @@ module.exports = conn => {
       type: String,
       required: true
     },
+    // Pays de destination
+    country: {
+      type: String,
+      required: true
+    },
     // Question de sécurité pour confirmation
     securityQuestion: {
       type: String,
@@ -101,17 +106,18 @@ module.exports = conn => {
   // Transformation lors de toJSON/toObject
   transactionSchema.set('toJSON', {
     transform(doc, ret) {
-      ret.id                  = ret._id;
-      ret.amount              = parseFloat(ret.amount.toString());
-      ret.transactionFees     = parseFloat(ret.transactionFees.toString());
-      ret.localAmount         = parseFloat(ret.localAmount.toString());
-      ret.localCurrencySymbol = ret.localCurrencySymbol;
-      ret.nameDestinataire    = ret.nameDestinataire;
-      ret.recipientEmail      = ret.recipientEmail;
-      ret.securityQuestion    = ret.securityQuestion;
-      ret.securityCode        = ret.securityCode;
-      ret.destination         = ret.destination;
-      ret.funds               = ret.funds;
+      ret.id                   = ret._id;
+      ret.amount               = parseFloat(ret.amount.toString());
+      ret.transactionFees      = parseFloat(ret.transactionFees.toString());
+      ret.localAmount          = parseFloat(ret.localAmount.toString());
+      ret.localCurrencySymbol  = ret.localCurrencySymbol;
+      ret.nameDestinataire     = ret.nameDestinataire;
+      ret.recipientEmail       = ret.recipientEmail;
+      ret.country              = ret.country;
+      ret.securityQuestion     = ret.securityQuestion;
+      ret.securityCode         = ret.securityCode;
+      ret.destination          = ret.destination;
+      ret.funds                = ret.funds;
       delete ret._id;
       delete ret.verificationToken;
       return ret;

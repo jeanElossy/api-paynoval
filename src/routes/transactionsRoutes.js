@@ -9,7 +9,7 @@ const {
   initiateInternal,
   confirmController,
   listInternal
-} = require('../controllers/transactionsController'); 
+} = require('../controllers/transactionsController');
 const { protect }   = require('../middleware/authMiddleware');
 const requestValidator = require('../middleware/requestValidator');
 const Notification  = require('../models/Notification');
@@ -43,6 +43,7 @@ router.post(
   '/initiate',
   protect,
   [
+    // Email destinataire
     body('toEmail')
       .isEmail().withMessage('Adresse email du destinataire invalide')
       .normalizeEmail(),
@@ -72,18 +73,23 @@ router.post(
       .notEmpty().withMessage('Symbole de la devise de l’expéditeur requis')
       .trim().escape(),
 
+    // Pays de destination
+    body('country')
+      .notEmpty().withMessage('Pays de destination requis')
+      .trim().escape(),
+
     // Description libre
     body('description')
       .optional().trim().escape(),
 
-    // Récupérer le nom et l’email saisis
+    // Récupérer nom et email saisis
     body('recipientInfo.name')
       .optional().trim().escape(),
     body('recipientInfo.email')
       .isEmail().withMessage('Email du destinataire invalide')
       .normalizeEmail(),
-
-    // Sécurité
+      
+    // Question de sécurité et code
     body('question')
       .notEmpty().withMessage('Question de sécurité requise')
       .trim().escape(),
