@@ -63,7 +63,7 @@ app.get('/health', (_req, res) => res.json({ status: 'UP', timestamp: new Date()
 app.get('/', (_req, res) => res.send('🚀 API PayNoval Transactions Service is running'));
 
 // Routes
-app.use('/api/v1/transactions', transactionRoutes);x
+app.use('/api/v1/transactions', transactionRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 
 // 404 handler
