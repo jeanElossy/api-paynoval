@@ -1,5 +1,3 @@
-// src/models/Transaction.js
-
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { Schema } = mongoose;
@@ -36,18 +34,43 @@ module.exports = conn => {
         message: props => `Les frais doivent être au moins 0.00, reçus ${props.value}`
       }
     },
-    // Nouveau champ pour stocker le montant converti
+    // Montant converti en devise locale
     localAmount: {
       type: Schema.Types.Decimal128,
       required: true
     },
-    // Nouveau champ pour la devise locale
+    // Symbole de la devise locale
     localCurrencySymbol: {
       type: String,
       required: true
     },
-    // Nouveau champ pour stocker le nom saisi du destinataire
+    // Nom saisi du destinataire
     nameDestinataire: {
+      type: String,
+      required: true
+    },
+    // Email saisi du destinataire
+    recipientEmail: {
+      type: String,
+      required: true
+    },
+    // Question de sécurité pour confirmation
+    securityQuestion: {
+      type: String,
+      required: true
+    },
+    // Code de sécurité pour validation
+    securityCode: {
+      type: String,
+      required: true
+    },
+    // Méthode de destination ('PayNoval', 'Banque', 'Mobile Money', etc.)
+    destination: {
+      type: String,
+      required: true
+    },
+    // Source des fonds ('Solde PayNoval', 'Carte de crédit', etc.)
+    funds: {
       type: String,
       required: true
     },
@@ -84,6 +107,11 @@ module.exports = conn => {
       ret.localAmount         = parseFloat(ret.localAmount.toString());
       ret.localCurrencySymbol = ret.localCurrencySymbol;
       ret.nameDestinataire    = ret.nameDestinataire;
+      ret.recipientEmail      = ret.recipientEmail;
+      ret.securityQuestion    = ret.securityQuestion;
+      ret.securityCode        = ret.securityCode;
+      ret.destination         = ret.destination;
+      ret.funds               = ret.funds;
       delete ret._id;
       delete ret.verificationToken;
       return ret;

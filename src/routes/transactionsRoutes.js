@@ -1,14 +1,18 @@
 // File: src/routes/transactionsRoutes.js
 
-const express = require('express');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const { body } = require('express-validator');
-const asyncHandler = require('express-async-handler');
-const { initiateInternal, confirmController, listInternal } = require('../controllers/transactionsController');
-const { protect } = require('../middleware/authMiddleware');
+const express       = require('express');
+const helmet        = require('helmet');
+const rateLimit     = require('express-rate-limit');
+const { body }      = require('express-validator');
+const asyncHandler  = require('express-async-handler');
+const {
+  initiateInternal,
+  confirmController,
+  listInternal
+} = require('../controllers/transactionsController'); 
+const { protect }   = require('../middleware/authMiddleware');
 const requestValidator = require('../middleware/requestValidator');
-const Notification = require('../models/Notification');
+const Notification  = require('../models/Notification');
 
 const router = express.Router();
 
@@ -17,15 +21,14 @@ router.use(helmet());
 
 // Limiteur de débit pour éviter les abus
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 10,             // 10 requêtes par IP et par fenêtre
+  windowMs: 60 * 1000,
+  max: 10,
   message: { success: false, status: 429, message: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
 router.use(['/initiate', '/confirm'], limiter);
 
 /**
  * GET /api/v1/transactions
- * Liste les transactions internes de l’utilisateur connecté
  */
 router.get(
   '/',
@@ -35,7 +38,6 @@ router.get(
 
 /**
  * POST /api/v1/transactions/initiate
- * Flux interne : Solde PayNoval → PayNoval
  */
 router.post(
   '/initiate',
@@ -44,6 +46,8 @@ router.post(
     body('toEmail')
       .isEmail().withMessage('Adresse email du destinataire invalide')
       .normalizeEmail(),
+
+    // Montants
     body('amount')
       .isFloat({ gt: 0 }).withMessage('Le montant doit être supérieur à 0')
       .toFloat(),
@@ -53,20 +57,39 @@ router.post(
     body('localAmount')
       .isFloat({ gt: 0 }).withMessage('Le montant local doit être supérieur à 0')
       .toFloat(),
+
+    // Méthodes
     body('funds')
       .equals('Solde PayNoval').withMessage('Type de fonds invalide pour ce flux'),
     body('destination')
       .equals('PayNoval').withMessage('Destination invalide pour ce flux'),
+
+    // Devises
     body('localCurrencySymbol')
       .notEmpty().withMessage('Symbole de la devise locale requis')
       .trim().escape(),
     body('senderCurrencySymbol')
       .notEmpty().withMessage('Symbole de la devise de l’expéditeur requis')
       .trim().escape(),
+
+    // Description libre
     body('description')
       .optional().trim().escape(),
+
+    // Récupérer le nom et l’email saisis
     body('recipientInfo.name')
-      .optional().trim().escape()
+      .optional().trim().escape(),
+    body('recipientInfo.email')
+      .isEmail().withMessage('Email du destinataire invalide')
+      .normalizeEmail(),
+
+    // Sécurité
+    body('question')
+      .notEmpty().withMessage('Question de sécurité requise')
+      .trim().escape(),
+    body('securityCode')
+      .notEmpty().withMessage('Code de sécurité requis')
+      .trim().escape(),
   ],
   requestValidator,
   asyncHandler(initiateInternal)
@@ -74,7 +97,6 @@ router.post(
 
 /**
  * POST /api/v1/transactions/confirm
- * Confirmation pour les transactions internes
  */
 router.post(
   '/confirm',
@@ -95,7 +117,6 @@ router.post(
 
 /**
  * GET /api/v1/transactions/notifications
- * Récupère les notifications in-app de l'utilisateur connecté
  */
 router.get(
   '/notifications',
