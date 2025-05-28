@@ -352,7 +352,8 @@ async function notifyParties(tx, status, session, senderCurrency) {
       date:             dateStr,
       confirmLink:      mobileLink,
       country:          tx.country,
-      securityQuestion: tx.securityQuestion
+      securityQuestion: tx.securityQuestion,
+      senderName:        sender.fullName,      // ← nom de l’expéditeur
     };
 
     // Emails
