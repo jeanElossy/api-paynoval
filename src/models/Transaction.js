@@ -1,11 +1,9 @@
+// models/Transaction.js
 const mongoose = require('mongoose');
-const crypto = require('crypto');
-const { Schema } = mongoose;
+const crypto   = require('crypto');
 
-/**
- * Initialise le modèle Transaction sur la connexion passée en paramètre.
- */
 module.exports = conn => {
+  const { Schema } = mongoose;
   const transactionSchema = new Schema({
     sender: {
       type: Schema.Types.ObjectId,
@@ -22,7 +20,7 @@ module.exports = conn => {
       required: true,
       validate: {
         validator: v => parseFloat(v.toString()) >= 0.01,
-        message: props => `Le montant doit être au moins 0.01, reçu ${props.value}`
+        message: props => `Le montant doit être ≥ 0.01, reçu ${props.value}`
       }
     },
     transactionFees: {
@@ -31,57 +29,62 @@ module.exports = conn => {
       default: mongoose.Types.Decimal128.fromString('0.00'),
       validate: {
         validator: v => parseFloat(v.toString()) >= 0.00,
-        message: props => `Les frais doivent être au moins 0.00, reçus ${props.value}`
+        message: props => `Les frais doivent être ≥ 0.00, reçus ${props.value}`
       }
     },
-    // Montant converti en devise locale
     localAmount: {
       type: Schema.Types.Decimal128,
       required: true
     },
-    // Symbole de la devise locale
     localCurrencySymbol: {
       type: String,
-      required: true
+      required: true,
+      trim: true,
+      maxlength: 5
     },
-    // Nom saisi du destinataire
     nameDestinataire: {
       type: String,
-      required: true
+      required: true,
+      trim: true,
+      maxlength: 100
     },
-    // Email saisi du destinataire
     recipientEmail: {
       type: String,
-      required: true
+      required: true,
+      trim: true,
+      lowercase: true,
+      match: /.+@.+\..+/
     },
-    // Pays de destination
     country: {
       type: String,
-      required: true
+      required: true,
+      trim: true,
+      maxlength: 100
     },
-    // Question de sécurité pour confirmation
     securityQuestion: {
       type: String,
-      required: true
+      required: true,
+      trim: true,
+      maxlength: 200
     },
-    // Code de sécurité pour validation
     securityCode: {
       type: String,
-      required: true
+      required: true,
+      select: false
     },
-    // Méthode de destination ('PayNoval', 'Banque', 'Mobile Money', etc.)
     destination: {
       type: String,
-      required: true
+      required: true,
+      enum: ['PayNoval','Banque','Mobile Money']
     },
-    // Source des fonds ('Solde PayNoval', 'Carte de crédit', etc.)
     funds: {
       type: String,
-      required: true
+      required: true,
+      enum: ['Solde PayNoval','Carte de crédit']
     },
     status: {
       type: String,
-      enum: ['pending', 'confirmed', 'cancelled'],
+      enum: ['pending','confirmed','cancelled'],
       default: 'pending'
     },
     verificationToken: {
@@ -96,35 +99,29 @@ module.exports = conn => {
     }
   }, {
     versionKey: false,
-    timestamps: true // createdAt & updatedAt
+    timestamps: true
   });
 
-  // Indexes pour accélérer certaines requêtes
+  // Indexes
   transactionSchema.index({ sender: 1, createdAt: -1 });
   transactionSchema.index({ receiver: 1, status: 1 });
+  transactionSchema.index({ verificationToken: 1 });
 
-  // Transformation lors de toJSON/toObject
+  // toJSON / toObject : formate et supprime les champs sensibles
   transactionSchema.set('toJSON', {
     transform(doc, ret) {
-      ret.id                   = ret._id;
-      ret.amount               = parseFloat(ret.amount.toString());
-      ret.transactionFees      = parseFloat(ret.transactionFees.toString());
-      ret.localAmount          = parseFloat(ret.localAmount.toString());
-      ret.localCurrencySymbol  = ret.localCurrencySymbol;
-      ret.nameDestinataire     = ret.nameDestinataire;
-      ret.recipientEmail       = ret.recipientEmail;
-      ret.country              = ret.country;
-      ret.securityQuestion     = ret.securityQuestion;
-      ret.securityCode         = ret.securityCode;
-      ret.destination          = ret.destination;
-      ret.funds                = ret.funds;
+      ret.id = ret._id;
+      ret.amount          = parseFloat(ret.amount.toString());
+      ret.transactionFees = parseFloat(ret.transactionFees.toString());
+      ret.localAmount     = parseFloat(ret.localAmount.toString());
       delete ret._id;
+      delete ret.securityCode;
       delete ret.verificationToken;
       return ret;
     }
   });
 
-  // Avant validation, génère un token si nouveau document
+  // Génération automatique d’un token si nouveau document
   transactionSchema.pre('validate', function(next) {
     if (this.isNew) {
       this.verificationToken = crypto.randomBytes(32).toString('hex');
@@ -132,21 +129,15 @@ module.exports = conn => {
     next();
   });
 
-  // Méthode statique pour générer un token à la demande
+  // Méthodes statiques / d’instance
   transactionSchema.statics.generateVerificationToken = function() {
     return crypto.randomBytes(32).toString('hex');
   };
-
-  // Méthode d'instance pour vérifier le token
   transactionSchema.methods.verifyToken = function(token) {
     if (!token || !this.verificationToken) return false;
-    try {
-      const provided = Buffer.from(token, 'hex');
-      const stored   = Buffer.from(this.verificationToken, 'hex');
-      return crypto.timingSafeEqual(provided, stored);
-    } catch {
-      return false;
-    }
+    const provided = Buffer.from(token, 'hex');
+    const stored   = Buffer.from(this.verificationToken, 'hex');
+    return crypto.timingSafeEqual(provided, stored);
   };
 
   conn.model('Transaction', transactionSchema);

@@ -454,18 +454,18 @@ exports.listInternal = async (req, res, next) => {
 };
 
 
+
 /**
- * initiateInternal
  * POST /api/v1/transactions/initiate
- * Crée une transaction en attente (status = 'pending'),
- * sans débiter l’expéditeur.
+ * Crée une transaction en statut 'pending' *après* avoir vérifié
+ * que l'expéditeur a suffisamment de fonds.
  */
 exports.initiateInternal = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
 
-    // 1. Extraction + sanitize
+    // 1) Extraction + sanitation
     const {
       toEmail,
       amount,
@@ -482,45 +482,39 @@ exports.initiateInternal = async (req, res, next) => {
       country
     } = req.body;
 
-    // 2. Validations
-    const recEmail = sanitize(toEmail);
-    if (!recEmail)                            throw createError(400, 'Email destinataire requis');
-    if (!question || !securityCode)           throw createError(400, 'Question et code de sécurité requis');
-    if (!destination || !funds || !country)   throw createError(400, 'Données de transaction incomplètes');
-    if (description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
+    // 2) Validations basiques
+    if (!sanitize(toEmail))                          throw createError(400, 'Email du destinataire requis');
+    if (!question || !securityCode)                  throw createError(400, 'Question et code de sécurité requis');
+    if (!destination || !funds || !country)          throw createError(400, 'Données de transaction incomplètes');
+    if (description.length > MAX_DESC_LENGTH)        throw createError(400, 'Description trop longue');
 
-    // 3. Récupérer expéditeur
-    const senderId   = req.user.id;
+    // 3) Expéditeur & destinataire
+    const senderId = req.user.id;
     const senderUser = await User.findById(senderId).select('fullName email').lean();
-    if (!senderUser)                          throw createError(403, 'Utilisateur invalide');
+    if (!senderUser)                                 throw createError(403, 'Utilisateur invalide');
 
-    // 4. Vérifier solde via Balance
-    const balDoc      = await Balance.findOne({ user: senderId }).lean();
-    const balanceFloat = balDoc?.amount ?? 0;
+    const receiver = await User.findOne({ email: sanitize(toEmail) }).lean();
+    if (!receiver)                                   throw createError(404, 'Destinataire introuvable');
+    if (receiver._id.toString() === senderId)        throw createError(400, 'Auto-transfert impossible');
 
-    // 5. Destinataire & auto-transfert
-    const receiver = await User.findOne({ email: recEmail }).lean();
-    if (!receiver)                           throw createError(404, 'Destinataire introuvable');
-    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
-
-    // 6. Montant & frais
+    // 4) Montant & frais
     const amt  = parseFloat(amount);
     const fees = parseFloat(transactionFees);
-    if (isNaN(amt) || amt <= 0)               throw createError(400, 'Montant invalide');
-    if (balanceFloat < amt + fees)
-                                              throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+    if (isNaN(amt) || amt <= 0)                      throw createError(400, 'Montant invalide');
+    const total = amt + fees;
 
-    // 7. Conversion & token
+    // 5) Vérifier le solde via Balance
+    const balDoc = await Balance.findOne({ user: senderId }).lean();
+    const balanceFloat = balDoc?.amount ?? 0;
+    if (balanceFloat < total)                       throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+
+    // 6) Préparer la transaction
     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const decLocalAmt = mongoose.Types.Decimal128.fromString((parseFloat(localAmount)||amt).toFixed(2));
-    const token       = TransactionModel().generateVerificationToken();
+    const decLocalAmt = mongoose.Types.Decimal128.fromString(((parseFloat(localAmount) || amt)).toFixed(2));
     const nameDest    = sanitize(recipientInfo.name) || senderUser.fullName;
 
-    // 8. Débit « pré-autorisé » imité ici ou simplement laissé pour la confirmation
-    //    (on ne retire pas encore, on laisse pour la confirmation)
-
-    // 9. Création transaction
+    // 7) Création en base (status pending)
     const [tx] = await TransactionModel().create([{
       sender:            senderUser._id,
       receiver:          receiver._id,
@@ -529,24 +523,23 @@ exports.initiateInternal = async (req, res, next) => {
       localAmount:       decLocalAmt,
       localCurrencySymbol,
       nameDestinataire:  nameDest,
-      recipientEmail:    recEmail,
+      recipientEmail:    sanitize(toEmail),
       country:           sanitize(country),
-      verificationToken: token,
       description:       sanitize(description),
       securityQuestion:  sanitize(question),
       securityCode:      sanitize(securityCode),
       destination:       sanitize(destination),
-      funds:             sanitize(funds)
+      funds:             sanitize(funds),
+      status:            'pending'
     }], { session });
 
-    // 10. Notifier « initiated »
+    // 8) Notifications « initiated »
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
 
     await session.commitTransaction();
     res.status(201).json({
-      success:           true,
-      transactionId:     tx._id.toString(),
-      verificationToken: token
+      success:       true,
+      transactionId: tx._id.toString()
     });
 
   } catch (err) {
@@ -559,55 +552,46 @@ exports.initiateInternal = async (req, res, next) => {
 
 
 /**
- * confirmController
  * POST /api/v1/transactions/confirm
- * Valide le token, débite l’expéditeur & crédite le destinataire.
+ * Valide la transaction en comparant le securityCode,
+ * puis effectue le débit/crédit atomiques.
  */
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
-    const { transactionId, token, senderCurrencySymbol } = req.body;
 
-    // 1. Charger TX
+    // 1) Extraction + sanity check
+    const { transactionId, securityCode, senderCurrencySymbol } = req.body;
+    if (!transactionId || !securityCode) throw createError(400, 'Paramètres manquants');
+
+    // 2) Récupérer la transaction
     const tx = await TransactionModel().findById(transactionId)
-      .select([
-        'sender', 'receiver', 'amount',
-        'transactionFees', 'verificationToken',
-        'status', 'localCurrencySymbol', 'localAmount',
-        'securityQuestion', 'securityCode',
-        'destination', 'funds', 'country'
-      ].join(' '))
+      .select('+securityCode +transactionFees +amount +receiver +sender')
       .session(session);
+    if (!tx || tx.status !== 'pending') throw createError(400, 'Transaction invalide ou déjà traitée');
+    if (tx.sender.toString() !== req.user.id)  throw createError(403, 'Vous n’êtes pas l’expéditeur');
 
-    if (!tx || tx.status !== 'pending')
-      throw createError(400, 'Transaction invalide ou déjà traitée');
-
-    // 2. Vérifier destinataire & token
-    if (tx.receiver.toString() !== req.user.id)
-      throw createError(403, 'Vous n’êtes pas le destinataire');
-    if (!tx.verifyToken(sanitize(token))) {
+    // 3) Vérifier le code de sécurité
+    if (sanitize(securityCode) !== tx.securityCode) {
       await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      throw createError(401, 'Code de confirmation incorrect');
+      throw createError(401, 'Code de sécurité incorrect');
     }
 
-    // 3. Calcul montants
-    const amtFloat   = parseFloat(tx.amount.toString());
-    const feesFloat  = parseFloat(tx.transactionFees.toString());
-    const totalDebit = amtFloat + feesFloat;
+    // 4) Débit de l’expéditeur (amount + fees)
+    const amtFloat  = parseFloat(tx.amount.toString());
+    const feesFloat = parseFloat(tx.transactionFees.toString());
+    await Balance.withdrawFromBalance(tx.sender, amtFloat + feesFloat);
 
-    // 4. Débit expéditeur
-    await Balance.withdrawFromBalance(tx.sender, totalDebit);
-
-    // 5. Crédit destinataire
+    // 5) Crédit du destinataire (amount)
     await Balance.addToBalance(tx.receiver, amtFloat);
 
-    // 6. Finaliser
+    // 6) Mettre à jour la transaction
     tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
-    // 7. Notifications « confirmed »
+    // 7) Notifications « confirmed »
     await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
 
     await session.commitTransaction();
@@ -620,8 +604,6 @@ exports.confirmController = async (req, res, next) => {
     session.endSession();
   }
 };
-
-
 
 
 
