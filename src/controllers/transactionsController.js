@@ -518,6 +518,7 @@ exports.initiateInternal = async (req, res, next) => {
 
     // ↘️ Débit atomic via Balance
     await Balance.withdrawFromBalance(senderId, amt + fees);
+    console.log(Balance);
 
     // 💾 Création de la transaction
     const [tx] = await TransactionModel().create([{
