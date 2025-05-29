@@ -296,6 +296,8 @@
 
 
 
+// File: src/controllers/transactionsController.js
+
 const mongoose        = require('mongoose');
 const createError     = require('http-errors');
 const { Expo }        = require('expo-server-sdk');
@@ -318,7 +320,7 @@ const {
 } = require('../utils/emailTemplates');
 
 // Constants
-const sanitize        = text => String(text || '').replace(/[<>\\/{};]/g, '').trim();
+const sanitizeText    = (text = '') => text.toString().replace(/[<>\\/{};]/g, '').trim();
 const MAX_DESC_LENGTH = 500;
 
 /**
@@ -326,93 +328,69 @@ const MAX_DESC_LENGTH = 500;
  */
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    const subjectMap = {
-      initiated: 'Transaction en attente',
-      confirmed: 'Transaction confirmée',
-      cancelled: 'Transaction annulée'
-    };
+    const subjectMap = { initiated: 'Transaction en attente', confirmed: 'Transaction confirmée', cancelled: 'Transaction annulée' };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
-
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender).select('email pushToken fullName').lean(),
       User.findById(tx.receiver).select('email pushToken fullName').lean()
     ]);
-
-    const dateStr    = new Date().toLocaleString('fr-FR');
-    const webLink    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
-    const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
-
-    // Préparer les données pour expéditeur et destinataire
-    const txId           = tx._id.toString();
-    const amountStr      = tx.amount?.toString() || '0';
-    const localAmtStr    = tx.localAmount?.toString() || amountStr;
-    const receiverEmail  = tx.recipientEmail;
-
+    const dateStr = new Date().toLocaleString('fr-FR');
+    const txId = tx._id.toString();
+    const webLink = `https://panoval.com/confirm/${txId}?token=${tx.verificationToken}`;
+    const mobileLink = `panoval://confirm/${txId}?token=${tx.verificationToken}`;
     const dataSender = {
-      transactionId:    txId,
-      amount:           amountStr,
-      currency:         senderCurrency,
-      name:             sender.fullName,
-      senderEmail:      sender.email,
-      receiverEmail:    receiverEmail || receiver.email,
-      date:             dateStr,
-      confirmLinkWeb:   webLink,
-      country:          tx.country,
+      transactionId: txId,
+      amount: tx.amount.toString(),
+      currency: senderCurrency,
+      name: sender.fullName,
+      senderEmail: sender.email,
+      receiverEmail: tx.recipientEmail || receiver.email,
+      date: dateStr,
+      confirmLinkWeb: webLink,
+      country: tx.country,
       securityQuestion: tx.securityQuestion
     };
     const dataReceiver = {
-      transactionId:    txId,
-      amount:           localAmtStr,
-      currency:         tx.localCurrencySymbol,
-      name:             tx.nameDestinataire,
-      receiverEmail,
-      senderEmail:      sender.email,
-      date:             dateStr,
-      confirmLink:      mobileLink,
-      country:          tx.country,
+      transactionId: txId,
+      amount: tx.localAmount.toString(),
+      currency: tx.localCurrencySymbol,
+      name: tx.nameDestinataire,
+      receiverEmail: tx.recipientEmail,
+      senderEmail: sender.email,
+      date: dateStr,
+      confirmLink: mobileLink,
+      country: tx.country,
       securityQuestion: tx.securityQuestion,
-      senderName:       sender.fullName
+      senderName: sender.fullName
     };
-
     // Emails
     if (sender.email) {
-      const htmlSender = {
-        initiated: initiatedSenderTemplate,
-        confirmed: confirmedSenderTemplate,
-        cancelled: cancelledSenderTemplate
-      }[status]((status === 'cancelled') ? { ...dataSender, reason: tx.cancelReason } : dataSender);
+      const htmlSender = { initiated: initiatedSenderTemplate, confirmed: confirmedSenderTemplate, cancelled: cancelledSenderTemplate }[status](status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
       await sendEmail({ to: sender.email, subject: emailSubject, html: htmlSender });
     }
     if (receiver.email) {
-      const htmlReceiver = {
-        initiated: initiatedReceiverTemplate,
-        confirmed: confirmedReceiverTemplate,
-        cancelled: cancelledReceiverTemplate
-      }[status]((status === 'cancelled') ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
+      const htmlReceiver = { initiated: initiatedReceiverTemplate, confirmed: confirmedReceiverTemplate, cancelled: cancelledReceiverTemplate }[status](status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
       await sendEmail({ to: receiver.email, subject: emailSubject, html: htmlReceiver });
     }
-
     // Push notifications
     const pushMessages = [];
     [sender, receiver].forEach(userItem => {
       if (userItem.pushToken && Expo.isExpoPushToken(userItem.pushToken)) {
-        const payload = (userItem._id.toString() === sender._id.toString()) ? dataSender : dataReceiver;
+        const payload = userItem._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
         pushMessages.push({ to: userItem.pushToken, sound: 'default', title: emailSubject, body: `Montant : ${payload.amount} ${payload.currency}`, data: payload });
       }
     });
     for (const chunk of expo.chunkPushNotifications(pushMessages)) {
       try { await expo.sendPushNotificationsAsync(chunk); } catch (err) { logger.error('Expo push error:', err); }
     }
-
     // In-app notifications
     const events = [sender, receiver].map(userItem => {
-      const payload = (userItem._id.toString() === sender._id.toString()) ? dataSender : dataReceiver;
+      const payload = userItem._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
       return { service: 'notifications', event: `transaction_${status}`, payload: { userId: userItem._id, type: `transaction_${status}`, data: payload } };
     });
     await Outbox.insertMany(events, { session });
     const inAppDocs = events.map(e => ({ recipient: e.payload.userId, type: e.payload.type, data: e.payload.data, read: false }));
     await Notification.insertMany(inAppDocs, { session });
-
   } catch (err) {
     logger.error('notifyParties error:', err);
   }
@@ -420,94 +398,97 @@ async function notifyParties(tx, status, session, senderCurrency) {
 
 /**
  * GET /api/v1/transactions
- * Liste les transactions internes de l’utilisateur connecté
+ * Liste les transactions de l’utilisateur connecté
  */
 exports.listInternal = async (req, res, next) => {
   try {
-    const userId      = req.user.id;
+    const userId = req.user.id;
     const Transaction = TransactionModel();
     const txs = await Transaction.find({ sender: userId }).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, count: txs.length, data: txs });
+    return res.json({ success: true, count: txs.length, data: txs });
   } catch (err) {
-    next(err);
+    logger.error('listInternal error:', err);
+    return next(err);
   }
 };
 
 /**
  * POST /api/v1/transactions/initiate
- * Flux interne PayNoVal → PayNoVal
  */
-exports.initiateInternal = async (req, res, next) => {
+exports.initiateInternal = async (req, res) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
     const {
-      toEmail,
-      amount,
-      transactionFees = 0,
-      localAmount,
-      localCurrencySymbol,
-      recipientInfo = {},
-      senderCurrencySymbol,
-      description = '',
-      question,
-      securityCode,
-      destination,
-      funds,
-      country
+      toEmail, amount, transactionFees = 0, localAmount,
+      localCurrencySymbol, recipientInfo = {},
+      senderCurrencySymbol, description = '',
+      question, securityCode, destination, funds, country
     } = req.body;
-
-    // Sanitize & validate server-side
-    const recEmail = sanitize(toEmail);
-    if (!recEmail) throw createError(400, 'Email du destinataire requis');
-    if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
-    if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
-    if (description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
-
+    // Validation basique
+    const recEmail = sanitizeText(toEmail);
+    const errors = [];
+    if (!recEmail) errors.push('Email destinataire manquant');
+    if (!amount || isNaN(amount) || amount <= 0) errors.push('Montant invalide');
+    if (!question) errors.push('Question de sécurité manquante');
+    if (!securityCode) errors.push('Code de sécurité manquant');
+    if (!destination || !funds || !country) errors.push('Champs de transaction incomplets');
+    if (description.length > MAX_DESC_LENGTH) errors.push('Description trop longue');
+    if (errors.length) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: errors.join('; ') });
+    }
     const senderId = req.user.id;
     const receiver = await User.findOne({ email: recEmail }).lean();
-    if (!receiver) throw createError(404, 'Destinataire introuvable');
-    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
-
-    const amt  = parseFloat(amount);
+    if (!receiver) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, error: 'Destinataire introuvable' });
+    }
+    if (receiver._id.toString() === senderId) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: 'Auto-transfert impossible' });
+    }
+    const amt = parseFloat(amount);
     const fees = parseFloat(transactionFees);
-    if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
-
-    const senderObj    = await User.findById(senderId).select('balance fullName email').lean();
+    const senderObj = await User.findById(senderId).select('balance fullName email').lean();
     const balanceFloat = parseFloat(senderObj.balance.toString());
-    if (balanceFloat < amt + fees) throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
-
-    const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-    const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const decLocalAmt = mongoose.Types.Decimal128.fromString((parseFloat(localAmount) || amt).toFixed(2));
-    const token       = TransactionModel().generateVerificationToken();
-    const nameDest    = sanitize(recipientInfo.name) || senderObj.fullName;
-
-    const [tx] = await TransactionModel().create([{
-      sender:           senderObj._id,
-      receiver:         receiver._id,
-      amount:           decAmt,
-      transactionFees:  decFees,
-      localAmount:      decLocalAmt,
+    if (balanceFloat < amt + fees) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: `Solde insuffisant : ${balanceFloat.toFixed(2)}` });
+    }
+    // Création de la transaction
+    const decAmt = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
+    const decLocalAmt = mongoose.Types.Decimal128.fromString(((parseFloat(localAmount) || amt)).toFixed(2));
+    const token = TransactionModel().generateVerificationToken();
+    const nameDest = sanitizeText(recipientInfo.name) || senderObj.fullName;
+    const [tx] = await TransactionModel().create([{ 
+      sender: senderObj._id,
+      receiver: receiver._id,
+      amount: decAmt,
+      transactionFees: decFees,
+      localAmount: decLocalAmt,
       localCurrencySymbol,
       nameDestinataire: nameDest,
-      recipientEmail:   recEmail,
-      country:          sanitize(country),
+      recipientEmail: recEmail,
+      country: sanitizeText(country),
       verificationToken: token,
-      description:      sanitize(description),
-      securityQuestion: sanitize(question),
-      securityCode:     sanitize(securityCode),
-      destination:      sanitize(destination),
-      funds:            sanitize(funds)
+      description: sanitizeText(description),
+      securityQuestion: sanitizeText(question),
+      securityCode: sanitizeText(securityCode),
+      destination: sanitizeText(destination),
+      funds: sanitizeText(funds)
     }], { session });
-
+    // Notifications
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
     await session.commitTransaction();
-    res.status(201).json({ success: true, transactionId: tx._id.toString(), verificationToken: token });
-
+    return res.status(201).json({ success: true, transactionId: tx._id.toString(), verificationToken: token });
   } catch (err) {
     await session.abortTransaction();
-    next(err);
+    logger.error('initiateInternal error:', err);
+    const status = err.status || 500;
+    const message = err.status ? err.message : 'Erreur interne du serveur';
+    return res.status(status).json({ success: false, error: message });
   } finally {
     session.endSession();
   }
@@ -515,28 +496,35 @@ exports.initiateInternal = async (req, res, next) => {
 
 /**
  * POST /api/v1/transactions/confirm
- * Confirmation interne PayNoVal → PayNoVal
  */
-exports.confirmController = async (req, res, next) => {
+exports.confirmController = async (req, res) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
     const { transactionId, token, senderCurrencySymbol } = req.body;
-
+    if (!transactionId || !token) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: 'Paramètres manquants' });
+    }
     const tx = await TransactionModel().findById(transactionId)
       .select('+verificationToken +transactionFees +localCurrencySymbol +nameDestinataire +localAmount +recipientEmail +securityQuestion +securityCode +destination +funds +country')
       .session(session);
-    if (!tx || tx.status !== 'pending') throw createError(400, 'Transaction invalide ou déjà traitée');
-    if (tx.sender.toString() !== req.user.id) throw createError(403, 'Vous n’êtes pas l’expéditeur');
-    if (!tx.verifyToken(sanitize(token))) {
-      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      throw createError(401, 'Code de confirmation incorrect');
+    if (!tx || tx.status !== 'pending') {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: 'Transaction invalide ou déjà traitée' });
     }
-
-    const amtFloat   = parseFloat(tx.amount.toString());
-    const feesFloat  = parseFloat(tx.transactionFees.toString());
+    if (tx.sender.toString() !== req.user.id) {
+      await session.abortTransaction();
+      return res.status(403).json({ success: false, error: 'Accès interdit' });
+    }
+    if (!tx.verifyToken(sanitizeText(token))) {
+      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
+      await session.abortTransaction();
+      return res.status(401).json({ success: false, error: 'Code de confirmation incorrect' });
+    }
+    const amtFloat = parseFloat(tx.amount.toString());
+    const feesFloat = parseFloat(tx.transactionFees.toString());
     const totalDebit = amtFloat + feesFloat;
-
     const senderUpd = await User.findOneAndUpdate(
       { _id: tx.sender, balance: { $gte: totalDebit } },
       { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } },
@@ -544,9 +532,9 @@ exports.confirmController = async (req, res, next) => {
     ).lean();
     if (!senderUpd) {
       await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      throw createError(400, 'Solde insuffisant');
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: 'Solde insuffisant' });
     }
-
     const receiverUpd = await User.findByIdAndUpdate(
       tx.receiver,
       { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
@@ -554,20 +542,21 @@ exports.confirmController = async (req, res, next) => {
     ).lean();
     if (!receiverUpd) {
       await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      throw createError(404, 'Destinataire introuvable');
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, error: 'Destinataire introuvable' });
     }
-
-    tx.status      = 'confirmed';
+    tx.status = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
-
     await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
     await session.commitTransaction();
-
-    res.json({ success: true });
+    return res.json({ success: true });
   } catch (err) {
     await session.abortTransaction();
-    next(err);
+    logger.error('confirmController error:', err);
+    const status = err.status || 500;
+    const message = err.status ? err.message : 'Erreur interne du serveur';
+    return res.status(status).json({ success: false, error: message });
   } finally {
     session.endSession();
   }
