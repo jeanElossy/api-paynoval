@@ -296,20 +296,23 @@
 
 
 
-// File: src/controllers/transactionsController.js
 
-const mongoose        = require('mongoose');
-const createError     = require('http-errors');
-const { Expo }        = require('expo-server-sdk');
-const expo            = new Expo();
-const { getTxConn }   = require('../config/db');
-const TransactionModel = () => getTxConn().model('Transaction');
-const logger          = require('../utils/logger');
+// src/controllers/transactionsController.js
 
-const User            = require('../models/User');
-const Outbox          = require('../models/Outbox');
-const Notification    = require('../models/Notification');
-const { sendEmail }   = require('../utils/mail');
+const mongoose           = require('mongoose');
+const createError        = require('http-errors');
+const { Expo }           = require('expo-server-sdk');
+const expo               = new Expo();
+const { getTxConn }      = require('../config/db');
+const TransactionModel   = () => getTxConn().model('Transaction');
+
+const User               = require('../models/User');
+const Balance            = require('../models/Balance');        // Modèle de balance séparé
+const Outbox             = require('../models/Outbox');
+const Notification       = require('../models/Notification');
+const { sendEmail }      = require('../utils/mail');
+const logger             = require('../utils/logger');
+
 const {
   initiatedSenderTemplate,
   initiatedReceiverTemplate,
@@ -319,258 +322,333 @@ const {
   cancelledReceiverTemplate
 } = require('../utils/emailTemplates');
 
-// Helpers
-const sanitizeText    = (text = '') => text.toString().replace(/[<>\\/{};]/g, '').trim();
-const parseDecimal    = val => {
-  if (val == null) return 0;
-  if (typeof val === 'string') return parseFloat(val) || 0;
-  if (typeof val === 'object') {
-    if (val.$numberDecimal) return parseFloat(val.$numberDecimal) || 0;
-    return parseFloat(val.toString()) || 0;
-  }
-  return parseFloat(val) || 0;
-};
+// ----------------------------------------------------------------------------
+// Constantes et utilitaires
+// ----------------------------------------------------------------------------
+
+/** Nettoie et échappe une chaîne pour éviter injection HTML/JS. */
+function sanitize(text) {
+  return String(text || '')
+    .replace(/[<>\\/{};]/g, '')
+    .trim();
+}
+
+// Taille max d’une description libre
 const MAX_DESC_LENGTH = 500;
 
-/**
- * Envoie notifications email, push & in-app
- */
+// ----------------------------------------------------------------------------
+// Fonction interne : envoi de notifications (email, push, in-app)
+// ----------------------------------------------------------------------------
+
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    const subjectMap = { initiated: 'Transaction en attente', confirmed: 'Transaction confirmée', cancelled: 'Transaction annulée' };
+    // 1) Préparer le sujet selon le statut
+    const subjectMap = {
+      initiated: 'Transaction en attente',
+      confirmed: 'Transaction confirmée',
+      cancelled: 'Transaction annulée'
+    };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
+
+    // 2) Charger expéditeur & destinataire
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender).select('email pushToken fullName').lean(),
       User.findById(tx.receiver).select('email pushToken fullName').lean()
     ]);
-    const dateStr = new Date().toLocaleString('fr-FR');
-    const txId = tx._id?.toString() || '';
-    const webLink = `https://panoval.com/confirm/${txId}?token=${tx.verificationToken}`;
-    const mobileLink = `panoval://confirm/${txId}?token=${tx.verificationToken}`;
+
+    // 3) Préparer données partagées
+    const dateStr    = new Date().toLocaleString('fr-FR');
+    const txId       = tx._id.toString();
+    const amountStr  = tx.amount?.toString()      || '0';
+    const localAmt   = tx.localAmount?.toString() || amountStr;
+    const recEmail   = tx.recipientEmail;
+
+    // 4) Payload pour expéditeur
     const dataSender = {
-      transactionId: txId,
-      amount: tx.amount?.toString() || '0',
-      currency: senderCurrency,
-      name: sender.fullName || '',
-      senderEmail: sender.email || '',
-      receiverEmail: tx.recipientEmail || receiver.email || '',
-      date: dateStr,
-      confirmLinkWeb: webLink,
-      country: tx.country || '',
-      securityQuestion: tx.securityQuestion || ''
+      transactionId:  txId,
+      amount:         amountStr,
+      currency:       senderCurrency,
+      name:           sender.fullName,
+      senderEmail:    sender.email,
+      receiverEmail:  recEmail || receiver.email,
+      date:           dateStr,
+      confirmLinkWeb: `https://panoval.com/confirm/${txId}?token=${tx.verificationToken}`,
+      country:        tx.country,
+      securityQuestion: tx.securityQuestion
     };
+
+    // 5) Payload pour destinataire
     const dataReceiver = {
-      transactionId: txId,
-      amount: tx.localAmount?.toString() || dataSender.amount,
-      currency: tx.localCurrencySymbol || '',
-      name: tx.nameDestinataire || '',
-      receiverEmail: tx.recipientEmail || '',
-      senderEmail: sender.email || '',
-      date: dateStr,
-      confirmLink: mobileLink,
-      country: tx.country || '',
-      securityQuestion: tx.securityQuestion || '',
-      senderName: sender.fullName || ''
+      transactionId:  txId,
+      amount:         localAmt,
+      currency:       tx.localCurrencySymbol,
+      name:           tx.nameDestinataire,
+      receiverEmail:  recEmail,
+      senderEmail:    sender.email,
+      date:           dateStr,
+      confirmLink:    `panoval://confirm/${txId}?token=${tx.verificationToken}`,
+      country:        tx.country,
+      securityQuestion: tx.securityQuestion,
+      senderName:     sender.fullName
     };
+
+    // 6) Envoi des emails
     if (sender.email) {
-      const htmlSender = { initiated: initiatedSenderTemplate, confirmed: confirmedSenderTemplate, cancelled: cancelledSenderTemplate }[status]
-        (status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
+      const htmlSender = {
+        initiated: initiatedSenderTemplate,
+        confirmed: confirmedSenderTemplate,
+        cancelled: cancelledSenderTemplate
+      }[status](
+        status === 'cancelled'
+          ? { ...dataSender, reason: tx.cancelReason }
+          : dataSender
+      );
       await sendEmail({ to: sender.email, subject: emailSubject, html: htmlSender });
     }
+
     if (receiver.email) {
-      const htmlReceiver = { initiated: initiatedReceiverTemplate, confirmed: confirmedReceiverTemplate, cancelled: cancelledReceiverTemplate }[status]
-        (status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
+      const htmlReceiver = {
+        initiated: initiatedReceiverTemplate,
+        confirmed: confirmedReceiverTemplate,
+        cancelled: cancelledReceiverTemplate
+      }[status](
+        status === 'cancelled'
+          ? { ...dataReceiver, reason: tx.cancelReason }
+          : dataReceiver
+      );
       await sendEmail({ to: receiver.email, subject: emailSubject, html: htmlReceiver });
     }
+
+    // 7) Push notifications via Expo
     const pushMessages = [];
     [sender, receiver].forEach(userItem => {
       if (userItem.pushToken && Expo.isExpoPushToken(userItem.pushToken)) {
-        const payload = userItem._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
-        pushMessages.push({ to: userItem.pushToken, sound: 'default', title: emailSubject, body: `Montant : ${payload.amount} ${payload.currency}`, data: payload });
+        const payload = (userItem._id.toString() === sender._id.toString())
+          ? dataSender
+          : dataReceiver;
+        pushMessages.push({
+          to: userItem.pushToken,
+          sound: 'default',
+          title: emailSubject,
+          body: `Montant : ${payload.amount} ${payload.currency}`,
+          data: payload
+        });
       }
     });
+
     for (const chunk of expo.chunkPushNotifications(pushMessages)) {
-      try { await expo.sendPushNotificationsAsync(chunk); } catch (err) { logger.error('Expo push error:', err); }
+      try {
+        await expo.sendPushNotificationsAsync(chunk);
+      } catch (err) {
+        logger.error('Expo push error:', err);
+      }
     }
+
+    // 8) In-app notifications (Outbox + Notification)
     const events = [sender, receiver].map(userItem => {
-      const payload = userItem._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
-      return { service: 'notifications', event: `transaction_${status}`, payload: { userId: userItem._id, type: `transaction_${status}`, data: payload } };
+      const payload = (userItem._id.toString() === sender._id.toString())
+        ? dataSender
+        : dataReceiver;
+      return {
+        service: 'notifications',
+        event: `transaction_${status}`,
+        payload: {
+          userId: userItem._id,
+          type: `transaction_${status}`,
+          data: payload
+        }
+      };
     });
+
+    // Stockage reliable via Outbox
     await Outbox.insertMany(events, { session });
-    const inAppDocs = events.map(e => ({ recipient: e.payload.userId, type: e.payload.type, data: e.payload.data, read: false }));
+
+    // In-app immédiates
+    const inAppDocs = events.map(e => ({
+      recipient: e.payload.userId,
+      type: e.payload.type,
+      data: e.payload.data,
+      read: false
+    }));
     await Notification.insertMany(inAppDocs, { session });
+
   } catch (err) {
     logger.error('notifyParties error:', err);
+    // On ne bloque pas la transaction en cas d’erreur de notif
   }
 }
 
-/**
- * GET /api/v1/transactions
- */
+// ----------------------------------------------------------------------------
+// GET /api/v1/transactions
+// Liste les transactions initiées par l’utilisateur connecté
+// ----------------------------------------------------------------------------
+
 exports.listInternal = async (req, res, next) => {
   try {
-    const userId = req.user.id;
+    const userId      = req.user.id;
     const Transaction = TransactionModel();
-    const txs = await Transaction.find({ sender: userId }).sort({ createdAt: -1 }).lean();
+    const txs         = await Transaction.find({ sender: userId })
+      .sort({ createdAt: -1 })
+      .lean();
+
     return res.json({ success: true, count: txs.length, data: txs });
   } catch (err) {
-    logger.error('listInternal error:', err);
     return next(err);
   }
 };
 
-/**
- * POST /api/v1/transactions/initiate
- */
-exports.initiateInternal = async (req, res) => {
+// ----------------------------------------------------------------------------
+// POST /api/v1/transactions/initiate
+// Crée une nouvelle transaction interne et débite l’expéditeur immédiatement
+// ----------------------------------------------------------------------------
+
+exports.initiateInternal = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
+
+    // Récupération et sanitization des entrées
     const {
-      toEmail, amount, transactionFees = 0, localAmount,
-      localCurrencySymbol, recipientInfo = {},
-      senderCurrencySymbol, description = '',
-      question, securityCode, destination, funds, country
+      toEmail, amount, transactionFees = 0,
+      localAmount, localCurrencySymbol,
+      recipientInfo = {}, senderCurrencySymbol,
+      description = '', question, securityCode,
+      destination, funds, country
     } = req.body;
-    // Validation & sanitation
-    const errors = [];
-    const recEmail = sanitizeText(toEmail);
-    const amt = parseFloat(amount);
-    const fees = parseFloat(transactionFees);
-    if (!recEmail) errors.push('Email destinataire manquant');
-    if (isNaN(amt) || amt <= 0) errors.push('Montant invalide');
-    if (!question) errors.push('Question sécurité manquante');
-    if (!securityCode) errors.push('Code sécurité manquant');
-    if (!destination || !funds || !country) errors.push('Champs de transaction incomplets');
-    if (description.length > MAX_DESC_LENGTH) errors.push('Description trop longue');
-    if (errors.length) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: errors.join('; ') });
-    }
-    // Vérification solde
-    const senderId    = req.user.id;
-    const senderObj   = await User.findById(senderId).select('balance fullName email').lean();
-    const balanceFloat = parseDecimal(senderObj.balance);
-    if (balanceFloat < amt + fees) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: `Solde insuffisant : ${balanceFloat.toFixed(2)}` });
-    }
-    // Recherche destinataire
+
+    const recEmail = sanitize(toEmail);
+
+    // --- Validations côté serveur ---
+    if (!recEmail) throw createError(400, 'Email du destinataire requis');
+    if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
+    if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
+    if (description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
+
+    // Charger destinataire
+    const senderId = req.user.id;
     const receiver = await User.findOne({ email: recEmail }).lean();
-    if (!receiver) {
-      await session.abortTransaction();
-      return res.status(404).json({ success: false, error: 'Destinataire introuvable' });
+    if (!receiver) throw createError(404, 'Destinataire introuvable');
+    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
+
+    // Lire la balance réelle depuis la collection Balance
+    const balDoc         = await Balance.findOne({ user: senderId }).session(session);
+    const currentBalance = balDoc?.amount ?? 0;
+
+    // Montants numériques
+    const amt  = parseFloat(amount);
+    const fees = parseFloat(transactionFees);
+
+    if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
+    if (currentBalance < amt + fees) {
+      throw createError(400, `Solde insuffisant : ${currentBalance.toFixed(2)}`);
     }
-    if (receiver._id.toString() === senderId) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: 'Auto-transfert impossible' });
-    }
-    // Création transaction
+
+    // Conversion en Decimal128 pour la DB transactions
     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const decLocalAmt = mongoose.Types.Decimal128.fromString((parseDecimal(localAmount) || amt).toFixed(2));
+    const decLocalAmt = mongoose.Types.Decimal128.fromString((parseFloat(localAmount) || amt).toFixed(2));
     const token       = TransactionModel().generateVerificationToken();
-    const nameDest    = sanitizeText(recipientInfo.name) || senderObj.fullName;
-    const [tx] = await TransactionModel().create([{ 
-      sender:             senderObj._id,
-      receiver:           receiver._id,
-      amount:             decAmt,
-      transactionFees:    decFees,
-      localAmount:        decLocalAmt,
+    const nameDest    = sanitize(recipientInfo.name)
+      || (await User.findById(senderId).select('fullName')).fullName;
+
+    // Création de la transaction
+    const [tx] = await TransactionModel().create([{
+      sender:           senderId,
+      receiver:         receiver._id,
+      amount:           decAmt,
+      transactionFees:  decFees,
+      localAmount:      decLocalAmt,
       localCurrencySymbol,
-      nameDestinataire:   nameDest,
-      recipientEmail:     recEmail,
-      country:            sanitizeText(country),
-      verificationToken:  token,
-      description:        sanitizeText(description),
-      securityQuestion:   sanitizeText(question),
-      securityCode:       sanitizeText(securityCode),
-      destination:        sanitizeText(destination),
-      funds:              sanitizeText(funds)
+      nameDestinataire: nameDest,
+      recipientEmail:   recEmail,
+      country:          sanitize(country),
+      verificationToken: token,
+      description:      sanitize(description),
+      securityQuestion: sanitize(question),
+      securityCode:     sanitize(securityCode),
+      destination:      sanitize(destination),
+      funds:            sanitize(funds)
     }], { session });
-    // Notifications
+
+    // Débit immédiat de la balance de l’expéditeur
+    await Balance.withdrawFromBalance(senderId, amt + fees);
+
+    // Notifications (email / push / in-app)
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+
+    // Commit de la transaction DB
     await session.commitTransaction();
-    return res.status(201).json({ success: true, transactionId: tx._id?.toString() || '', verificationToken: token });
+
+    return res.status(201).json({
+      success: true,
+      transactionId:  tx._id.toString(),
+      verificationToken: token
+    });
+
   } catch (err) {
     await session.abortTransaction();
     logger.error('initiateInternal error:', err);
-    const status = err.status || 500;
-    const message = err.status ? err.message : 'Erreur interne serveur';
-    return res.status(status).json({ success: false, error: message });
+    return next(err);
   } finally {
     session.endSession();
   }
 };
 
-/**
- * POST /api/v1/transactions/confirm
- */
-exports.confirmController = async (req, res) => {
+// ----------------------------------------------------------------------------
+// POST /api/v1/transactions/confirm
+// Confirmation de la transaction : vérifie le token, débite/crédite les balances,
+// puis notifie expéditeur & destinataire
+// ----------------------------------------------------------------------------
+
+exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
+
     const { transactionId, token, senderCurrencySymbol } = req.body;
-    if (!transactionId || !token) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: 'Paramètres manquants' });
-    }
+
+    // Charger la transaction complète (avec token caché)
     const tx = await TransactionModel().findById(transactionId)
-      .select('+verificationToken +transactionFees +localCurrencySymbol +nameDestinataire +localAmount +recipientEmail +securityQuestion +securityCode +destination +funds +country')
+      .select('+verificationToken +transactionFees +localCurrencySymbol +localAmount +recipientEmail +securityQuestion +securityCode +destination +funds +country')
       .session(session);
-    if (!tx || tx.status !== 'pending') {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: 'Transaction invalide ou déjà traitée' });
-    }
-    if (tx.sender.toString() !== req.user.id) {
-      await session.abortTransaction();
-      return res.status(403).json({ success: false, error: 'Accès interdit' });
-    }
-    if (!tx.verifyToken(sanitizeText(token))) {
+
+    if (!tx || tx.status !== 'pending') throw createError(400, 'Transaction invalide ou déjà traitée');
+    if (tx.sender.toString() !== req.user.id)   throw createError(403, 'Vous n’êtes pas l’expéditeur');
+    if (!tx.verifyToken(sanitize(token))) {
       await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      await session.abortTransaction();
-      return res.status(401).json({ success: false, error: 'Code confirmation incorrect' });
+      throw createError(401, 'Code de confirmation incorrect');
     }
-    const amtFloat = parseDecimal(tx.amount);
-    const feesFloat = parseDecimal(tx.transactionFees);
+
+    // Calculs de montants
+    const amtFloat   = parseFloat(tx.amount.toString());
+    const feesFloat  = parseFloat(tx.transactionFees.toString());
     const totalDebit = amtFloat + feesFloat;
-    const senderUpd = await User.findOneAndUpdate(
-      { _id: tx.sender, balance: { $gte: totalDebit } },
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(`-${totalDebit.toFixed(2)}`) } },
-      { new: true }
-    ).lean();
-    if (!senderUpd) {
-      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: 'Solde insuffisant' });
-    }
-    const receiverUpd = await User.findByIdAndUpdate(
-      tx.receiver,
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
-      { new: true }
-    ).lean();
-    if (!receiverUpd) {
-      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-      await session.abortTransaction();
-      return res.status(404).json({ success: false, error: 'Destinataire introuvable' });
-    }
-    tx.status = 'confirmed';
+
+    // 1) Débit de l’expéditeur (sécurité + atomicité)
+    await Balance.withdrawFromBalance(tx.sender, totalDebit);
+
+    // 2) Crédit du destinataire
+    await Balance.addToBalance(tx.receiver, amtFloat);
+
+    // 3) Mise à jour du statut de la transaction
+    tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
+
+    // Notifications
     await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
+
     await session.commitTransaction();
     return res.json({ success: true });
+
   } catch (err) {
     await session.abortTransaction();
     logger.error('confirmController error:', err);
-    const status = err.status || 500;
-    const message = err.status ? err.message : 'Erreur interne serveur';
-    return res.status(status).json({ success: false, error: message });
+    return next(err);
   } finally {
     session.endSession();
   }
 };
-
 
 
 
