@@ -138,7 +138,6 @@
 // module.exports = router;
 
 
-
 // File: src/routes/transactionsRoutes.js
 
 const express       = require('express');
@@ -163,18 +162,13 @@ const limiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, status: 429, message: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
-// Appliquer le rate limiter uniquement aux routes POST sensibles
 router.use(['/initiate', '/confirm'], limiter);
 
 /**
  * GET /api/v1/transactions
  * Liste les transactions de l'utilisateur connecté
  */
-router.get(
-  '/',
-  protect,
-  asyncHandler(listInternal)
-);
+router.get('/', protect, asyncHandler(listInternal));
 
 /**
  * POST /api/v1/transactions/initiate
@@ -184,47 +178,20 @@ router.post(
   '/initiate',
   protect,
   [
-    body('toEmail')
-      .isEmail().withMessage('Email du destinataire invalide')
-      .normalizeEmail(),
-    body('amount')
-      .isFloat({ gt: 0 }).withMessage('Montant doit être supérieur à 0')
-      .toFloat(),
-    body('transactionFees')
-      .optional()
-      .isFloat({ min: 0 }).withMessage('Frais doivent être un nombre positif')
-      .toFloat(),
-    body('localAmount')
-      .isFloat({ gt: 0 }).withMessage('Montant local doit être supérieur à 0')
-      .toFloat(),
-    body('funds')
-      .equals('Solde PayNoval').withMessage('Type de fonds invalide pour ce flux'),
-    body('destination')
-      .equals('PayNoval').withMessage('Destination invalide pour ce flux'),
-    body('localCurrencySymbol')
-      .notEmpty().withMessage('Symbole de la devise locale requis')
-      .trim().escape(),
-    body('senderCurrencySymbol')
-      .notEmpty().withMessage("Symbole de la devise de l’expéditeur requis")
-      .trim().escape(),
-    body('country')
-      .notEmpty().withMessage('Pays de destination requis')
-      .trim().escape(),
-    body('description')
-      .optional()
-      .trim().escape(),
-    body('recipientInfo.name')
-      .optional()
-      .trim().escape(),
-    body('recipientInfo.email')
-      .isEmail().withMessage('Email du destinataire invalide')
-      .normalizeEmail(),
-    body('question')
-      .notEmpty().withMessage('Question de sécurité requise')
-      .trim().escape(),
-    body('securityCode')
-      .notEmpty().withMessage('Code de sécurité requis')
-      .trim().escape(),
+    body('toEmail').isEmail().withMessage('Email du destinataire invalide').normalizeEmail(),
+    body('amount').isFloat({ gt: 0 }).withMessage('Montant doit être > 0').toFloat(),
+    body('transactionFees').optional().isFloat({ min: 0 }).withMessage('Frais doivent être >= 0').toFloat(),
+    body('localAmount').isFloat({ gt: 0 }).withMessage('Montant local doit être > 0').toFloat(),
+    body('funds').equals('Solde PayNoval').withMessage('Type de fonds invalide'),
+    body('destination').equals('PayNoval').withMessage('Destination invalide'),
+    body('localCurrencySymbol').notEmpty().withMessage('Devise locale requise').trim().escape(),
+    body('senderCurrencySymbol').notEmpty().withMessage('Devise expéditeur requise').trim().escape(),
+    body('country').notEmpty().withMessage('Pays requis').trim().escape(),
+    body('description').optional().trim().escape(),
+    body('recipientInfo.name').optional().trim().escape(),
+    body('recipientInfo.email').isEmail().withMessage('Email destinataire invalide').normalizeEmail(),
+    body('question').notEmpty().withMessage('Question requise').trim().escape(),
+    body('securityCode').notEmpty().withMessage('Code sécurité requis').trim().escape()
   ],
   requestValidator,
   asyncHandler(initiateInternal)
@@ -238,14 +205,9 @@ router.post(
   '/confirm',
   protect,
   [
-    body('transactionId')
-      .isMongoId().withMessage('ID de transaction invalide'),
-    body('token')
-      .isLength({ min: 64, max: 64 }).withMessage('Token de confirmation invalide')
-      .trim().escape(),
-    body('senderCurrencySymbol')
-      .notEmpty().withMessage("Symbole de la devise de l’expéditeur requis")
-      .trim().escape(),
+    body('transactionId').isMongoId().withMessage('ID de transaction invalide'),
+    body('token').isLength({ min: 64, max: 64 }).withMessage('Token invalide').trim().escape(),
+    body('senderCurrencySymbol').notEmpty().withMessage('Devise expéditeur requise').trim().escape()
   ],
   requestValidator,
   asyncHandler(confirmController)
