@@ -459,6 +459,7 @@ exports.listInternal = async (req, res, next) => {
   }
 };
 
+
 /**
  * initiateInternal
  * POST /api/v1/transactions/initiate
@@ -488,15 +489,23 @@ exports.initiateInternal = async (req, res, next) => {
 
     // 🔍 Validations serveur
     const recEmail = sanitize(toEmail);
-    if (!recEmail)               throw createError(400, 'Email destinataire requis');
-    if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
-    if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
-    if (description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
+    if (!recEmail)                              throw createError(400, 'Email du destinataire requis');
+    if (!question || !securityCode)             throw createError(400, 'Question et code de sécurité requis');
+    if (!destination || !funds || !country)     throw createError(400, 'Données de transaction incomplètes');
+    if (description.length > MAX_DESC_LENGTH)   throw createError(400, 'Description trop longue');
 
-    // ⚙️ Récupérer expéditeur/solde
-    const senderId  = req.user.id;
-    const senderObj = await User.findById(senderId).select('balance fullName email').lean();
-    const balFloat  = parseFloat(senderObj.balance) || 0;
+    // ⚙️ Récupérer expéditeur + solde réel via Balance
+    const senderId = req.user.id;
+
+    // 1) Récupération des infos utilisateur (sans balance)
+    const senderUser = await User.findById(senderId)
+      .select('fullName email')
+      .lean();
+    if (!senderUser) throw createError(403, 'Utilisateur invalide');
+
+    // 2) Récupération du document Balance
+    const balDoc      = await Balance.findOne({ user: senderId }).lean();
+    const balanceFloat = balDoc?.amount ?? 0;
 
     // 🚫 Auto-transfert interdit & destinataire
     const receiver = await User.findOne({ email: recEmail }).lean();
@@ -506,23 +515,23 @@ exports.initiateInternal = async (req, res, next) => {
     // 💰 Montant et frais
     const amt  = parseFloat(amount);
     const fees = parseFloat(transactionFees);
-    if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
-    if (balFloat < amt + fees)  throw createError(400, `Solde insuffisant : ${balFloat.toFixed(2)}`);
+    if (isNaN(amt) || amt <= 0)             throw createError(400, 'Montant invalide');
+    if (balanceFloat < amt + fees)          throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
 
-    // 🔢 Convertir en Decimal128
+    // 🔢 Conversion en Decimal128
     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const decLocalAmt = mongoose.Types.Decimal128.fromString(((parseFloat(localAmount) || amt)).toFixed(2));
+    const decLocalAmt = mongoose.Types.Decimal128.fromString((parseFloat(localAmount) || amt).toFixed(2));
     const token       = TransactionModel().generateVerificationToken();
-    const nameDest    = sanitize(recipientInfo.name) || senderObj.fullName;
+    const nameDest    = sanitize(recipientInfo.name) || senderUser.fullName;
 
     // ↘️ Débit atomic via Balance
+    //    (utilise sa transaction interne, pas la même session MongoDB)
     await Balance.withdrawFromBalance(senderId, amt + fees);
-    console.log(Balance);
 
     // 💾 Création de la transaction
     const [tx] = await TransactionModel().create([{
-      sender:            senderObj._id,
+      sender:            senderUser._id,
       receiver:          receiver._id,
       amount:            decAmt,
       transactionFees:   decFees,
@@ -539,7 +548,7 @@ exports.initiateInternal = async (req, res, next) => {
       funds:             sanitize(funds)
     }], { session });
 
-    // 🔔 Notifications
+    // 🔔 Notifications (email, push, outbox, in-app)
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
 
     await session.commitTransaction();
@@ -556,6 +565,9 @@ exports.initiateInternal = async (req, res, next) => {
     session.endSession();
   }
 };
+
+
+
 
 /**
  * confirmController
