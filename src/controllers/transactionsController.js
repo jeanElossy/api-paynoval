@@ -319,8 +319,17 @@ const {
   cancelledReceiverTemplate
 } = require('../utils/emailTemplates');
 
-// Constants
+// Helpers
 const sanitizeText    = (text = '') => text.toString().replace(/[<>\\/{};]/g, '').trim();
+const parseDecimal    = val => {
+  if (val == null) return 0;
+  if (typeof val === 'string') return parseFloat(val) || 0;
+  if (typeof val === 'object') {
+    if (val.$numberDecimal) return parseFloat(val.$numberDecimal) || 0;
+    return parseFloat(val.toString()) || 0;
+  }
+  return parseFloat(val) || 0;
+};
 const MAX_DESC_LENGTH = 500;
 
 /**
@@ -350,10 +359,6 @@ async function notifyParties(tx, status, session, senderCurrency) {
       country: tx.country || '',
       securityQuestion: tx.securityQuestion || ''
     };
-
-    console.log(receiverEmail);
-    
-
     const dataReceiver = {
       transactionId: txId,
       amount: tx.localAmount?.toString() || dataSender.amount,
@@ -367,8 +372,6 @@ async function notifyParties(tx, status, session, senderCurrency) {
       securityQuestion: tx.securityQuestion || '',
       senderName: sender.fullName || ''
     };
-    console.log(senderEmail);
-    
     if (sender.email) {
       const htmlSender = { initiated: initiatedSenderTemplate, confirmed: confirmedSenderTemplate, cancelled: cancelledSenderTemplate }[status]
         (status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
@@ -429,8 +432,9 @@ exports.initiateInternal = async (req, res) => {
       senderCurrencySymbol, description = '',
       question, securityCode, destination, funds, country
     } = req.body;
-    const recEmail = sanitizeText(toEmail);
+    // Validation & sanitation
     const errors = [];
+    const recEmail = sanitizeText(toEmail);
     const amt = parseFloat(amount);
     const fees = parseFloat(transactionFees);
     if (!recEmail) errors.push('Email destinataire manquant');
@@ -443,7 +447,15 @@ exports.initiateInternal = async (req, res) => {
       await session.abortTransaction();
       return res.status(400).json({ success: false, error: errors.join('; ') });
     }
-    const senderId = req.user.id;
+    // Vérification solde
+    const senderId    = req.user.id;
+    const senderObj   = await User.findById(senderId).select('balance fullName email').lean();
+    const balanceFloat = parseDecimal(senderObj.balance);
+    if (balanceFloat < amt + fees) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, error: `Solde insuffisant : ${balanceFloat.toFixed(2)}` });
+    }
+    // Recherche destinataire
     const receiver = await User.findOne({ email: recEmail }).lean();
     if (!receiver) {
       await session.abortTransaction();
@@ -453,34 +465,30 @@ exports.initiateInternal = async (req, res) => {
       await session.abortTransaction();
       return res.status(400).json({ success: false, error: 'Auto-transfert impossible' });
     }
-    const senderObj = await User.findById(senderId).select('balance fullName email').lean();
-    const balanceFloat = parseFloat(senderObj.balance?.toString() || '0');
-    if (balanceFloat < amt + fees) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, error: `Solde insuffisant : ${balanceFloat.toFixed(2)}` });
-    }
-    const decAmt = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-    const decFees = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const decLocalAmt = mongoose.Types.Decimal128.fromString(((parseFloat(localAmount) || amt).toFixed(2)));
-    const token = TransactionModel().generateVerificationToken();
-    const nameDest = sanitizeText(recipientInfo.name) || senderObj.fullName;
+    // Création transaction
+    const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
+    const decLocalAmt = mongoose.Types.Decimal128.fromString((parseDecimal(localAmount) || amt).toFixed(2));
+    const token       = TransactionModel().generateVerificationToken();
+    const nameDest    = sanitizeText(recipientInfo.name) || senderObj.fullName;
     const [tx] = await TransactionModel().create([{ 
-      sender: senderObj._id,
-      receiver: receiver._id,
-      amount: decAmt,
-      transactionFees: decFees,
-      localAmount: decLocalAmt,
+      sender:             senderObj._id,
+      receiver:           receiver._id,
+      amount:             decAmt,
+      transactionFees:    decFees,
+      localAmount:        decLocalAmt,
       localCurrencySymbol,
-      nameDestinataire: nameDest,
-      recipientEmail: recEmail,
-      country: sanitizeText(country),
-      verificationToken: token,
-      description: sanitizeText(description),
-      securityQuestion: sanitizeText(question),
-      securityCode: sanitizeText(securityCode),
-      destination: sanitizeText(destination),
-      funds: sanitizeText(funds)
+      nameDestinataire:   nameDest,
+      recipientEmail:     recEmail,
+      country:            sanitizeText(country),
+      verificationToken:  token,
+      description:        sanitizeText(description),
+      securityQuestion:   sanitizeText(question),
+      securityCode:       sanitizeText(securityCode),
+      destination:        sanitizeText(destination),
+      funds:              sanitizeText(funds)
     }], { session });
+    // Notifications
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
     await session.commitTransaction();
     return res.status(201).json({ success: true, transactionId: tx._id?.toString() || '', verificationToken: token });
@@ -523,8 +531,8 @@ exports.confirmController = async (req, res) => {
       await session.abortTransaction();
       return res.status(401).json({ success: false, error: 'Code confirmation incorrect' });
     }
-    const amtFloat = parseFloat(tx.amount?.toString() || '0');
-    const feesFloat = parseFloat(tx.transactionFees?.toString() || '0');
+    const amtFloat = parseDecimal(tx.amount);
+    const feesFloat = parseDecimal(tx.transactionFees);
     const totalDebit = amtFloat + feesFloat;
     const senderUpd = await User.findOneAndUpdate(
       { _id: tx.sender, balance: { $gte: totalDebit } },
@@ -538,7 +546,7 @@ exports.confirmController = async (req, res) => {
     }
     const receiverUpd = await User.findByIdAndUpdate(
       tx.receiver,
-      { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount?.toString() || '0') } },
+      { $inc: { balance: mongoose.Types.Decimal128.fromString(tx.amount.toString()) } },
       { new: true }
     ).lean();
     if (!receiverUpd) {
@@ -562,7 +570,6 @@ exports.confirmController = async (req, res) => {
     session.endSession();
   }
 };
-
 
 
 
