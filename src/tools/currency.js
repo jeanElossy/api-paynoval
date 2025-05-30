@@ -2,14 +2,14 @@
 
 const axios = require('axios');
 const pino = require('pino');
-const LRU = require('lru-cache');
+const { LRUCache } = require('lru-cache');
 const { exchange } = require('../config');
 
 // Logger pour le module monnaie
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 // Cache LRU pour limiter les appels externes
-const cache = new LRU({ max: 50, ttl: exchange.cacheTTL });
+const cache = new LRUCache({ max: 50, ttl: exchange.cacheTTL });
 
 /**
  * Fetch des taux depuis l’API externe définie dans la config
