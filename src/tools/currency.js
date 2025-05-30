@@ -2,23 +2,33 @@
 
 const axios = require('axios');
 const pino = require('pino');
-const { LRUCache } = require('lru-cache');
+const BaseCache = require('lru-cache');
 const { exchange } = require('../config');
 
 // Logger pour le module monnaie
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
-// Cache LRU pour limiter les appels externes
+// Instantiate LRU cache correctly
+const LRUCache = BaseCache.LRUCache || BaseCache; // support both export styles
 const cache = new LRUCache({ max: 50, ttl: exchange.cacheTTL });
 
 /**
  * Fetch des taux depuis l’API externe définie dans la config
  * @param {string} base - Code ISO de la devise (e.g. 'USD')
- * @returns {Promise<Object>} - Objet mapping devise -> taux
+ * @returns {Promise<Object>} - Mapping devise -> taux
  */
 async function fetchRatesFromApi(base) {
-  const url = `${exchange.apiUrl}/latest/${encodeURIComponent(base)}`;
-  const params = exchange.apiKey ? { apiKey: exchange.apiKey } : {};
+  // Trim trailing slash
+  const baseUrl = exchange.apiUrl.replace(/\/+$/, '');
+  // Construct URL; v6 APIs embed key in path, v4 use query param
+  let url = `${baseUrl}/latest/${encodeURIComponent(base)}`;
+  const isV6 = /\/v6\//.test(baseUrl);
+  const params = {};
+
+  if (!isV6 && exchange.apiKey) {
+    params.apiKey = exchange.apiKey;
+  }
+
   const resp = await axios.get(url, { params, timeout: 5000 });
   if (resp.status !== 200) {
     throw new Error(`Exchange API error: ${resp.status}`);
