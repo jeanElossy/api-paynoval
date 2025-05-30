@@ -6,6 +6,16 @@ require('dotenv-safe').config({
   allowEmptyValues: true,
 });
 
+// Préparer l'URL de base pour l'API de change
+const rawExchangeUrl = process.env.EXCHANGE_API_URL?.trim();
+// Si l'URL inclut déjà '/latest/...', on retire cette partie pour garder la racine
+const baseExchangeUrl = rawExchangeUrl
+  ? rawExchangeUrl.replace(/\/latest\/.*$/, '')
+  : '';
+const exchangeApiKey = process.env.EXCHANGE_API_KEY;
+// URL finale par défaut (v6 avec clé dans le path)
+const defaultExchangeUrl = `https://v6.exchangerate-api.com/v6/${exchangeApiKey}`;
+
 module.exports = {
   // Environnement
   env: process.env.NODE_ENV || 'development',
@@ -50,8 +60,9 @@ module.exports = {
 
   // ─── Exchange Rates Service ────────────────────────────────────────────────
   exchange: {
-    apiUrl: process.env.EXCHANGE_API_URL || `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}`,
-    apiKey: process.env.EXCHANGE_API_KEY,
+    // URL racine de l'API (sans '/latest/...') si fournie, sinon fallback v6
+    apiUrl: baseExchangeUrl || defaultExchangeUrl,
+    apiKey: exchangeApiKey || '',
     cacheTTL: Number(process.env.EXCHANGE_CACHE_TTL) || 3600000,
-  }
+  },
 };
