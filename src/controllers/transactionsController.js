@@ -277,7 +277,7 @@ exports.confirmController = async (req, res, next) => {
 
     // Charger la transaction
     const tx = await TransactionModel().findById(transactionId)
-      .select('+securityCode +localAmount +amount +transactionFees +receiver +sender +localCurrencySymbol')
+      .select('+securityCode +amount +transactionFees +receiver +sender')
       .session(session);
     if (!tx || tx.status !== 'pending')
       throw createError(400, 'Transaction invalide ou déjà traitée');
@@ -292,12 +292,12 @@ exports.confirmController = async (req, res, next) => {
       throw createError(401, 'Code de sécurité incorrect');
     }
 
-    // 1) Créditer le destinataire avec le montant local
-    const localAmt = parseFloat(tx.localAmount.toString());
-    await Balance.addToBalance(tx.receiver, localAmt);
+    // 1) Créditer le destinataire
+    const amtFloat = parseFloat(tx.amount.toString());
+    await Balance.addToBalance(tx.receiver, amtFloat);
 
     // 2) Mettre à jour la transaction
-    tx.status = 'confirmed';
+    tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
@@ -305,7 +305,7 @@ exports.confirmController = async (req, res, next) => {
     await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
 
     await session.commitTransaction();
-    res.json({ success: true, credited: localAmt });
+    res.json({ success: true });
 
   } catch (err) {
     await session.abortTransaction();
@@ -316,13 +316,17 @@ exports.confirmController = async (req, res, next) => {
 };
 
 
+
+
 // ─── CANCEL ───────────────────────────────────────────────────────────────────
+
 
 /**
  * POST /api/v1/transactions/cancel
  * Annule une transaction “pending”, rembourse 
  * l’expéditeur moins 1% et notifie.
  */
+
 exports.cancelController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
