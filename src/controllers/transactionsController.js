@@ -383,9 +383,15 @@ const MAX_DESC_LENGTH = 500;
 /**
  * notifyParties: envoie notifications email, push & in-app pour expéditeur et destinataire
  */
+
+
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    const subjectMap = { initiated: 'Transaction en attente', confirmed: 'Transaction confirmée', cancelled: 'Transaction annulée' };
+    const subjectMap = { 
+      initiated: 'Transaction en attente', 
+      confirmed: 'Transaction confirmée', 
+      cancelled: 'Transaction annulée' 
+    };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender).select('email pushToken fullName').lean(),
@@ -463,7 +469,9 @@ async function notifyParties(tx, status, session, senderCurrency) {
 }
 
 
+
 // ─── LIST ─────────────────────────────────────────────────────────────────────
+
 exports.listInternal = async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -476,7 +484,10 @@ exports.listInternal = async (req, res, next) => {
 };
 
 
+
 // ─── INITIATE ─────────────────────────────────────────────────────────────────
+
+
 exports.initiateInternal = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -505,6 +516,7 @@ exports.initiateInternal = async (req, res, next) => {
     const balDoc = await Balance.findOne({ user: senderId }).session(session);
     const balanceFloat = balDoc?.amount ?? 0;
     if (balanceFloat < total) throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+
     const debited = await Balance.findOneAndUpdate(
       { user: senderId },
       { $inc: { amount: -total } },
@@ -556,7 +568,12 @@ exports.initiateInternal = async (req, res, next) => {
   }
 };
 
+
+
+
 // ─── CONFIRM ──────────────────────────────────────────────────────────────────
+
+
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -602,6 +619,9 @@ exports.confirmController = async (req, res, next) => {
 };
 
 // ─── CANCEL ───────────────────────────────────────────────────────────────────
+
+
+
 exports.cancelController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
