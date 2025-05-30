@@ -103,9 +103,6 @@ router.post(
       .isMongoId().withMessage('ID de transaction invalide'),
     body('securityCode')
       .notEmpty().withMessage('Code de sécurité requis')
-      .trim().escape(),
-    body('senderCurrencySymbol')
-      .notEmpty().withMessage('Symbole de la devise de l’expéditeur requis')
       .trim().escape()
   ],
   requestValidator,

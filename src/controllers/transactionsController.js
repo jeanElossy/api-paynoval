@@ -235,7 +235,7 @@ exports.initiateInternal = async (req, res, next) => {
     }], { session });
 
     // 7) Notifications “initiated”
-    await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+    await notifyParties(tx, 'initiated', session);
 
     await session.commitTransaction();
     res.status(201).json({ success: true, transactionId: tx._id.toString() });
@@ -259,7 +259,7 @@ exports.confirmController = async (req, res, next) => {
   try {
     session.startTransaction();
 
-    const { transactionId, securityCode, senderCurrencySymbol } = req.body;
+    const { transactionId, securityCode } = req.body;
     if (!transactionId || !securityCode) 
       throw createError(400, 'Paramètres manquants');
 
@@ -274,7 +274,7 @@ exports.confirmController = async (req, res, next) => {
 
     // Vérifier code de sécurité
     if (sanitize(securityCode) !== tx.securityCode) {
-      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
+      await notifyParties(tx, 'cancelled', session);
       throw createError(401, 'Code de sécurité incorrect');
     }
 
@@ -288,7 +288,7 @@ exports.confirmController = async (req, res, next) => {
     await tx.save({ session });
 
     // 3) Notifications “confirmed”
-    await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
+    await notifyParties(tx, 'confirmed', session);
 
     await session.commitTransaction();
     res.json({ success: true });
@@ -342,7 +342,7 @@ exports.cancelController = async (req, res, next) => {
     await tx.save({ session });
 
     // Notifications “cancelled”
-    await notifyParties(tx, 'cancelled', session, req.body.senderCurrencySymbol);
+    await notifyParties(tx, 'cancelled', session);
 
     await session.commitTransaction();
     res.json({ success: true, refunded: netRefund });
