@@ -1,9 +1,11 @@
-// models/Transaction.js
+// src/models/Transaction.js
+
 const mongoose = require('mongoose');
 const crypto   = require('crypto');
 
 module.exports = conn => {
   const { Schema } = mongoose;
+
   const transactionSchema = new Schema({
     sender: {
       type: Schema.Types.ObjectId,
@@ -32,6 +34,19 @@ module.exports = conn => {
         message: props => `Les frais doivent être ≥ 0.00, reçus ${props.value}`
       }
     },
+    // Nouveau : devise de l’expéditeur
+    senderCurrencySymbol: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 5
+    },
+    // Nouveau : taux de change utilisé
+    exchangeRate: {
+      type: Schema.Types.Decimal128,
+      required: true
+    },
+    // Montant converti côté destinataire
     localAmount: {
       type: Schema.Types.Decimal128,
       required: true
@@ -96,6 +111,14 @@ module.exports = conn => {
     confirmedAt: {
       type: Date,
       default: null
+    },
+    cancelledAt: {
+      type: Date,
+      default: null
+    },
+    cancelReason: {
+      type: String,
+      default: null
     }
   }, {
     versionKey: false,
@@ -107,12 +130,13 @@ module.exports = conn => {
   transactionSchema.index({ receiver: 1, status: 1 });
   transactionSchema.index({ verificationToken: 1 });
 
-  // toJSON / toObject : formate et supprime les champs sensibles
+  // toJSON : convertir Decimal128 en nombre et exposer les nouveaux champs
   transactionSchema.set('toJSON', {
     transform(doc, ret) {
-      ret.id = ret._id;
+      ret.id               = ret._id;
       ret.amount          = parseFloat(ret.amount.toString());
       ret.transactionFees = parseFloat(ret.transactionFees.toString());
+      ret.exchangeRate    = parseFloat(ret.exchangeRate.toString());
       ret.localAmount     = parseFloat(ret.localAmount.toString());
       delete ret._id;
       delete ret.securityCode;
@@ -121,24 +145,13 @@ module.exports = conn => {
     }
   });
 
-  // Génération automatique d’un token si nouveau document
+  // Génération automatique du token
   transactionSchema.pre('validate', function(next) {
     if (this.isNew) {
       this.verificationToken = crypto.randomBytes(32).toString('hex');
     }
     next();
   });
-
-  // Méthodes statiques / d’instance
-  transactionSchema.statics.generateVerificationToken = function() {
-    return crypto.randomBytes(32).toString('hex');
-  };
-  transactionSchema.methods.verifyToken = function(token) {
-    if (!token || !this.verificationToken) return false;
-    const provided = Buffer.from(token, 'hex');
-    const stored   = Buffer.from(this.verificationToken, 'hex');
-    return crypto.timingSafeEqual(provided, stored);
-  };
 
   conn.model('Transaction', transactionSchema);
 };

@@ -1,17 +1,17 @@
 // File: src/routes/transactionsRoutes.js
 
-const express            = require('express');
-const rateLimit          = require('express-rate-limit');
-const { body }           = require('express-validator');
-const asyncHandler       = require('express-async-handler');
+const express          = require('express');
+const rateLimit        = require('express-rate-limit');
+const { body }         = require('express-validator');
+const asyncHandler     = require('express-async-handler');
 const {
   listInternal,
   initiateInternal,
   confirmController,
   cancelController
 } = require('../controllers/transactionsController');
-const { protect }        = require('../middleware/authMiddleware');
-const requestValidator   = require('../middleware/requestValidator');
+const { protect }      = require('../middleware/authMiddleware');
+const requestValidator = require('../middleware/requestValidator');
 
 const router = express.Router();
 
@@ -54,9 +54,6 @@ router.post(
     body('transactionFees')
       .optional()
       .isFloat({ min: 0 }).withMessage('Les frais doivent être un nombre positif')
-      .toFloat(),
-    body('localAmount')
-      .isFloat({ gt: 0 }).withMessage('Le montant local doit être supérieur à 0')
       .toFloat(),
     body('funds')
       .notEmpty().withMessage('Type de fonds requis')
@@ -103,9 +100,6 @@ router.post(
       .isMongoId().withMessage('ID de transaction invalide'),
     body('securityCode')
       .notEmpty().withMessage('Code de sécurité requis')
-      .trim().escape(),
-    body('senderCurrencySymbol')
-      .notEmpty().withMessage('Symbole de la devise de l’expéditeur requis')
       .trim().escape()
   ],
   requestValidator,

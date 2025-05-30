@@ -2,9 +2,9 @@
 const nodemailer = require('nodemailer');
 const config = require('../config');
 const {
-  initiatedTemplate,
-  confirmedTemplate,
-  cancelledTemplate
+  initiatedSenderTemplate: initiatedTemplate,
+  confirmedSenderTemplate: confirmedTemplate,
+  cancelledSenderTemplate: cancelledTemplate
 } = require('./emailTemplates');
 
 // Configuration du transporteur SMTP
@@ -32,10 +32,10 @@ exports.sendEmail = async ({ to, subject, text, html }) => {
   try {
     // Si on n'a pas de HTML explicite, on peut générer un template selon le sujet
     let contentHtml = html;
-    if (!html) {
+    if (!contentHtml) {
       const now = new Date().toLocaleString('fr-FR');
       // Choix du template en fonction du sujet
-      if (/initiée/i.test(subject)) {
+      if (/en attente/i.test(subject) || /initiée/i.test(subject)) {
         contentHtml = initiatedTemplate({
           transactionId: '', // à compléter lors de l'appel
           amount: '',

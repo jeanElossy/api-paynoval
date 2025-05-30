@@ -10,7 +10,7 @@ const commonStyles = `
     table[role="presentation"] { width:100%; max-width:600px; margin:0 auto; border-radius:20px; overflow:hidden; box-shadow:0 5px 14px rgba(0,0,0,0.1); border-collapse:collapse; }
     .header { display:flex; align-items:center; justify-content:center; background-color:#0D7E58; padding:12px 20px; border-top-left-radius:20px; border-top-right-radius:20px; }
     .header img { display:block; margin-right:30px; height:70px; }
-    .header h1 { margin-top: 21; color:#fff; font-size:40px; text-align:center;}
+    .header h1 { margin-top: 21px; color:#fff; font-size:40px; text-align:center;}
     .card { background:#fff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.1); margin:20px 0; padding:15px; }
     td { font-size:20px; line-height: 2; padding:0; }
     .button a { background-color:#0D7E58; color:#fff !important; text-decoration:none; padding:14px 27px; border-radius:4px; font-weight:600; display:inline-block; }

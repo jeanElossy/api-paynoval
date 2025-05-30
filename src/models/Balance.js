@@ -11,7 +11,7 @@ const balanceSchema = new mongoose.Schema({
     required: [true, "L'identifiant utilisateur est requis"]
   },
   amount: {
-    type: Number,
+    type: mongoose.Schema.Types.Decimal128,
     required: [true, "Le montant du solde est requis"],
     default: 0,
     min: [0, "Le montant du solde ne peut pas être négatif"]

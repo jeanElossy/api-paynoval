@@ -19,17 +19,19 @@ const {
   cancelledSenderTemplate,
   cancelledReceiverTemplate
 } = require('../utils/emailTemplates');
+const { convertAmount } = require('../tools/currency');
 
-// ─── CONSTANTES & HELPERS ─────────────────────────────────────────────────────
+
 
 const sanitize        = text => String(text || '').replace(/[<>\\/{};]/g, '').trim();
 const MAX_DESC_LENGTH = 500;
 
+
+
 /**
- * notifyParties
- * Envoie emails, push & in-app à l’expéditeur et au destinataire
+ * Envoie notifications e-mail, push, in-app & outbox
  */
-async function notifyParties(tx, status, session, senderCurrency) {
+async function notifyParties(tx, status, session) {
   try {
     const subjectMap = {
       initiated: 'Transaction en attente',
@@ -38,7 +40,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
     };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
 
-    // Récupérer expéditeur & destinataire
+    // Charger expéditeur / destinataire
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender).select('email pushToken fullName').lean(),
       User.findById(tx.receiver).select('email pushToken fullName').lean()
@@ -48,44 +50,40 @@ async function notifyParties(tx, status, session, senderCurrency) {
     const webLink    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
 
-    // Préparer payloads
+    // Payloads
     const dataSender = {
-      transactionId:    tx._id.toString(),
-      amount:           tx.amount.toString(),
-      currency:         senderCurrency,
-      name:             sender.fullName,
-      senderEmail:      sender.email,
-      receiverEmail:    tx.recipientEmail || receiver.email,
-      date:             dateStr,
-      confirmLinkWeb:   webLink,
-      country:          tx.country,
+      transactionId: tx._id.toString(),
+      amount:        tx.amount.toString(),
+      currency:      tx.senderCurrencySymbol,
+      name:          sender.fullName,
+      senderEmail:   sender.email,
+      receiverEmail: tx.recipientEmail || receiver.email,
+      date:          dateStr,
+      confirmLinkWeb:webLink,
+      country:       tx.country,
       securityQuestion: tx.securityQuestion
     };
     const dataReceiver = {
-      transactionId:    tx._id.toString(),
-      amount:           tx.localAmount.toString(),
-      currency:         tx.localCurrencySymbol,
-      name:             tx.nameDestinataire,
-      receiverEmail:    tx.recipientEmail,
-      senderEmail:      sender.email,
-      date:             dateStr,
-      confirmLink:      mobileLink,
-      country:          tx.country,
+      transactionId: tx._id.toString(),
+      amount:        tx.localAmount.toString(),
+      currency:      tx.localCurrencySymbol,
+      name:          tx.nameDestinataire,
+      receiverEmail: tx.recipientEmail,
+      senderEmail:   sender.email,
+      date:          dateStr,
+      confirmLink:   mobileLink,
+      country:       tx.country,
       securityQuestion: tx.securityQuestion,
-      senderName:       sender.fullName
+      senderName:    sender.fullName
     };
 
-    // --- EMAILS ---
+    // — EMAIL —
     if (sender.email) {
       const html = {
         initiated: initiatedSenderTemplate,
         confirmed: confirmedSenderTemplate,
         cancelled: cancelledSenderTemplate
-      }[status](
-        status === 'cancelled'
-          ? { ...dataSender, reason: tx.cancelReason }
-          : dataSender
-      );
+      }[status]( status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender );
       await sendEmail({ to: sender.email, subject: emailSubject, html });
     }
     if (receiver.email) {
@@ -93,27 +91,21 @@ async function notifyParties(tx, status, session, senderCurrency) {
         initiated: initiatedReceiverTemplate,
         confirmed: confirmedReceiverTemplate,
         cancelled: cancelledReceiverTemplate
-      }[status](
-        status === 'cancelled'
-          ? { ...dataReceiver, reason: tx.cancelReason }
-          : dataReceiver
-      );
+      }[status]( status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver );
       await sendEmail({ to: receiver.email, subject: emailSubject, html });
     }
 
-    // --- PUSH ---
+    // — PUSH —
     const pushMessages = [];
     [sender, receiver].forEach(u => {
       if (u.pushToken && Expo.isExpoPushToken(u.pushToken)) {
-        const payload = (u._id.toString() === sender._id.toString())
-          ? dataSender
-          : dataReceiver;
+        const payload = (u._id.toString() === sender._id.toString()) ? dataSender : dataReceiver;
         pushMessages.push({
           to: u.pushToken,
           sound: 'default',
           title: emailSubject,
-          body: `Montant : ${payload.amount} ${payload.currency}`,
-          data: payload
+          body:  `Montant : ${payload.amount} ${payload.currency}`,
+          data:  payload
         });
       }
     });
@@ -122,11 +114,9 @@ async function notifyParties(tx, status, session, senderCurrency) {
       catch (err) { console.error('Expo push error:', err); }
     }
 
-    // --- IN-APP & OUTBOX ---
+    // — IN-APP & OUTBOX —
     const events = [sender, receiver].map(u => {
-      const payload = (u._id.toString() === sender._id.toString())
-        ? dataSender
-        : dataReceiver;
+      const payload = (u._id.toString() === sender._id.toString()) ? dataSender : dataReceiver;
       return {
         service: 'notifications',
         event:   `transaction_${status}`,
@@ -147,6 +137,9 @@ async function notifyParties(tx, status, session, senderCurrency) {
   }
 }
 
+
+
+
 // ─── LIST ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -166,26 +159,28 @@ exports.listInternal = async (req, res, next) => {
   }
 };
 
+
+
+
 // ─── INITIATE ─────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/v1/transactions/initiate
  * Crée une transaction “pending” ET débite immédiatement l’expéditeur.
  */
+
 exports.initiateInternal = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
 
-    // 1) Extraction + sanitization
     const {
       toEmail,
       amount,
       transactionFees = 0,
-      localAmount,
-      localCurrencySymbol,
       recipientInfo = {},
       senderCurrencySymbol,
+      localCurrencySymbol,
       description = '',
       question,
       securityCode,
@@ -194,60 +189,61 @@ exports.initiateInternal = async (req, res, next) => {
       country
     } = req.body;
 
-    if (!sanitize(toEmail))                    throw createError(400, 'Email du destinataire requis');
-    if (!question || !securityCode)            throw createError(400, 'Question et code de sécurité requis');
-    if (!destination || !funds || !country)    throw createError(400, 'Données de transaction incomplètes');
-    if (description.length > MAX_DESC_LENGTH)  throw createError(400, 'Description trop longue');
+    if (!sanitize(toEmail))                   throw createError(400, 'Email du destinataire requis');
+    if (!question || !securityCode)           throw createError(400, 'Question et code de sécurité requis');
+    if (!destination || !funds || !country)   throw createError(400, 'Données de transaction incomplètes');
+    if (description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
 
-    // 2) Expéditeur / destinataire
     const senderId   = req.user.id;
     const senderUser = await User.findById(senderId).select('fullName email').lean();
-    if (!senderUser)                           throw createError(403, 'Utilisateur invalide');
+    if (!senderUser)                          throw createError(403, 'Utilisateur invalide');
 
     const receiver = await User.findOne({ email: sanitize(toEmail) }).lean();
-    if (!receiver)                             throw createError(404, 'Destinataire introuvable');
-    if (receiver._id.toString() === senderId)  throw createError(400, 'Auto-transfert impossible');
+    if (!receiver)                            throw createError(404, 'Destinataire introuvable');
+    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
 
-    // 3) Montant & frais
     const amt  = parseFloat(amount);
     const fees = parseFloat(transactionFees);
-    if (isNaN(amt) || amt <= 0)                throw createError(400, 'Montant invalide');
+    if (isNaN(amt) || amt <= 0)               throw createError(400, 'Montant invalide');
     const total = amt + fees;
 
-    // 4) Vérifier solde via Balance
     const balDoc       = await Balance.findOne({ user: senderId }).lean();
     const balanceFloat = balDoc?.amount ?? 0;
-    if (balanceFloat < total)                 throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+    if (balanceFloat < total)                throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
 
-    // 5) Débit immédiat
+    // Débit immédiat
     await Balance.withdrawFromBalance(senderId, total);
 
-    // 6) Construire la transaction
-    const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-    const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-    const decLocalAmt = mongoose.Types.Decimal128.fromString(((parseFloat(localAmount) || amt)).toFixed(2));
-    const nameDest    = sanitize(recipientInfo.name) || senderUser.fullName;
+    // Calcul serveur du montant local
+    const { rate, converted } = await convertAmount(senderCurrencySymbol, localCurrencySymbol, amt);
+
+    const decAmt        = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees       = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
+    const decLocalAmt   = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
+    const decExchange   = mongoose.Types.Decimal128.fromString(rate.toString());
+    const nameDest      = sanitize(recipientInfo.name) || senderUser.fullName;
 
     const [tx] = await TransactionModel().create([{
-      sender:            senderUser._id,
-      receiver:          receiver._id,
-      amount:            decAmt,
-      transactionFees:   decFees,
-      localAmount:       decLocalAmt,
-      localCurrencySymbol,
-      nameDestinataire:  nameDest,
-      recipientEmail:    sanitize(toEmail),
-      country:           sanitize(country),
-      description:       sanitize(description),
-      securityQuestion:  sanitize(question),
-      securityCode:      sanitize(securityCode),
-      destination:       sanitize(destination),
-      funds:             sanitize(funds),
-      status:            'pending'
+      sender:               senderUser._id,
+      receiver:             receiver._id,
+      amount:               decAmt,
+      transactionFees:      decFees,
+      senderCurrencySymbol: sanitize(senderCurrencySymbol),
+      exchangeRate:         decExchange,
+      localAmount:          decLocalAmt,
+      localCurrencySymbol:  sanitize(localCurrencySymbol),
+      nameDestinataire:     nameDest,
+      recipientEmail:       sanitize(toEmail),
+      country:              sanitize(country),
+      description:          sanitize(description),
+      securityQuestion:     sanitize(question),
+      securityCode:         sanitize(securityCode),
+      destination:          sanitize(destination),
+      funds:                sanitize(funds),
+      status:               'pending'
     }], { session });
 
-    // 7) Notifications « initiated »
-    await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+    await notifyParties(tx, 'initiated', session);
 
     await session.commitTransaction();
     res.status(201).json({ success: true, transactionId: tx._id.toString() });
@@ -260,49 +256,46 @@ exports.initiateInternal = async (req, res, next) => {
   }
 };
 
+
 // ─── CONFIRM ──────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/v1/transactions/confirm
  * Valide le securityCode, CRÉDITE le destinataire et notifie.
  */
+
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
 
-    const { transactionId, securityCode, senderCurrencySymbol } = req.body;
-    if (!transactionId || !securityCode || !senderCurrencySymbol)
+    const { transactionId, securityCode } = req.body;
+    if (!transactionId || !securityCode) 
       throw createError(400, 'Paramètres manquants');
 
-    // Charger la transaction
     const tx = await TransactionModel().findById(transactionId)
-      .select('+securityCode +amount +transactionFees +receiver +sender')
+      .select('+securityCode +localAmount +receiver +sender')
       .session(session);
     if (!tx || tx.status !== 'pending')
       throw createError(400, 'Transaction invalide ou déjà traitée');
 
-    // Seul le destinataire peut confirmer
     if (String(tx.receiver) !== String(req.user.id))
       throw createError(403, 'Vous n’êtes pas le destinataire');
 
-    // Vérifier code de sécurité
     if (sanitize(securityCode) !== tx.securityCode) {
-      await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
+      await notifyParties(tx, 'cancelled', session);
       throw createError(401, 'Code de sécurité incorrect');
     }
 
-    // 1) Créditer le destinataire
-    const amtFloat = parseFloat(tx.amount.toString());
-    await Balance.addToBalance(tx.receiver, amtFloat);
+    // Crédit avec le montant converti
+    const localAmtFloat = parseFloat(tx.localAmount.toString());
+    await Balance.addToBalance(tx.receiver, localAmtFloat);
 
-    // 2) Mettre à jour la transaction
     tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
-    // 3) Notifications « confirmed »
-    await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
+    await notifyParties(tx, 'confirmed', session);
 
     await session.commitTransaction();
     res.json({ success: true });
@@ -317,7 +310,6 @@ exports.confirmController = async (req, res, next) => {
 
 
 
-
 // ─── CANCEL ───────────────────────────────────────────────────────────────────
 
 
@@ -325,15 +317,16 @@ exports.confirmController = async (req, res, next) => {
  * POST /api/v1/transactions/cancel
  * Annule une transaction “pending”, rembourse 
  * l’expéditeur moins 1% et notifie.
- */
+*/
+
 
 exports.cancelController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
 
-    const { transactionId, reason = 'Annulé', senderCurrencySymbol } = req.body;
-    if (!transactionId)
+    const { transactionId, reason = 'Annulé' } = req.body;
+    if (!transactionId) 
       throw createError(400, 'ID de transaction requis');
 
     const tx = await TransactionModel().findById(transactionId)
@@ -342,29 +335,28 @@ exports.cancelController = async (req, res, next) => {
     if (!tx || tx.status !== 'pending')
       throw createError(400, 'Transaction invalide ou déjà traitée');
 
-    const userId = String(req.user.id);
-    const senderId = String(tx.sender);
+    const userId     = String(req.user.id);
+    const senderId   = String(tx.sender);
     const receiverId = String(tx.receiver);
     if (userId !== senderId && userId !== receiverId)
       throw createError(403, 'Vous n’êtes pas autorisé à annuler');
 
-    // Calcul remboursement net (moins 1%) pour l'expéditeur
-    const amtFloat = parseFloat(tx.amount.toString());
+    const amtFloat  = parseFloat(tx.amount.toString());
     const feesFloat = parseFloat(tx.transactionFees.toString());
-    const gross = amtFloat + feesFloat;
+    const gross     = amtFloat + feesFloat;
     const netRefund = parseFloat((gross * 0.99).toFixed(2));
     await Balance.addToBalance(tx.sender, netRefund);
 
-    tx.status = 'cancelled';
-    tx.cancelledAt = new Date();
-    // Préciser qui annule
+    tx.status       = 'cancelled';
+    tx.cancelledAt  = new Date();
     tx.cancelReason = `${ userId === receiverId ? 'Annulé par le destinataire' : 'Annulé par l’expéditeur' }: ${sanitize(reason)}`;
     await tx.save({ session });
 
-    await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
+    await notifyParties(tx, 'cancelled', session);
 
     await session.commitTransaction();
     res.json({ success: true, refunded: netRefund });
+
   } catch (err) {
     await session.abortTransaction();
     next(err);
@@ -372,3 +364,6 @@ exports.cancelController = async (req, res, next) => {
     session.endSession();
   }
 };
+
+
+
