@@ -104,9 +104,9 @@ router.post(
     body('securityCode')
       .notEmpty().withMessage('Code de sécurité requis')
       .trim().escape(),
-    // body('senderCurrencySymbol')
-    //   .notEmpty().withMessage('Symbole de la devise de l’expéditeur requis')
-    //   .trim().escape()
+    body('senderCurrencySymbol')
+      .notEmpty().withMessage('Symbole de la devise de l’expéditeur requis')
+      .trim().escape()
   ],
   requestValidator,
   asyncHandler(confirmController)

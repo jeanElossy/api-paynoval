@@ -272,12 +272,12 @@ exports.confirmController = async (req, res, next) => {
     session.startTransaction();
 
     const { transactionId, securityCode, senderCurrencySymbol } = req.body;
-    if (!transactionId || !securityCode)
+    if (!transactionId || !securityCode || !senderCurrencySymbol)
       throw createError(400, 'Paramètres manquants');
 
     // Charger la transaction
     const tx = await TransactionModel().findById(transactionId)
-      .select('+securityCode +amount +transactionFees +receiver +sender')
+      .select('+securityCode +localAmount +amount +transactionFees +receiver +sender +localCurrencySymbol')
       .session(session);
     if (!tx || tx.status !== 'pending')
       throw createError(400, 'Transaction invalide ou déjà traitée');
@@ -292,12 +292,12 @@ exports.confirmController = async (req, res, next) => {
       throw createError(401, 'Code de sécurité incorrect');
     }
 
-    // 1) Créditer le destinataire
-    const amtFloat = parseFloat(tx.amount.toString());
-    await Balance.addToBalance(tx.receiver, amtFloat);
+    // 1) Créditer le destinataire avec le montant local
+    const localAmt = parseFloat(tx.localAmount.toString());
+    await Balance.addToBalance(tx.receiver, localAmt);
 
     // 2) Mettre à jour la transaction
-    tx.status      = 'confirmed';
+    tx.status = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
@@ -305,7 +305,7 @@ exports.confirmController = async (req, res, next) => {
     await notifyParties(tx, 'confirmed', session, senderCurrencySymbol);
 
     await session.commitTransaction();
-    res.json({ success: true });
+    res.json({ success: true, credited: localAmt });
 
   } catch (err) {
     await session.abortTransaction();
@@ -314,6 +314,7 @@ exports.confirmController = async (req, res, next) => {
     session.endSession();
   }
 };
+
 
 // ─── CANCEL ───────────────────────────────────────────────────────────────────
 
