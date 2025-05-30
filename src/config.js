@@ -50,8 +50,8 @@ module.exports = {
 
   // ─── Exchange Rates Service ────────────────────────────────────────────────
   exchange: {
-    apiUrl:   process.env.EXCHANGE_API_URL || 'https://api.exchangerate-api.com/v4', // default to v4 endpoint
-    apiKey:   process.env.EXCHANGE_API_KEY || '',
-    cacheTTL: Number(process.env.EXCHANGE_CACHE_TTL) || 3600000, // ms
+    apiUrl: process.env.EXCHANGE_API_URL || `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_API_KEY}`,
+    apiKey: process.env.EXCHANGE_API_KEY,
+    cacheTTL: Number(process.env.EXCHANGE_CACHE_TTL) || 3600000,
   }
 };
