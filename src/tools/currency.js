@@ -83,7 +83,30 @@ async function convertAmount(from, to, amount) {
   if (isNaN(value) || value <= 0) {
     throw new Error('Montant invalide pour conversion');
   }
-  if (from === to) {
+
+  // Normaliser le code devise cible
+  let toCode = String(to).toUpperCase().replace(/[^A-Z]/g, '');
+  // Remplacement pour Franc CFA
+  if (/^F?CFA$/.test(toCode)) {
+    toCode = 'XOF';
+  }
+  if (!/^[A-Z]{3}$/.test(toCode)) {
+    throw new Error(`Devise non supportée : ${to}`);
+  }
+
+  // Convertir directement si même devise
+  if (String(from).toUpperCase().replace(/[^A-Z]/g, '') === toCode) {
+    return { rate: 1, converted: value };
+  }
+
+  const rates = await getRates(from);
+  const rate = rates[toCode];
+  if (rate === undefined) {
+    throw new Error(`Devise non supportée : ${to}`);
+  }
+  const converted = Number((value * rate).toFixed(2));
+  return { rate, converted };
+}  if (from === to) {
     return { rate: 1, converted: value };
   }
   const rates = await getRates(from);
@@ -93,6 +116,6 @@ async function convertAmount(from, to, amount) {
   }
   const converted = Number((value * rate).toFixed(2));
   return { rate, converted };
-}
+
 
 module.exports = { getRates, clearCache, convertAmount };
