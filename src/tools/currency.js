@@ -46,7 +46,12 @@ async function fetchRatesFromApi(base) {
  * @returns {Promise<Object>}
  */
 async function getRates(rawBase) {
-  const base = String(rawBase).toUpperCase();
+  // Nettoyer la devise : garder uniquement les lettres A-Z
+  let base = String(rawBase).toUpperCase().replace(/[^A-Z]/g, '');
+  if (!base.match(/^[A-Z]{3}$/)) {
+    throw new Error(`Invalid currency code: ${rawBase}`);
+  }
+
   if (cache.has(base)) {
     logger.debug({ base }, 'Taux depuis cache');
     return cache.get(base);
@@ -56,6 +61,7 @@ async function getRates(rawBase) {
   logger.info({ base, timestamp: Date.now() }, 'Taux mis en cache');
   return rates;
 }
+
 
 /**
  * Vide le cache des taux
