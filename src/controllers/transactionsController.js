@@ -130,40 +130,44 @@ exports.listInternal = async (req, res, next) => {
 
 
 /**
- * Récupère une transaction par ID (si l’utilisateur connecté est l’émetteur OU le destinataire)
+ * Récupère une transaction par ID (si l’utilisateur connecté est émetteur OU destinataire)
  */
 exports.getTransactionController = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
+    const { id }   = req.params;
+    const userId   = req.user.id; // le middleware `protect` a mis `req.user`
 
-    // On accepte l’accès si l’utilisateur est soit le destinataire (toUserId) 
-    // soit l’émetteur (fromUserId)
-    const tx = await TransactionModel().findOne({
-      _id: id,
-      $or: [
-        { toUserId: userId },
-        { fromUserId: userId }
-      ]
-    }).lean();
-
+    // 1) On récupère d’abord la transaction par son _id
+    const tx = await TransactionModel().findById(id).lean();
     if (!tx) {
-      // Soit la transaction n’existe pas, soit l’utilisateur n’y a pas accès
+      // La transaction n’existe pas
       return res.status(404).json({
         success: false,
-        message: 'Transaction non trouvée'
+        message: 'Transaction non trouvée',
       });
     }
 
+    // 2) Vérifier si l’utilisateur est bien sender ou receiver
+    const isSender   = tx.sender?.toString()   === userId;
+    const isReceiver = tx.receiver?.toString() === userId;
+
+    if (!isSender && !isReceiver) {
+      // L’utilisateur connecté n’est ni l’émetteur ni le destinataire → on masque l’existence de la transaction
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction non trouvée',
+      });
+    }
+
+    // 3) Tout est OK : on renvoie la transaction complète (status, montant, etc.)
     return res.status(200).json({
       success: true,
-      data: tx
+      data: tx,
     });
   } catch (err) {
     next(err);
   }
 };
-
 
 
 // ─── INITIATE ─────────────────────────────────────────────────────────────────

@@ -40,7 +40,6 @@ router.get(
 );
 
 
-
 /**
  * GET /api/v1/transactions
  * Liste les transactions de l'utilisateur connecté
