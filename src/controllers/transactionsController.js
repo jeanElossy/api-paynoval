@@ -129,6 +129,34 @@ exports.listInternal = async (req, res, next) => {
 };
 
 
+/**
+ * Récupère une transaction par ID
+ * Récupère une transaction par ID (uniquement si elle appartient au destinataire connecté)
+ */
+
+exports.getTransactionController = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  // On recherche la transaction dont l’_id est id et dont le destinataire (toUserId) correspond à l’utilisateur connecté
+  const tx = await TransactionModel().findOne({ _id: id, toUserId: userId }).lean();
+
+  if (!tx) {
+    // Soit la transaction n’existe pas, soit elle n’appartient pas à cet utilisateur en tant que destinataire
+    return res.status(404).json({
+      success: false,
+      message: 'Transaction non trouvée'
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: tx
+  });
+});
+
+
+
 // ─── INITIATE ─────────────────────────────────────────────────────────────────
 
 exports.initiateInternal = async (req, res, next) => {

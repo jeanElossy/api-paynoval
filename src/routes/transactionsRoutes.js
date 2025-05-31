@@ -8,7 +8,8 @@ const {
   listInternal,
   initiateInternal,
   confirmController,
-  cancelController
+  cancelController,
+  getTransactionController, 
 } = require('../controllers/transactionsController');
 const { protect }      = require('../middleware/authMiddleware');
 const requestValidator = require('../middleware/requestValidator');
@@ -27,6 +28,19 @@ const limiter = rateLimit({
 // Appliquer le limiter sur les POST sensibles
 router.use(['/initiate', '/confirm', '/cancel'], limiter);
 
+
+/**
+ * GET /api/v1/transactions/:id
+ * Récupère une transaction par ID (utilisé pour vérifier le statut côté mobile)
+ */
+router.get(
+  '/:id',
+  protect,
+  asyncHandler(getTransactionController)
+);
+
+
+
 /**
  * GET /api/v1/transactions
  * Liste les transactions de l'utilisateur connecté
@@ -36,6 +50,7 @@ router.get(
   protect,
   asyncHandler(listInternal)
 );
+
 
 /**
  * POST /api/v1/transactions/initiate
