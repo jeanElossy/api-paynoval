@@ -14,6 +14,7 @@ const cache = new LRUCache({ max: 50, ttl: exchange.cacheTTL });
 const CURRENCY_ALIASES = {
   'FCA': 'XOF',
   'FCFA': 'XOF',
+  'F CFA': 'XOF',
   'CFA': 'XOF',
   'EURO': 'EUR',
   '€': 'EUR',
