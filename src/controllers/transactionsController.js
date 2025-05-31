@@ -121,12 +121,23 @@ exports.listInternal = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const Transaction = TransactionModel();
-    const txs = await Transaction.find({ sender: userId }).sort({ createdAt: -1 }).lean();
+
+    // On cherche toutes les transactions où sender === userId OU receiver === userId
+    const txs = await Transaction.find({
+      $or: [
+        { sender: userId },
+        { receiver: userId }
+      ]
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
     res.json({ success: true, count: txs.length, data: txs });
   } catch (err) {
     next(err);
   }
 };
+
 
 
 /**
