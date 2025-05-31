@@ -130,18 +130,25 @@ exports.listInternal = async (req, res, next) => {
 
 
 /**
- * Récupère une transaction par ID (uniquement si elle appartient au destinataire connecté)
+ * Récupère une transaction par ID (si l’utilisateur connecté est l’émetteur OU le destinataire)
  */
 exports.getTransactionController = async (req, res, next) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // On recherche la transaction dont l’_id est id et dont le destinataire (toUserId) correspond à l’utilisateur connecté
-    const tx = await TransactionModel().findOne({ _id: id, toUserId: userId }).lean();
+    // On accepte l’accès si l’utilisateur est soit le destinataire (toUserId) 
+    // soit l’émetteur (fromUserId)
+    const tx = await TransactionModel().findOne({
+      _id: id,
+      $or: [
+        { toUserId: userId },
+        { fromUserId: userId }
+      ]
+    }).lean();
 
     if (!tx) {
-      // Soit la transaction n’existe pas, soit elle n’appartient pas à cet utilisateur en tant que destinataire
+      // Soit la transaction n’existe pas, soit l’utilisateur n’y a pas accès
       return res.status(404).json({
         success: false,
         message: 'Transaction non trouvée'
