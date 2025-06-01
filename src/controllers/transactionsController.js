@@ -21,11 +21,6 @@ const {
 } = require('../utils/emailTemplates');
 const { convertAmount } = require('../tools/currency');
 
-// On importe notre service partagé de push (depuis notre backend principal)
-const { sendPushNotification } = require('../services/notificationService');
-
-
-
 
 // ─── CONST & HELPERS ─────────────────────────────────────────────────────────
 const sanitize        = text => String(text || '').replace(/[<>\\/{};]/g, '').trim();
@@ -39,289 +34,121 @@ const MAX_DESC_LENGTH = 500;
  *  - session : session MongoDB pour la transaction
  *  - senderCurrency : symbole de la devise de l’expéditeur (par ex. 'F CFA')
  */
-// async function notifyParties(tx, status, session, senderCurrency) {
-//   try {
-//     const subjectMap = { 
-//       initiated: 'Transaction en attente', 
-//       confirmed: 'Transaction confirmée', 
-//       cancelled: 'Transaction annulée' 
-//     };
-//     const emailSubject = subjectMap[status] || `Transaction ${status}`;
-
-//     // ── Récupère l’expéditeur (sender) et le destinataire (receiver) depuis la collection Users
-//     const [sender, receiver] = await Promise.all([
-//       User.findById(tx.sender).select('email pushToken fullName').lean(),
-//       User.findById(tx.receiver).select('email pushToken fullName').lean()
-//     ]);
-
-//     // Formate la date pour les emails et notifications
-//     const dateStr = new Date().toLocaleString('fr-FR');
-
-//     // Liens de confirmation (web + mobile) pour inclusion dans les emails/notifications
-//     const webLink    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
-//     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
-
-//     // ── Prépare le payload envoyé à l’expéditeur
-//     const dataSender = {
-//       transactionId:     tx._id.toString(),
-//       amount:            tx.amount.toString(),              // montant principal
-//       currency:          senderCurrency,                    // symbole de la devise expéditeur
-//       name:              sender.fullName,                   // nom complet de l’expéditeur
-//       senderEmail:       sender.email,                      // email expéditeur
-//       receiverEmail:     tx.recipientEmail || receiver.email, // email destinataire
-//       date:              dateStr,                           // date de création
-//       confirmLinkWeb:    webLink,                           // lien web
-//       country:           tx.country,                        // pays
-//       securityQuestion:  tx.securityQuestion                // question de sécurité
-//     };
-
-//     // ── Prépare le payload envoyé au destinataire
-//     const dataReceiver = {
-//       transactionId:     tx._id.toString(),
-//       amount:            tx.localAmount.toString(),         // montant converti dans la devise locale
-//       currency:          tx.localCurrencySymbol,            // symbole de la devise locale
-//       name:              tx.nameDestinataire,              // nom du destinataire tel que fourni
-//       receiverEmail:     tx.recipientEmail,                 // email destinataire
-//       senderEmail:       sender.email,                      // email expéditeur
-//       date:              dateStr,
-//       confirmLink:       mobileLink,                        // lien mobile
-//       country:           tx.country,
-//       securityQuestion:  tx.securityQuestion,
-//       senderName:        sender.fullName                    // nom expéditeur pour afficher au destinataire
-//     };
-
-//     // ── (1) Envoi des emails
-//     if (sender.email) {
-//       // Choisit le template HTML correspondant au statut pour l’expéditeur
-//       const htmlSender = {
-//         initiated: initiatedSenderTemplate,
-//         confirmed: confirmedSenderTemplate,
-//         cancelled: cancelledSenderTemplate
-//       }[status](status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
-//       await sendEmail({ to: sender.email, subject: emailSubject, html: htmlSender });
-//     }
-//     if (receiver.email) {
-//       // Choisit le template HTML correspondant au statut pour le destinataire
-//       const htmlReceiver = {
-//         initiated: initiatedReceiverTemplate,
-//         confirmed: confirmedReceiverTemplate,
-//         cancelled: cancelledReceiverTemplate
-//       }[status](status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
-//       await sendEmail({ to: receiver.email, subject: emailSubject, html: htmlReceiver });
-//     }
-
-//     // ── (2) Envoi des push notifications via Expo
-//     const pushMessages = [];
-//     [sender, receiver].forEach(u => {
-//       if (u.pushToken && Expo.isExpoPushToken(u.pushToken)) {
-//         // S’il s’agit de l’expéditeur, on prend dataSender, sinon dataReceiver
-//         const payload = u._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
-//         pushMessages.push({
-//           to:     u.pushToken,
-//           sound:  'default',
-//           title:  emailSubject,
-//           body:   `Montant : ${payload.amount} ${payload.currency}`,
-//           data:   payload
-//         });
-//       }
-//     });
-//     for (const chunk of expo.chunkPushNotifications(pushMessages)) {
-//       try {
-//         await expo.sendPushNotificationsAsync(chunk);
-//       } catch (e) {
-//         console.error(e);
-//       }
-//     }
-
-//     // ── (3) Sauvegarde des événements pour le traitement asynchrone (Outbox + In-app)
-//     const events = [sender, receiver].map(u => ({
-//       service: 'notifications',
-//       event:   `transaction_${status}`,
-//       payload: {
-//         userId: u._id,
-//         type:   `transaction_${status}`,
-//         data:   u._id.toString() === sender._id.toString() ? dataSender : dataReceiver
-//       }
-//     }));
-//     await Outbox.insertMany(events, { session });
-
-//     // Crée les documents in-app dans Notification pour qu’ils apparaissent en front
-//     const inAppDocs = events.map(e => ({
-//       recipient: e.payload.userId,
-//       type:      e.payload.type,
-//       data:      e.payload.data,
-//       read:      false
-//     }));
-//     await Notification.insertMany(inAppDocs, { session });
-//   } catch (err) {
-//     console.error('notifyParties error:', err);
-//   }
-// }
-
-
-
-// ───────────────────────────────────────────────────────────────────────────────────
-// Liste des transactions internes (sans populate) 
-// ───────────────────────────────────────────────────────────────────────────────────
-
-
-
-// ─── notifyParties : envoie emails, push & in-app pour expéditeur et destinataire ──
-
-/**
- * notifyParties : envoie des notifications email, push & in-app à l’expéditeur et au destinataire
- *
- * @param {Object} tx              - Document Transaction Mongoose
- * @param {string} status          - 'initiated' | 'confirmed' | 'cancelled'
- * @param {mongoose.ClientSession} session - Session MongoDB pour garantir l’atomicité
- * @param {string} senderCurrency  - Symbole de la devise de l’expéditeur (ex. 'F CFA')
- */
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    // 1) Définir le sujet de l’email en fonction du statut
-    const subjectMap = {
-      initiated: 'Transaction en attente',
-      confirmed: 'Transaction confirmée',
-      cancelled: 'Transaction annulée'
+    const subjectMap = { 
+      initiated: 'Transaction en attente', 
+      confirmed: 'Transaction confirmée', 
+      cancelled: 'Transaction annulée' 
     };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
 
-    // 2) Récupérer simultanément l’expéditeur et le destinataire depuis la collection Users
-    //    On sélectionne leur email, nom complet et pushTokens (tableau de tokens)
+    // ── Récupère l’expéditeur (sender) et le destinataire (receiver) depuis la collection Users
     const [sender, receiver] = await Promise.all([
-      User.findById(tx.sender)
-        .select('email fullName pushTokens')
-        .lean(),
-      User.findById(tx.receiver)
-        .select('email fullName pushTokens')
-        .lean()
+      User.findById(tx.sender).select('email pushToken fullName').lean(),
+      User.findById(tx.receiver).select('email pushToken fullName').lean()
     ]);
 
-    // 2.a) Si l’un des deux n’existe pas, on arrête silencieusement (impossible de notifier)
-    if (!sender || !receiver) {
-      return;
-    }
-
-    // 3) Formater la date courante selon la locale française pour inclusion dans les messages
+    // Formate la date pour les emails et notifications
     const dateStr = new Date().toLocaleString('fr-FR');
 
-    // 4) Construire les liens de confirmation pour intégration dans les emails/notifications
+    // Liens de confirmation (web + mobile) pour inclusion dans les emails/notifications
     const webLink    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
 
-    // 5) Préparer le contenu spécifique à l’expéditeur (payload dataSender)
+    // ── Prépare le payload envoyé à l’expéditeur
     const dataSender = {
       transactionId:     tx._id.toString(),
-      amount:            tx.amount.toString(),             // montant brut saisi par l’expéditeur
-      currency:          senderCurrency,                   // symbole de la devise expéditeur
-      name:              sender.fullName,                  // nom complet de l’expéditeur
-      senderEmail:       sender.email,                     // email de l’expéditeur
-      receiverEmail:     tx.recipientEmail || receiver.email, // email du destinataire
-      date:              dateStr,                          // date de création au format FR
-      confirmLinkWeb:    webLink,                          // lien web pour confirmer
-      country:           tx.country,                       // pays lié à la transaction
-      securityQuestion:  tx.securityQuestion               // question de sécurité pour vérification
+      amount:            tx.amount.toString(),              // montant principal
+      currency:          senderCurrency,                    // symbole de la devise expéditeur
+      name:              sender.fullName,                   // nom complet de l’expéditeur
+      senderEmail:       sender.email,                      // email expéditeur
+      receiverEmail:     tx.recipientEmail || receiver.email, // email destinataire
+      date:              dateStr,                           // date de création
+      confirmLinkWeb:    webLink,                           // lien web
+      country:           tx.country,                        // pays
+      securityQuestion:  tx.securityQuestion                // question de sécurité
     };
 
-    // 6) Préparer le contenu spécifique au destinataire (payload dataReceiver)
+    // ── Prépare le payload envoyé au destinataire
     const dataReceiver = {
       transactionId:     tx._id.toString(),
-      amount:            tx.localAmount.toString(),        // montant converti dans la devise locale du destinataire
-      currency:          tx.localCurrencySymbol,           // symbole de la devise locale du destinataire
-      name:              tx.nameDestinataire,              // nom du destinataire tel que fourni / récupéré
-      receiverEmail:     tx.recipientEmail,                 // email du destinataire
-      senderEmail:       sender.email,                      // email de l’expéditeur
+      amount:            tx.localAmount.toString(),         // montant converti dans la devise locale
+      currency:          tx.localCurrencySymbol,            // symbole de la devise locale
+      name:              tx.nameDestinataire,              // nom du destinataire tel que fourni
+      receiverEmail:     tx.recipientEmail,                 // email destinataire
+      senderEmail:       sender.email,                      // email expéditeur
       date:              dateStr,
-      confirmLink:       mobileLink,                        // lien mobile pour confirmer
+      confirmLink:       mobileLink,                        // lien mobile
       country:           tx.country,
-      securityQuestion:  tx.securityQuestion,               // question de sécurité pour vérification
-      senderName:        sender.fullName                    // nom de l’expéditeur pour affichage chez le destinataire
+      securityQuestion:  tx.securityQuestion,
+      senderName:        sender.fullName                    // nom expéditeur pour afficher au destinataire
     };
 
-    // ── (A) Envoi des e-mails ───────────────────────────────────────────────────────
-    // A.1) Si l’expéditeur a un email, choisir le bon template selon le statut et envoyer
+    // ── (1) Envoi des emails
     if (sender.email) {
+      // Choisit le template HTML correspondant au statut pour l’expéditeur
       const htmlSender = {
         initiated: initiatedSenderTemplate,
         confirmed: confirmedSenderTemplate,
         cancelled: cancelledSenderTemplate
-      }[status](
-        status === 'cancelled'
-          ? { ...dataSender, reason: tx.cancelReason } // inclure la raison en cas d’annulation
-          : dataSender
-      );
-      await sendEmail({
-        to:      sender.email,
-        subject: emailSubject,
-        html:    htmlSender
-      });
+      }[status](status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
+      await sendEmail({ to: sender.email, subject: emailSubject, html: htmlSender });
     }
-
-    // A.2) Si le destinataire a un email, choisir le bon template selon le statut et envoyer
     if (receiver.email) {
+      // Choisit le template HTML correspondant au statut pour le destinataire
       const htmlReceiver = {
         initiated: initiatedReceiverTemplate,
         confirmed: confirmedReceiverTemplate,
         cancelled: cancelledReceiverTemplate
-      }[status](
-        status === 'cancelled'
-          ? { ...dataReceiver, reason: tx.cancelReason } // inclure la raison en cas d’annulation
-          : dataReceiver
-      );
-      await sendEmail({
-        to:      receiver.email,
-        subject: emailSubject,
-        html:    htmlReceiver
-      });
+      }[status](status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
+      await sendEmail({ to: receiver.email, subject: emailSubject, html: htmlReceiver });
     }
 
-    // ── (B) Envoi des push notifications via notre service partagé ─────────────────
-    // B.1) Construire le texte du message pour l’expéditeur
-    const messageForSender   = `Montant : ${dataSender.amount} ${dataSender.currency}`;
-    // B.2) Construire le texte du message pour le destinataire
-    const messageForReceiver = `Montant : ${dataReceiver.amount} ${dataReceiver.currency}`;
-
-    // B.3) Si l’expéditeur possè­de un ou plusieurs pushTokens, envoyer une notification
-    //     Notre service sendPushNotification prend en charge le tableau de tokens stockés en base
-    if (Array.isArray(sender.pushTokens) && sender.pushTokens.length > 0) {
-      await sendPushNotification(sender._id.toString(), messageForSender);
-    } else if (typeof sender.pushTokens === 'string' && sender.pushTokens) {
-      // Si, par hasard, on stockait une chaîne unique au lieu d’un tableau
-      await sendPushNotification(sender._id.toString(), messageForSender);
+    // ── (2) Envoi des push notifications via Expo
+    const pushMessages = [];
+    [sender, receiver].forEach(u => {
+      if (u.pushToken && Expo.isExpoPushToken(u.pushToken)) {
+        // S’il s’agit de l’expéditeur, on prend dataSender, sinon dataReceiver
+        const payload = u._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
+        pushMessages.push({
+          to:     u.pushToken,
+          sound:  'default',
+          title:  emailSubject,
+          body:   `Montant : ${payload.amount} ${payload.currency}`,
+          data:   payload
+        });
+      }
+    });
+    for (const chunk of expo.chunkPushNotifications(pushMessages)) {
+      try {
+        await expo.sendPushNotificationsAsync(chunk);
+      } catch (e) {
+        console.error(e);
+      }
     }
 
-    // B.4) Idem pour le destinataire
-    if (Array.isArray(receiver.pushTokens) && receiver.pushTokens.length > 0) {
-      await sendPushNotification(receiver._id.toString(), messageForReceiver);
-    } else if (typeof receiver.pushTokens === 'string' && receiver.pushTokens) {
-      await sendPushNotification(receiver._id.toString(), messageForReceiver);
-    }
-
-    // ── (C) Sauvegarde des événements Outbox pour un traitement asynchrone ultérieur ─
-    // On crée deux événements : un pour l’expéditeur, un pour le destinataire
+    // ── (3) Sauvegarde des événements pour le traitement asynchrone (Outbox + In-app)
     const events = [sender, receiver].map(u => ({
       service: 'notifications',
       event:   `transaction_${status}`,
       payload: {
         userId: u._id,
         type:   `transaction_${status}`,
-        data:   String(u._id) === String(sender._id) ? dataSender : dataReceiver
+        data:   u._id.toString() === sender._id.toString() ? dataSender : dataReceiver
       }
     }));
     await Outbox.insertMany(events, { session });
 
-    // ── (D) Création des notifications “in-app” dans la collection Notification ────
-    // Ces documents seront récupérés par le front via GET /notifications
+    // Crée les documents in-app dans Notification pour qu’ils apparaissent en front
     const inAppDocs = events.map(e => ({
-      recipient: e.payload.userId, // destinataire de la notification in-app
-      type:      e.payload.type,   // ex. 'transaction_initiated'
-      data:      e.payload.data,   // payload JSON décrit au-dessus
-      read:      false             // non lue par défaut
+      recipient: e.payload.userId,
+      type:      e.payload.type,
+      data:      e.payload.data,
+      read:      false
     }));
     await Notification.insertMany(inAppDocs, { session });
-
   } catch (err) {
-    // En cas d’erreur dans notifyParties, on log uniquement pour ne pas bloquer l’opération principale
     console.error('notifyParties error:', err);
   }
 }
@@ -329,7 +156,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
 
 
 // ───────────────────────────────────────────────────────────────────────────────────
-// Reccuperation de la liste des transactions par user (sans populate)
+// Liste des transactions internes (sans populate) 
 // ───────────────────────────────────────────────────────────────────────────────────
 
 exports.listInternal = async (req, res, next) => {
