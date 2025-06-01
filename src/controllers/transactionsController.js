@@ -549,7 +549,7 @@ exports.listInternal = async (req, res, next) => {
       ]
     })
       .sort({ createdAt: -1 })  // Tri par date de création décroissante
-      .lean();                  // On demande un objet JavaScript brut (pas de document Mongoose)
+
 
     // Chaque tx renvoyée contient :
     //   - senderName       : nom complet de l’expéditeur (string)
