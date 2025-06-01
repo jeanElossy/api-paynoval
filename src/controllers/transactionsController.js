@@ -383,15 +383,18 @@ exports.getTransactionController = async (req, res, next) => {
 //   }
 // };
 
+
+
 /**
  * POST /api/v1/transactions/initiateInternal
  *
  * Initiation d’une transaction interne PayNoval :
  *  - Calcul des frais à 1% du montant saisi
  *  - Débit du montant brut (amount) du compte expéditeur
- *  - Crédit immédiat des frais (1%) au compte admin@paynoval.com
- *  - Création d’une transaction en statut 'pending' avec amount, transactionFees (1%), netAmount (amount–fee), etc.
- *  - Laisser le destinataire en attente : il recevra le netAmount au moment de la confirmation
+ *  - Conversion de ces frais en CAD (devise du compte admin) avant crédit
+ *  - Crédit immédiat des frais convertis au compte admin@paynoval.com
+ *  - Création d’une transaction en statut 'pending' avec amount, transactionFees, netAmount, etc.
+ *  - Le destinataire ne reçoit rien pour l’instant : il sera crédité lors de la confirmation
  */
 exports.initiateInternal = async (req, res, next) => {
   // Démarre une session MongoDB pour assurer l’atomicité
@@ -431,7 +434,7 @@ exports.initiateInternal = async (req, res, next) => {
 
     // ─── 3) Récupération de l’utilisateur expéditeur ───────────────────────────────
     const senderId   = req.user.id;
-    // On veut uniquement le nom complet et l’email pour duplication dans Tx
+    // On veut uniquement le nom complet et l’email pour duplication dans Transaction
     const senderUser = await User.findById(senderId)
       .select('fullName email')
       .lean()
@@ -478,7 +481,18 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(500, 'Erreur lors du débit du compte expéditeur');
     }
 
-    // ─── 8) Crédit immédiat des frais au compte admin@paynoval.com ─────────────────
+    // ─── 8) Crédit immédiat des frais convertis au compte admin@paynoval.com ───────
+    // On convertit d’abord fee (devise expéditeur) → CAD (devise admin)
+    let adminFeeInCAD = 0;
+    if (fee > 0) {
+      const { converted } = await convertAmount(
+        senderCurrencySymbol,
+        'CAD',
+        fee
+      );
+      adminFeeInCAD = parseFloat(converted.toFixed(2));
+    }
+    // On récupère le compte admin
     const adminEmail = 'admin@paynoval.com';
     const adminUser = await User.findOne({ email: adminEmail })
       .select('_id')
@@ -486,10 +500,10 @@ exports.initiateInternal = async (req, res, next) => {
     if (!adminUser) {
       throw createError(500, 'Compte administrateur introuvable');
     }
-    // On crédite fee au solde du compte admin
+    // On crédite admin du montant converti en CAD
     await Balance.findOneAndUpdate(
       { user: adminUser._id },
-      { $inc: { amount: fee } },
+      { $inc: { amount: adminFeeInCAD } },
       { new: true, upsert: true, session }
     );
 
@@ -518,33 +532,33 @@ exports.initiateInternal = async (req, res, next) => {
       [
         {
           // Références aux utilisateurs
-          sender:               senderUser._id,             // ObjectId de l’expéditeur
-          receiver:             receiver._id,               // ObjectId du destinataire
+          sender:               senderUser._id,     // ObjectId de l’expéditeur
+          receiver:             receiver._id,       // ObjectId du destinataire
 
           // Montants & frais
-          amount:               decAmt,                     // Montant brut (Decimal128)
-          transactionFees:      decFees,                    // Frais (1 %) (Decimal128)
-          netAmount:            decNet,                     // Montant net à créditer (Decimal128)
+          amount:               decAmt,             // Montant brut (Decimal128)
+          transactionFees:      decFees,            // Frais (1 %) (Decimal128)
+          netAmount:            decNet,             // Montant net à créditer (Decimal128)
 
           // Devises & conversion
           senderCurrencySymbol: sanitize(senderCurrencySymbol), // ex. "F CFA"
-          exchangeRate:         decExchange,                  // Taux de change (Decimal128)
-          localAmount:          decLocal,                     // Montant local (Decimal128)
+          exchangeRate:         decExchange,        // Taux de change (Decimal128)
+          localAmount:          decLocal,           // Montant local (Decimal128)
           localCurrencySymbol:  sanitize(localCurrencySymbol),
 
           // Infos pour affichage rapide (évite un populate systématique)
-          senderName:           senderUser.fullName,       // ex. "Alice Dupont"
-          senderEmail:          senderUser.email,          // ex. "alice@paynoval.com"
-          nameDestinataire:     nameDest,                  // ex. "Jean Elossy"
-          recipientEmail:       sanitize(toEmail),         // ex. "jean@example.com"
+          senderName:           senderUser.fullName,    // ex. "Alice Dupont"
+          senderEmail:          senderUser.email,       // ex. "alice@paynoval.com"
+          nameDestinataire:     nameDest,               // ex. "Jean Elossy"
+          recipientEmail:       sanitize(toEmail),      // ex. "jean@example.com"
 
           // Détails transactionnels
-          country:              sanitize(country),         // ex. "Côte d'Ivoire"
+          country:              sanitize(country),      // ex. "Côte d'Ivoire"
           description:          sanitize(description),
           securityQuestion:     sanitize(question),
           securityCode:         sanitize(securityCode),
-          destination:          sanitize(destination),     // ex. "PayNoval"
-          funds:                sanitize(funds),           // ex. "Solde PayNoval"
+          destination:          sanitize(destination),  // ex. "PayNoval"
+          funds:                sanitize(funds),        // ex. "Solde PayNoval"
           status:               'pending'
         }
       ],
@@ -559,13 +573,18 @@ exports.initiateInternal = async (req, res, next) => {
     session.endSession();
 
     // ─── 15) Réponse au front : on retourne l’ID de la transaction créée ─────────
-    return res.status(201).json({ success: true, transactionId: tx._id.toString() });
+    return res.status(201).json({
+      success: true,
+      transactionId: tx._id.toString(),
+      adminFeeInCAD
+    });
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
     return next(err);
   }
 };
+
 
 
 
@@ -635,42 +654,48 @@ exports.initiateInternal = async (req, res, next) => {
 /**
  * PATCH /api/v1/transactions/confirm
  *
- * 1) Vérifie que transactionId et securityCode sont présents.
- * 2) Récupère la transaction en session pour garantir l’atomicité.
- * 3) Vérifie que le statut est 'pending' et que l’utilisateur est bien le destinataire.
- * 4) Vérifie le code de sécurité :
- *    - Si incorrect : passe le statut en 'cancelled', fixe cancelledAt, notifie, et renvoie une erreur.
- *    - Si correct   : crédite le destinataire du net amount (amount – frais),
- *                    passe le statut en 'confirmed', fixe confirmedAt, notifie, puis commit.
+ * Lors de la confirmation :
+ *  - Vérifier securityCode.
+ *  - Si valide : 
+ *      • Calculer net = amount brut – 1% de frais.
+ *      • Convertir ce net dans la devise locale du destinataire.
+ *      • Créditer le solde du destinataire de ce montant converti.
+ *      • Mettre status = 'confirmed', fixed confirmedAt, notifier.
+ *  - Si code incorrect :
+ *      • Mettre status = 'cancelled', fixed cancelledAt, notifier, renvoyer erreur.
  */
 exports.confirmController = async (req, res, next) => {
-  // Démarre une session MongoDB pour garantir l’atomicité
   const session = await mongoose.startSession();
 
   try {
     session.startTransaction();
 
-    // ─── 1) Lecture des paramètres nécessaires ───────────────────────────────────
+    // ─── 1) Lecture des paramètres ───────────────────────────────────────────────
     const { transactionId, securityCode } = req.body;
     if (!transactionId || !securityCode) {
-      throw createError(400, 'Paramètres manquants');
+      throw createError(400, 'transactionId et securityCode sont requis');
     }
 
-    // ─── 2) Récupération de la transaction (avec les champs strictement nécessaires) ──
-    //     +securityCode : on veut lire le code en clair pour comparaison
-    //     +netAmount    : montant à créditer
-    //     +senderCurrencySymbol, +sender : pour notifications
-    //     +receiver : pour vérifier que l’utilisateur est bien destinataire
+    // ─── 2) Récupérer la transaction en session ──────────────────────────────────
+    //     On a besoin de amount (montant brut), localCurrencySymbol (devise du destinataire),
+    //     senderCurrencySymbol (pour notifications), receiver (ID destinataire), sender
     const tx = await TransactionModel()
       .findById(transactionId)
-      .select('+securityCode +netAmount +senderCurrencySymbol +receiver +sender')
+      .select([
+        '+securityCode',
+        '+amount',
+        '+senderCurrencySymbol',
+        '+localCurrencySymbol',
+        '+receiver',
+        '+sender'
+      ])
       .session(session);
 
     if (!tx || tx.status !== 'pending') {
       throw createError(400, 'Transaction invalide ou déjà traitée');
     }
 
-    // ─── 3) Vérification que l’utilisateur connecté est bien le destinataire ───────
+    // ─── 3) Vérification que l’utilisateur connecté est bien le destinataire ─────
     if (String(tx.receiver) !== String(req.user.id)) {
       throw createError(403, 'Vous n’êtes pas le destinataire de cette transaction');
     }
@@ -678,46 +703,66 @@ exports.confirmController = async (req, res, next) => {
     // ─── 4) Vérification du code de sécurité ─────────────────────────────────────
     const sanitizedCode = sanitize(securityCode);
     if (sanitizedCode !== tx.securityCode) {
-      // Code incorrect : on passe la transaction en 'cancelled', on notifie, puis on lève l’erreur
-      tx.status       = 'cancelled';
-      tx.cancelledAt  = new Date();
+      // Code incorrect : annuler et notifier
+      tx.status      = 'cancelled';
+      tx.cancelledAt = new Date();
       await tx.save({ session });
 
       await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
       throw createError(401, 'Code de sécurité incorrect');
     }
 
-    // ─── 5) Code correct : on crédite le destinataire du montant net (netAmount) ────
-    const netFloat = parseFloat(tx.netAmount.toString());
+    // ─── 5) Calcul du montant net à créditer ──────────────────────────────────────
+    //     5.1) Récupérer montants
+    const amtFloat = parseFloat(tx.amount.toString()); // montant brut en devise expéditeur
+    if (amtFloat <= 0) {
+      throw createError(500, 'Montant brut invalide en base');
+    }
+    //     5.2) Calculer frais = 1% du brut, puis net = brut – frais
+    const fee    = parseFloat((amtFloat * 0.01).toFixed(2));
+    const netBrut = parseFloat((amtFloat - fee).toFixed(2));
+
+    //     5.3) Convertir netBrut dans la devise locale du destinataire
+    //          tx.localCurrencySymbol est la devise du destinataire
+    const { converted: localNet } = await convertAmount(
+      tx.senderCurrencySymbol,
+      tx.localCurrencySymbol,
+      netBrut
+    );
+    const localNetRounded = parseFloat(localNet.toFixed(2));
+
+    // ─── 6) Créditer le solde du destinataire ─────────────────────────────────────
     const credited = await Balance.findOneAndUpdate(
       { user: tx.receiver },
-      { $inc: { amount: netFloat } },
+      { $inc: { amount: localNetRounded } },
       { new: true, upsert: true, session }
     );
     if (!credited) {
-      throw createError(500, 'Erreur lors du crédit du destinataire');
+      throw createError(500, 'Erreur lors du crédit au destinataire');
     }
 
-    // ─── 6) Mise à jour du statut de la transaction en 'confirmed' ─────────────────
+    // ─── 7) Mise à jour du statut en 'confirmed' ─────────────────────────────────
     tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
-    // ─── 7) Notifications de confirmation ────────────────────────────────────────
+    // ─── 8) Notifications "confirmed" ─────────────────────────────────────────
     await notifyParties(tx, 'confirmed', session, tx.senderCurrencySymbol);
 
-    // ─── 8) Commit de la transaction MongoDB ────────────────────────────────────
+    // ─── 9) Commit de la transaction MongoDB ───────────────────────────────────
     await session.commitTransaction();
     session.endSession();
 
-    return res.json({ success: true });
+    // ─── 10) Réponse au front ───────────────────────────────────────────────────
+    return res.json({ success: true, credited: localNetRounded });
   } catch (err) {
-    // En cas d’erreur, on rollback
+    // Rollback en cas d’erreur
     await session.abortTransaction();
     session.endSession();
     return next(err);
   }
 };
+
 
 
 
@@ -792,48 +837,51 @@ exports.confirmController = async (req, res, next) => {
 /**
  * POST /api/v1/transactions/cancel
  *
- * 1) Vérifie que transactionId est fourni.
- * 2) Récupère la transaction en session, uniquement si statut = 'pending'.
- * 3) Vérifie que l’utilisateur est expéditeur OU destinataire.
- * 4) Calcule les frais d’annulation selon la devise de l’expéditeur :
- *    – 2,99 $ USD pour USA
- *    – 2,99 $ CAD pour Canada
- *    – 2,99 € pour Europe
- *    – 300 F CFA pour Afrique
- * 5) Rembourse à l’expéditeur : netAmount – frais d’annulation.
- * 6) Crédite le montant des frais sur le compte admin@paynoval.com.
- * 7) Met à jour le statut en 'cancelled', fixe cancelledAt et cancelReason.
- * 8) Envoie des notifications "cancelled".
+ * Lors de l’annulation :
+ *  1) Vérifier transactionId.
+ *  2) Récupérer la transaction (netAmount, amount, senderCurrencySymbol, sender, receiver).
+ *  3) Vérifier que l’utilisateur est expéditeur ou destinataire.
+ *  4) Calculer les frais d’annulation selon la devise de l’expéditeur :
+ *       – 2,99 $ USD pour USA
+ *       – 2,99 $ CAD pour Canada
+ *       – 2,99 € pour Europe
+ *       – 300 F CFA pour Afrique
+ *  5) Calculer refundAmt = tx.netAmount (en devise expéditeur) – cancellationFee.
+ *  6) Créditer l’expéditeur de refundAmt (devise expéditeur).
+ *  7) Convertir cancellationFee dans la devise du compte admin (ex. “CAD”), arrondir.
+ *  8) Créditer le compte admin@paynoval.com du montant converti (devise admin).
+ *  9) Mettre à jour le statut en 'cancelled', fixed cancelledAt et cancelReason.
+ * 10) Notifier les parties.
  */
 exports.cancelController = async (req, res, next) => {
-  // Démarre une session MongoDB pour garantir l’atomicité
   const session = await mongoose.startSession();
 
   try {
     session.startTransaction();
 
     // ─── 1) Lecture des paramètres ───────────────────────────────────────────────
-    const {
-      transactionId,
-      reason = 'Annulé',
-      senderCurrencySymbol
-    } = req.body;
+    const { transactionId, reason = 'Annulé', senderCurrencySymbol } = req.body;
     if (!transactionId) {
-      throw createError(400, 'ID de transaction requis');
+      throw createError(400, 'transactionId requis pour annuler');
     }
 
     // ─── 2) Récupération de la transaction ───────────────────────────────────────
-    //     On a besoin de amount, transactionFees, netAmount, sender et receiver
     const tx = await TransactionModel()
       .findById(transactionId)
-      .select('+amount +transactionFees +netAmount +sender +receiver +senderCurrencySymbol')
+      .select([
+        '+netAmount',
+        '+amount',
+        '+senderCurrencySymbol',
+        '+sender',
+        '+receiver'
+      ])
       .session(session);
 
     if (!tx || tx.status !== 'pending') {
       throw createError(400, 'Transaction invalide ou déjà traitée');
     }
 
-    // ─── 3) Vérifier que l’utilisateur connecté est expéditeur OU destinataire ────
+    // ─── 3) Vérifier que l’utilisateur est expéditeur OU destinataire ────────────
     const userId     = String(req.user.id);
     const senderId   = String(tx.sender);
     const receiverId = String(tx.receiver);
@@ -841,7 +889,7 @@ exports.cancelController = async (req, res, next) => {
       throw createError(403, 'Vous n’êtes pas autorisé à annuler cette transaction');
     }
 
-    // ─── 4) Calcul des frais d’annulation selon la devise de l’expéditeur ─────────
+    // ─── 4) Calcul des frais d’annulation selon la devise expéditeur ──────────────
     let cancellationFee = 0;
     const symbol = tx.senderCurrencySymbol.trim();
     if (symbol === 'USD' || symbol === '$USD') {
@@ -852,46 +900,56 @@ exports.cancelController = async (req, res, next) => {
       cancellationFee = 2.99;
     } else if (symbol === 'XOF' || symbol === 'XAF' || symbol === 'F CFA') {
       cancellationFee = 300;
-    } else {
-      cancellationFee = 0; // Par défaut, pas de frais si devise non reconnue
     }
 
     // ─── 5) Calcul du montant à rembourser à l’expéditeur ──────────────────────────
-    //     On rembourse : netAmount – cancellationFee
-    const netAmtFloat  = parseFloat(tx.netAmount.toString());
-    const refundAmount = parseFloat((netAmtFloat - cancellationFee).toFixed(2));
-    if (refundAmount < 0) {
+    const netStored  = parseFloat(tx.netAmount.toString());              // netAmount en devise expéditeur
+    const refundAmt  = parseFloat((netStored - cancellationFee).toFixed(2));
+    if (refundAmt < 0) {
       throw createError(400, 'Frais d’annulation supérieurs au montant net à rembourser');
     }
 
-    //     On crédite le compte de l’expéditeur
+    // ─── 6) Crédit du solde expéditeur (devise expéditeur) ───────────────────────
     const refunded = await Balance.findOneAndUpdate(
       { user: tx.sender },
-      { $inc: { amount: refundAmount } },
+      { $inc: { amount: refundAmt } },
       { new: true, upsert: true, session }
     );
     if (!refunded) {
       throw createError(500, 'Erreur lors du remboursement au compte expéditeur');
     }
 
-    // ─── 6) Crédit des frais d’annulation au compte admin@paynoval.com ─────────────
+    // ─── 7) Conversion des frais dans la devise du compte admin ──────────────────
+    // Suppose que le compte admin utilise toujours la devise "CAD"
+    const adminCurrency = 'CAD';
+    let adminFeeConverted = 0;
+    if (cancellationFee > 0) {
+      // Convertir cancellationFee (en devise expéditeur) → adminCurrency
+      const { converted } = await convertAmount(
+        tx.senderCurrencySymbol,
+        adminCurrency,
+        cancellationFee
+      );
+      adminFeeConverted = parseFloat(converted.toFixed(2));
+    }
+
+    // ─── 8) Crédit du compte admin@paynoval.com (devise admin) ──────────────────
     const adminEmail = 'admin@paynoval.com';
-    const adminUser = await User.findOne({ email: adminEmail })
+    const adminUser  = await User.findOne({ email: adminEmail })
       .select('_id')
       .session(session);
     if (!adminUser) {
       throw createError(500, 'Compte administrateur introuvable');
     }
-    // Si cancellationFee > 0, on crédite ce montant au compte admin
-    if (cancellationFee > 0) {
+    if (adminFeeConverted > 0) {
       await Balance.findOneAndUpdate(
         { user: adminUser._id },
-        { $inc: { amount: cancellationFee } },
+        { $inc: { amount: adminFeeConverted } },
         { new: true, upsert: true, session }
       );
     }
 
-    // ─── 7) Mise à jour de la transaction en 'cancelled' ─────────────────────────
+    // ─── 9) Mise à jour de la transaction en 'cancelled' ─────────────────────────
     tx.status       = 'cancelled';
     tx.cancelledAt  = new Date();
     tx.cancelReason = `${userId === receiverId
@@ -899,21 +957,23 @@ exports.cancelController = async (req, res, next) => {
       : 'Annulé par l’expéditeur'} : ${sanitize(reason)}`;
     await tx.save({ session });
 
-    // ─── 8) Notifications "cancelled" ────────────────────────────────────────────
+    // ─── 10) Notifications "cancelled" ───────────────────────────────────────────
     await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
 
-    // ─── 9) Commit de la transaction MongoDB ────────────────────────────────────
+    // ─── 11) Commit de la session MongoDB ────────────────────────────────────────
     await session.commitTransaction();
     session.endSession();
 
-    // ─── 10) Réponse au front : on retourne le montant remboursé et les frais crédités ──
+    // ─── 12) Réponse au front avec refund et adminFeeConverted ────────────────────
     return res.json({
       success: true,
-      refunded: refundAmount,
-      cancellationFee
+      refunded: refundAmt,
+      cancellationFeeInSenderCurrency: cancellationFee,
+      adminFeeCredited: adminFeeConverted,
+      adminCurrency: adminCurrency
     });
   } catch (err) {
-    // En cas d’erreur, on rollback et on termine la session
+    // Rollback en cas d’erreur
     await session.abortTransaction();
     session.endSession();
     return next(err);
