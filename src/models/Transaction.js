@@ -1,4 +1,4 @@
-// src/models/Transaction.js
+// File: src/models/Transaction.js
 
 const mongoose = require('mongoose');
 const crypto   = require('crypto');
@@ -18,6 +18,7 @@ module.exports = conn => {
       required: true
     },
     amount: {
+      // Montant brut saisi par l’expéditeur
       type: Schema.Types.Decimal128,
       required: true,
       validate: {
@@ -26,12 +27,22 @@ module.exports = conn => {
       }
     },
     transactionFees: {
+      // 1 % du montant brut, calculé au controller
       type: Schema.Types.Decimal128,
       required: true,
       default: mongoose.Types.Decimal128.fromString('0.00'),
       validate: {
         validator: v => parseFloat(v.toString()) >= 0.00,
         message: props => `Les frais doivent être ≥ 0.00, reçus ${props.value}`
+      }
+    },
+    netAmount: {
+      // montant net à créditer au destinataire = amount – transactionFees
+      type: Schema.Types.Decimal128,
+      required: true,
+      validate: {
+        validator: v => parseFloat(v.toString()) >= 0.00,
+        message: props => `Le net à créditer doit être ≥ 0.00, reçu ${props.value}`
       }
     },
 
@@ -63,7 +74,7 @@ module.exports = conn => {
       type: Schema.Types.Decimal128,
       required: true
     },
-    // ☑️ montant converti pour le destinataire
+    // ☑️ montant converti pour le destinataire (pour info seulement)
     localAmount: {
       type: Schema.Types.Decimal128,
       required: true
@@ -153,7 +164,7 @@ module.exports = conn => {
     timestamps: true
   });
 
-  // Indexes
+  // Indexes pour accélérer les recherches
   transactionSchema.index({ sender: 1, createdAt: -1 });
   transactionSchema.index({ receiver: 1, status: 1 });
   transactionSchema.index({ verificationToken: 1 });
@@ -161,11 +172,12 @@ module.exports = conn => {
   // toJSON : convertir Decimal128 en nombre et exposer les nouveaux champs
   transactionSchema.set('toJSON', {
     transform(doc, ret) {
-      ret.id               = ret._id;
-      ret.amount           = parseFloat(ret.amount.toString());
-      ret.transactionFees  = parseFloat(ret.transactionFees.toString());
-      ret.exchangeRate     = parseFloat(ret.exchangeRate.toString());
-      ret.localAmount      = parseFloat(ret.localAmount.toString());
+      ret.id              = ret._id;
+      ret.amount          = parseFloat(ret.amount.toString());
+      ret.transactionFees = parseFloat(ret.transactionFees.toString());
+      ret.netAmount       = parseFloat(ret.netAmount.toString());
+      ret.exchangeRate    = parseFloat(ret.exchangeRate.toString());
+      ret.localAmount     = parseFloat(ret.localAmount.toString());
       delete ret._id;
       delete ret.securityCode;
       delete ret.verificationToken;
@@ -173,7 +185,7 @@ module.exports = conn => {
     }
   });
 
-  // Génération automatique du token
+  // Génération automatique du token de vérification
   transactionSchema.pre('validate', function(next) {
     if (this.isNew) {
       this.verificationToken = crypto.randomBytes(32).toString('hex');
