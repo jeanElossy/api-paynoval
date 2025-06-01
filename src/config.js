@@ -1,10 +1,13 @@
-// src/config.js
+// File: src/config.js
 
 const path = require('path');
 require('dotenv-safe').config({
   example: path.resolve(__dirname, '../.env.example'),
   allowEmptyValues: true,
 });
+
+// Nouvelle variable pour URL du backend principal
+const PRINCIPAL_URL = process.env.PRINCIPAL_URL?.trim() || '';
 
 // Préparer l'URL de base pour l'API de change
 const rawExchangeUrl = process.env.EXCHANGE_API_URL?.trim();
@@ -20,6 +23,9 @@ module.exports = {
   // Environnement
   env: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT) || 3000,
+
+  // URL du backend principal
+  principalUrl: PRINCIPAL_URL,
 
   // ─── MongoDB ────────────────────────────────────────────────────────────────
   mongo: {
