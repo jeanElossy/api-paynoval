@@ -21,6 +21,11 @@ const {
 } = require('../utils/emailTemplates');
 const { convertAmount } = require('../tools/currency');
 
+// On importe notre service partagé de push (depuis notre backend principal)
+const { sendPushNotification } = require('../services/notificationService');
+
+
+
 
 // ─── CONST & HELPERS ─────────────────────────────────────────────────────────
 const sanitize        = text => String(text || '').replace(/[<>\\/{};]/g, '').trim();
@@ -34,128 +39,297 @@ const MAX_DESC_LENGTH = 500;
  *  - session : session MongoDB pour la transaction
  *  - senderCurrency : symbole de la devise de l’expéditeur (par ex. 'F CFA')
  */
+// async function notifyParties(tx, status, session, senderCurrency) {
+//   try {
+//     const subjectMap = { 
+//       initiated: 'Transaction en attente', 
+//       confirmed: 'Transaction confirmée', 
+//       cancelled: 'Transaction annulée' 
+//     };
+//     const emailSubject = subjectMap[status] || `Transaction ${status}`;
+
+//     // ── Récupère l’expéditeur (sender) et le destinataire (receiver) depuis la collection Users
+//     const [sender, receiver] = await Promise.all([
+//       User.findById(tx.sender).select('email pushToken fullName').lean(),
+//       User.findById(tx.receiver).select('email pushToken fullName').lean()
+//     ]);
+
+//     // Formate la date pour les emails et notifications
+//     const dateStr = new Date().toLocaleString('fr-FR');
+
+//     // Liens de confirmation (web + mobile) pour inclusion dans les emails/notifications
+//     const webLink    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
+//     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
+
+//     // ── Prépare le payload envoyé à l’expéditeur
+//     const dataSender = {
+//       transactionId:     tx._id.toString(),
+//       amount:            tx.amount.toString(),              // montant principal
+//       currency:          senderCurrency,                    // symbole de la devise expéditeur
+//       name:              sender.fullName,                   // nom complet de l’expéditeur
+//       senderEmail:       sender.email,                      // email expéditeur
+//       receiverEmail:     tx.recipientEmail || receiver.email, // email destinataire
+//       date:              dateStr,                           // date de création
+//       confirmLinkWeb:    webLink,                           // lien web
+//       country:           tx.country,                        // pays
+//       securityQuestion:  tx.securityQuestion                // question de sécurité
+//     };
+
+//     // ── Prépare le payload envoyé au destinataire
+//     const dataReceiver = {
+//       transactionId:     tx._id.toString(),
+//       amount:            tx.localAmount.toString(),         // montant converti dans la devise locale
+//       currency:          tx.localCurrencySymbol,            // symbole de la devise locale
+//       name:              tx.nameDestinataire,              // nom du destinataire tel que fourni
+//       receiverEmail:     tx.recipientEmail,                 // email destinataire
+//       senderEmail:       sender.email,                      // email expéditeur
+//       date:              dateStr,
+//       confirmLink:       mobileLink,                        // lien mobile
+//       country:           tx.country,
+//       securityQuestion:  tx.securityQuestion,
+//       senderName:        sender.fullName                    // nom expéditeur pour afficher au destinataire
+//     };
+
+//     // ── (1) Envoi des emails
+//     if (sender.email) {
+//       // Choisit le template HTML correspondant au statut pour l’expéditeur
+//       const htmlSender = {
+//         initiated: initiatedSenderTemplate,
+//         confirmed: confirmedSenderTemplate,
+//         cancelled: cancelledSenderTemplate
+//       }[status](status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
+//       await sendEmail({ to: sender.email, subject: emailSubject, html: htmlSender });
+//     }
+//     if (receiver.email) {
+//       // Choisit le template HTML correspondant au statut pour le destinataire
+//       const htmlReceiver = {
+//         initiated: initiatedReceiverTemplate,
+//         confirmed: confirmedReceiverTemplate,
+//         cancelled: cancelledReceiverTemplate
+//       }[status](status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
+//       await sendEmail({ to: receiver.email, subject: emailSubject, html: htmlReceiver });
+//     }
+
+//     // ── (2) Envoi des push notifications via Expo
+//     const pushMessages = [];
+//     [sender, receiver].forEach(u => {
+//       if (u.pushToken && Expo.isExpoPushToken(u.pushToken)) {
+//         // S’il s’agit de l’expéditeur, on prend dataSender, sinon dataReceiver
+//         const payload = u._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
+//         pushMessages.push({
+//           to:     u.pushToken,
+//           sound:  'default',
+//           title:  emailSubject,
+//           body:   `Montant : ${payload.amount} ${payload.currency}`,
+//           data:   payload
+//         });
+//       }
+//     });
+//     for (const chunk of expo.chunkPushNotifications(pushMessages)) {
+//       try {
+//         await expo.sendPushNotificationsAsync(chunk);
+//       } catch (e) {
+//         console.error(e);
+//       }
+//     }
+
+//     // ── (3) Sauvegarde des événements pour le traitement asynchrone (Outbox + In-app)
+//     const events = [sender, receiver].map(u => ({
+//       service: 'notifications',
+//       event:   `transaction_${status}`,
+//       payload: {
+//         userId: u._id,
+//         type:   `transaction_${status}`,
+//         data:   u._id.toString() === sender._id.toString() ? dataSender : dataReceiver
+//       }
+//     }));
+//     await Outbox.insertMany(events, { session });
+
+//     // Crée les documents in-app dans Notification pour qu’ils apparaissent en front
+//     const inAppDocs = events.map(e => ({
+//       recipient: e.payload.userId,
+//       type:      e.payload.type,
+//       data:      e.payload.data,
+//       read:      false
+//     }));
+//     await Notification.insertMany(inAppDocs, { session });
+//   } catch (err) {
+//     console.error('notifyParties error:', err);
+//   }
+// }
+
+
+
+// ───────────────────────────────────────────────────────────────────────────────────
+// Liste des transactions internes (sans populate) 
+// ───────────────────────────────────────────────────────────────────────────────────
+
+
+
+// ─── notifyParties : envoie emails, push & in-app pour expéditeur et destinataire ──
+
+/**
+ * notifyParties : envoie des notifications email, push & in-app à l’expéditeur et au destinataire
+ *
+ * @param {Object} tx              - Document Transaction Mongoose
+ * @param {string} status          - 'initiated' | 'confirmed' | 'cancelled'
+ * @param {mongoose.ClientSession} session - Session MongoDB pour garantir l’atomicité
+ * @param {string} senderCurrency  - Symbole de la devise de l’expéditeur (ex. 'F CFA')
+ */
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    const subjectMap = { 
-      initiated: 'Transaction en attente', 
-      confirmed: 'Transaction confirmée', 
-      cancelled: 'Transaction annulée' 
+    // 1) Définir le sujet de l’email en fonction du statut
+    const subjectMap = {
+      initiated: 'Transaction en attente',
+      confirmed: 'Transaction confirmée',
+      cancelled: 'Transaction annulée'
     };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
 
-    // ── Récupère l’expéditeur (sender) et le destinataire (receiver) depuis la collection Users
+    // 2) Récupérer simultanément l’expéditeur et le destinataire depuis la collection Users
+    //    On sélectionne leur email, nom complet et pushTokens (tableau de tokens)
     const [sender, receiver] = await Promise.all([
-      User.findById(tx.sender).select('email pushToken fullName').lean(),
-      User.findById(tx.receiver).select('email pushToken fullName').lean()
+      User.findById(tx.sender)
+        .select('email fullName pushTokens')
+        .lean(),
+      User.findById(tx.receiver)
+        .select('email fullName pushTokens')
+        .lean()
     ]);
 
-    // Formate la date pour les emails et notifications
+    // 2.a) Si l’un des deux n’existe pas, on arrête silencieusement (impossible de notifier)
+    if (!sender || !receiver) {
+      return;
+    }
+
+    // 3) Formater la date courante selon la locale française pour inclusion dans les messages
     const dateStr = new Date().toLocaleString('fr-FR');
 
-    // Liens de confirmation (web + mobile) pour inclusion dans les emails/notifications
+    // 4) Construire les liens de confirmation pour intégration dans les emails/notifications
     const webLink    = `https://panoval.com/confirm/${tx._id}?token=${tx.verificationToken}`;
     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
 
-    // ── Prépare le payload envoyé à l’expéditeur
+    // 5) Préparer le contenu spécifique à l’expéditeur (payload dataSender)
     const dataSender = {
       transactionId:     tx._id.toString(),
-      amount:            tx.amount.toString(),              // montant principal
-      currency:          senderCurrency,                    // symbole de la devise expéditeur
-      name:              sender.fullName,                   // nom complet de l’expéditeur
-      senderEmail:       sender.email,                      // email expéditeur
-      receiverEmail:     tx.recipientEmail || receiver.email, // email destinataire
-      date:              dateStr,                           // date de création
-      confirmLinkWeb:    webLink,                           // lien web
-      country:           tx.country,                        // pays
-      securityQuestion:  tx.securityQuestion                // question de sécurité
+      amount:            tx.amount.toString(),             // montant brut saisi par l’expéditeur
+      currency:          senderCurrency,                   // symbole de la devise expéditeur
+      name:              sender.fullName,                  // nom complet de l’expéditeur
+      senderEmail:       sender.email,                     // email de l’expéditeur
+      receiverEmail:     tx.recipientEmail || receiver.email, // email du destinataire
+      date:              dateStr,                          // date de création au format FR
+      confirmLinkWeb:    webLink,                          // lien web pour confirmer
+      country:           tx.country,                       // pays lié à la transaction
+      securityQuestion:  tx.securityQuestion               // question de sécurité pour vérification
     };
 
-    // ── Prépare le payload envoyé au destinataire
+    // 6) Préparer le contenu spécifique au destinataire (payload dataReceiver)
     const dataReceiver = {
       transactionId:     tx._id.toString(),
-      amount:            tx.localAmount.toString(),         // montant converti dans la devise locale
-      currency:          tx.localCurrencySymbol,            // symbole de la devise locale
-      name:              tx.nameDestinataire,              // nom du destinataire tel que fourni
-      receiverEmail:     tx.recipientEmail,                 // email destinataire
-      senderEmail:       sender.email,                      // email expéditeur
+      amount:            tx.localAmount.toString(),        // montant converti dans la devise locale du destinataire
+      currency:          tx.localCurrencySymbol,           // symbole de la devise locale du destinataire
+      name:              tx.nameDestinataire,              // nom du destinataire tel que fourni / récupéré
+      receiverEmail:     tx.recipientEmail,                 // email du destinataire
+      senderEmail:       sender.email,                      // email de l’expéditeur
       date:              dateStr,
-      confirmLink:       mobileLink,                        // lien mobile
+      confirmLink:       mobileLink,                        // lien mobile pour confirmer
       country:           tx.country,
-      securityQuestion:  tx.securityQuestion,
-      senderName:        sender.fullName                    // nom expéditeur pour afficher au destinataire
+      securityQuestion:  tx.securityQuestion,               // question de sécurité pour vérification
+      senderName:        sender.fullName                    // nom de l’expéditeur pour affichage chez le destinataire
     };
 
-    // ── (1) Envoi des emails
+    // ── (A) Envoi des e-mails ───────────────────────────────────────────────────────
+    // A.1) Si l’expéditeur a un email, choisir le bon template selon le statut et envoyer
     if (sender.email) {
-      // Choisit le template HTML correspondant au statut pour l’expéditeur
       const htmlSender = {
         initiated: initiatedSenderTemplate,
         confirmed: confirmedSenderTemplate,
         cancelled: cancelledSenderTemplate
-      }[status](status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender);
-      await sendEmail({ to: sender.email, subject: emailSubject, html: htmlSender });
+      }[status](
+        status === 'cancelled'
+          ? { ...dataSender, reason: tx.cancelReason } // inclure la raison en cas d’annulation
+          : dataSender
+      );
+      await sendEmail({
+        to:      sender.email,
+        subject: emailSubject,
+        html:    htmlSender
+      });
     }
+
+    // A.2) Si le destinataire a un email, choisir le bon template selon le statut et envoyer
     if (receiver.email) {
-      // Choisit le template HTML correspondant au statut pour le destinataire
       const htmlReceiver = {
         initiated: initiatedReceiverTemplate,
         confirmed: confirmedReceiverTemplate,
         cancelled: cancelledReceiverTemplate
-      }[status](status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver);
-      await sendEmail({ to: receiver.email, subject: emailSubject, html: htmlReceiver });
+      }[status](
+        status === 'cancelled'
+          ? { ...dataReceiver, reason: tx.cancelReason } // inclure la raison en cas d’annulation
+          : dataReceiver
+      );
+      await sendEmail({
+        to:      receiver.email,
+        subject: emailSubject,
+        html:    htmlReceiver
+      });
     }
 
-    // ── (2) Envoi des push notifications via Expo
-    const pushMessages = [];
-    [sender, receiver].forEach(u => {
-      if (u.pushToken && Expo.isExpoPushToken(u.pushToken)) {
-        // S’il s’agit de l’expéditeur, on prend dataSender, sinon dataReceiver
-        const payload = u._id.toString() === sender._id.toString() ? dataSender : dataReceiver;
-        pushMessages.push({
-          to:     u.pushToken,
-          sound:  'default',
-          title:  emailSubject,
-          body:   `Montant : ${payload.amount} ${payload.currency}`,
-          data:   payload
-        });
-      }
-    });
-    for (const chunk of expo.chunkPushNotifications(pushMessages)) {
-      try {
-        await expo.sendPushNotificationsAsync(chunk);
-      } catch (e) {
-        console.error(e);
-      }
+    // ── (B) Envoi des push notifications via notre service partagé ─────────────────
+    // B.1) Construire le texte du message pour l’expéditeur
+    const messageForSender   = `Montant : ${dataSender.amount} ${dataSender.currency}`;
+    // B.2) Construire le texte du message pour le destinataire
+    const messageForReceiver = `Montant : ${dataReceiver.amount} ${dataReceiver.currency}`;
+
+    // B.3) Si l’expéditeur possè­de un ou plusieurs pushTokens, envoyer une notification
+    //     Notre service sendPushNotification prend en charge le tableau de tokens stockés en base
+    if (Array.isArray(sender.pushTokens) && sender.pushTokens.length > 0) {
+      await sendPushNotification(sender._id.toString(), messageForSender);
+    } else if (typeof sender.pushTokens === 'string' && sender.pushTokens) {
+      // Si, par hasard, on stockait une chaîne unique au lieu d’un tableau
+      await sendPushNotification(sender._id.toString(), messageForSender);
     }
 
-    // ── (3) Sauvegarde des événements pour le traitement asynchrone (Outbox + In-app)
+    // B.4) Idem pour le destinataire
+    if (Array.isArray(receiver.pushTokens) && receiver.pushTokens.length > 0) {
+      await sendPushNotification(receiver._id.toString(), messageForReceiver);
+    } else if (typeof receiver.pushTokens === 'string' && receiver.pushTokens) {
+      await sendPushNotification(receiver._id.toString(), messageForReceiver);
+    }
+
+    // ── (C) Sauvegarde des événements Outbox pour un traitement asynchrone ultérieur ─
+    // On crée deux événements : un pour l’expéditeur, un pour le destinataire
     const events = [sender, receiver].map(u => ({
       service: 'notifications',
       event:   `transaction_${status}`,
       payload: {
         userId: u._id,
         type:   `transaction_${status}`,
-        data:   u._id.toString() === sender._id.toString() ? dataSender : dataReceiver
+        data:   String(u._id) === String(sender._id) ? dataSender : dataReceiver
       }
     }));
     await Outbox.insertMany(events, { session });
 
-    // Crée les documents in-app dans Notification pour qu’ils apparaissent en front
+    // ── (D) Création des notifications “in-app” dans la collection Notification ────
+    // Ces documents seront récupérés par le front via GET /notifications
     const inAppDocs = events.map(e => ({
-      recipient: e.payload.userId,
-      type:      e.payload.type,
-      data:      e.payload.data,
-      read:      false
+      recipient: e.payload.userId, // destinataire de la notification in-app
+      type:      e.payload.type,   // ex. 'transaction_initiated'
+      data:      e.payload.data,   // payload JSON décrit au-dessus
+      read:      false             // non lue par défaut
     }));
     await Notification.insertMany(inAppDocs, { session });
+
   } catch (err) {
+    // En cas d’erreur dans notifyParties, on log uniquement pour ne pas bloquer l’opération principale
     console.error('notifyParties error:', err);
   }
 }
 
 
+
 // ───────────────────────────────────────────────────────────────────────────────────
-// Liste des transactions internes (sans populate) 
+// Reccuperation de la liste des transactions par user (sans populate)
 // ───────────────────────────────────────────────────────────────────────────────────
 
 exports.listInternal = async (req, res, next) => {
@@ -186,6 +360,7 @@ exports.listInternal = async (req, res, next) => {
     next(err);
   }
 };
+
 
 
 // ───────────────────────────────────────────────────────────────────────────────────
@@ -239,151 +414,6 @@ exports.getTransactionController = async (req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────────────
 // ─── INITIATE INTERNAL ────────────────────────────────────────────────────────────
 // ───────────────────────────────────────────────────────────────────────────────────
-
-// exports.initiateInternal = async (req, res, next) => {
-//   // Démarre une session MongoDB pour assurer l’atomicité
-//   const session = await mongoose.startSession();
-//   try {
-//     session.startTransaction();
-
-//     // ─── 1) Lecture du corps de la requête (req.body) ─────────────────────────────
-//     const {
-//       toEmail,
-//       amount,
-//       transactionFees = 0,
-//       senderCurrencySymbol,
-//       localCurrencySymbol,
-//       recipientInfo = {},   // ex. { name: 'Jean Elossy' }
-//       description = '',
-//       question,
-//       securityCode,
-//       destination,
-//       funds,
-//       country
-//     } = req.body;
-
-//     // ─── 2) Validations basiques ──────────────────────────────────────────────────
-//     if (!sanitize(toEmail)) {
-//       throw createError(400, 'Email du destinataire requis');
-//     }
-//     if (!question || !securityCode) {
-//       throw createError(400, 'Question et code de sécurité requis');
-//     }
-//     if (!destination || !funds || !country) {
-//       throw createError(400, 'Données de transaction incomplètes');
-//     }
-//     if (description.length > MAX_DESC_LENGTH) {
-//       throw createError(400, 'Description trop longue');
-//     }
-
-//     // ─── 3) Récupération de l’utilisateur expéditeur (req.user.id) ────────────────
-//     const senderId   = req.user.id;
-//     // Sélectionne uniquement fullName + email
-//     const senderUser = await User.findById(senderId).select('fullName email').lean();
-//     if (!senderUser) {
-//       throw createError(403, 'Utilisateur invalide');
-//     }
-
-//     // ─── 4) Recherche du destinataire par email ───────────────────────────────────
-//     const receiver = await User.findOne({ email: sanitize(toEmail) }).lean();
-//     if (!receiver) {
-//       throw createError(404, 'Destinataire introuvable');
-//     }
-//     if (receiver._id.toString() === senderId) {
-//       throw createError(400, 'Auto-transfert impossible');
-//     }
-
-//     // ─── 5) Vérification du montant + frais ─────────────────────────────────────
-//     const amt  = parseFloat(amount);
-//     const fees = parseFloat(transactionFees);
-//     if (isNaN(amt) || amt <= 0) {
-//       throw createError(400, 'Montant invalide');
-//     }
-//     if (isNaN(fees) || fees < 0) {
-//       throw createError(400, 'Frais invalides');
-//     }
-//     const total = amt + fees;
-
-//     // ─── 6) Vérification & débit du solde de l’expéditeur ────────────────────────
-//     const balDoc = await Balance.findOne({ user: senderId }).session(session);
-//     const balanceFloat = balDoc?.amount ?? 0;
-//     if (balanceFloat < total) {
-//       throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
-//     }
-//     const debited = await Balance.findOneAndUpdate(
-//       { user: senderId },
-//       { $inc: { amount: -total } },
-//       { new: true, session }
-//     );
-//     if (!debited) {
-//       throw createError(500, 'Erreur lors du débit');
-//     }
-
-//     // ─── 7) Conversion du montant principal en devise locale ──────────────────────
-//     const { rate, converted } = await convertAmount(senderCurrencySymbol, localCurrencySymbol, amt);
-
-//     // ─── 8) Préparation des valeurs au format Decimal128 pour MongoDB ──────────────
-//     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-//     const decFees     = mongoose.Types.Decimal128.fromString(fees.toFixed(2));
-//     const decLocal    = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
-//     const decExchange = mongoose.Types.Decimal128.fromString(rate.toString());
-
-//     // ─── 9) Détermine le nom du destinataire à afficher : soit recipientInfo.name soit fullName de l’expéditeur
-//     const nameDest = sanitize(recipientInfo.name) || senderUser.fullName;
-
-//     // ─── 10) Création du document Transaction ─────────────────────────────────────
-//     //     On inclut ici également le nom / email expéditeur et destinataire afin
-//     //     que ces champs soient disponibles directement lors du listInternal() côté front.
-//     //     Si vous préférez ne pas les dupliquer, vous pouvez aussi faire un populate() sur listInternal.
-//     const [tx] = await TransactionModel().create([{
-//       // ── Références aux ObjectId des utilisateurs
-//       sender:               senderUser._id,             // _id de l’expéditeur
-//       receiver:             receiver._id,               // _id du destinataire
-
-//       // ── Montants & devises
-//       amount:               decAmt,                     // montant principal (Decimal128)
-//       transactionFees:      decFees,                    // frais de transaction (Decimal128)
-//       senderCurrencySymbol: sanitize(senderCurrencySymbol),
-//       exchangeRate:         decExchange,                // taux de change (Decimal128)
-//       localAmount:          decLocal,                   // montant local (Decimal128)
-//       localCurrencySymbol:  sanitize(localCurrencySymbol),
-
-//       // ── Infos sur les noms / emails (pour éviter un populate systématique ensuite)
-//       //    On stocke dans le document pour que listInternal renvoie directement tx.senderName, tx.senderEmail, etc.
-//       senderName:           senderUser.fullName,        // nom complet de l’expéditeur
-//       senderEmail:          senderUser.email,           // email de l’expéditeur
-//       nameDestinataire:     nameDest,                   // nom du destinataire tel que fourni / fallback
-//       recipientEmail:       sanitize(toEmail),          // email du destinataire
-
-//       // ── Autres champs
-//       country:              sanitize(country),          // pays (ex. "CIA")
-//       description:          sanitize(description),
-//       securityQuestion:     sanitize(question),
-//       securityCode:         sanitize(securityCode),
-//       destination:          sanitize(destination),      // ex. "PayNoval" | "Bank" | "MobileMoney"
-//       funds:                sanitize(funds),            // ex. "Solde PayNoval"
-//       status:               'pending'                   // statut initial : 'pending'
-//     }], { session });
-
-//     // ─── 11) Notifications "initiated" ───────────────────────────────────────────
-//     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
-
-//     // ─── 12) Commit de la transaction MongoDB ────────────────────────────────────
-//     await session.commitTransaction();
-
-//     // ─── 13) Renvoie au front : on transmet l’ID de la transaction créée.
-//     //     Depuis le front, après réception de transactionId, on pourra appeler
-//     //     listInternal() ou getTransaction pour avoir tous les détails.
-//     res.status(201).json({ success: true, transactionId: tx._id.toString() });
-//   } catch (err) {
-//     await session.abortTransaction();
-//     next(err);
-//   } finally {
-//     session.endSession();
-//   }
-// };
-
-
 
 /**
  * POST /api/v1/transactions/initiateInternal
@@ -592,65 +622,6 @@ exports.initiateInternal = async (req, res, next) => {
 // ─── CONFIRM INTERNAL ──────────────────────────────────────────────────────────────
 // ───────────────────────────────────────────────────────────────────────────────────
 
-// exports.confirmController = async (req, res, next) => {
-//   const session = await mongoose.startSession();
-//   try {
-//     session.startTransaction();
-//     const { transactionId, securityCode } = req.body;
-
-//     if (!transactionId || !securityCode) {
-//       throw createError(400, 'Paramètres manquants');
-//     }
-
-//     // 1) Récupère la transaction en session + vérifie le statut
-//     const tx = await TransactionModel().findById(transactionId)
-//       .select('+securityCode +localAmount +senderCurrencySymbol +receiver +sender')
-//       .session(session);
-
-//     if (!tx || tx.status !== 'pending') {
-//       throw createError(400, 'Transaction invalide ou déjà traitée');
-//     }
-//     if (String(tx.receiver) !== String(req.user.id)) {
-//       throw createError(403, 'Vous n’êtes pas le destinataire');
-//     }
-
-//     // 2) Vérification du code de sécurité
-//     if (sanitize(securityCode) !== tx.securityCode) {
-//       // Si code incorrect, on notifie d’abord la partie, on annule, puis on renvoie une erreur
-//       await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
-//       throw createError(401, 'Code de sécurité incorrect');
-//     }
-
-//     // 3) Créditer le destinataire avec le montant local
-//     const localAmtFloat = parseFloat(tx.localAmount.toString());
-//     const credited = await Balance.findOneAndUpdate(
-//       { user: tx.receiver },
-//       { $inc: { amount: localAmtFloat } },
-//       { new: true, upsert: true, session }
-//     );
-//     if (!credited) {
-//       throw createError(500, 'Erreur lors du crédit');
-//     }
-
-//     // 4) Mise à jour du statut de la transaction en 'confirmed'
-//     tx.status      = 'confirmed';
-//     tx.confirmedAt = new Date();
-//     await tx.save({ session });
-
-//     // 5) Notifications "confirmed"
-//     await notifyParties(tx, 'confirmed', session, tx.senderCurrencySymbol);
-
-//     await session.commitTransaction();
-//     res.json({ success: true });
-//   } catch (err) {
-//     await session.abortTransaction();
-//     next(err);
-//   } finally {
-//     session.endSession();
-//   }
-// };
-
-
 /**
  * PATCH /api/v1/transactions/confirm
  *
@@ -770,67 +741,6 @@ exports.confirmController = async (req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────────────
 // ─── CANCEL INTERNAL ───────────────────────────────────────────────────────────────
 // ───────────────────────────────────────────────────────────────────────────────────
-
-// exports.cancelController = async (req, res, next) => {
-//   const session = await mongoose.startSession();
-//   try {
-//     session.startTransaction();
-//     const { transactionId, reason = 'Annulé', senderCurrencySymbol } = req.body;
-
-//     if (!transactionId) {
-//       throw createError(400, 'ID de transaction requis');
-//     }
-
-//     // 1) Récupère la transaction + vérifie le statut
-//     const tx = await TransactionModel().findById(transactionId)
-//       .select('+amount +transactionFees +sender +receiver')
-//       .session(session);
-
-//     if (!tx || tx.status !== 'pending') {
-//       throw createError(400, 'Transaction invalide ou déjà traitée');
-//     }
-
-//     // 2) Vérifie que l’utilisateur connecté est bien expéditeur OU destinataire
-//     const userId     = String(req.user.id);
-//     const senderId   = String(tx.sender);
-//     const receiverId = String(tx.receiver);
-//     if (userId !== senderId && userId !== receiverId) {
-//       throw createError(403, 'Vous n’êtes pas autorisé à annuler');
-//     }
-
-//     // 3) Calcul du remboursement (99% du montant brut)
-//     const amtFloat  = parseFloat(tx.amount.toString());
-//     const feesFloat = parseFloat(tx.transactionFees.toString());
-//     const gross     = amtFloat + feesFloat;
-//     const netRefund = parseFloat((gross * 0.99).toFixed(2));
-
-//     // 4) Rembourse l’expéditeur
-//     await Balance.findOneAndUpdate(
-//       { user: tx.sender },
-//       { $inc: { amount: netRefund } },
-//       { new: true, upsert: true, session }
-//     );
-
-//     // 5) Mise à jour du statut en 'cancelled'
-//     tx.status        = 'cancelled';
-//     tx.cancelledAt   = new Date();
-//     tx.cancelReason  = `${userId === receiverId
-//       ? 'Annulé par le destinataire'
-//       : 'Annulé par l’expéditeur'} : ${sanitize(reason)}`;
-//     await tx.save({ session });
-
-//     // 6) Notifications "cancelled"
-//     await notifyParties(tx, 'cancelled', session, senderCurrencySymbol);
-
-//     await session.commitTransaction();
-//     res.json({ success: true, refunded: netRefund });
-//   } catch (err) {
-//     await session.abortTransaction();
-//     next(err);
-//   } finally {
-//     session.endSession();
-//   }
-// };
 
 
 
