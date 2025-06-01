@@ -531,68 +531,57 @@ async function notifyParties(tx, status, session, senderCurrency) {
 
 
 // ───────────────────────────────────────────────────────────────────────────────────
-// ─── LIST INTERNAL ────────────────────────────────────────────────────────────────
+// Liste des transactions internes (sans populate) 
 // ───────────────────────────────────────────────────────────────────────────────────
 
 exports.listInternal = async (req, res, next) => {
   try {
+    // Récupère l’ID de l’utilisateur authentifié (authMiddleware ajoute req.user)
     const userId = req.user.id;
     const Transaction = TransactionModel();
 
-    // --------------------------------------------------------
-    // 1) On récupère toutes les transactions où l’utilisateur
-    //    connecté est soit expéditeur (sender) soit destinataire.
-    //    Pour exposer nom/email directement au front, on fait
-    //    un populate() sur les champs sender et receiver.
-    // --------------------------------------------------------
+    // On recherche toutes les transactions où l’utilisateur est soit expéditeur, soit destinataire
+    // Pas de populate : on utilise directement les champs senderName, senderEmail, nameDestinataire, recipientEmail déjà stockés
     const txs = await Transaction.find({
       $or: [
         { sender: userId },
         { receiver: userId }
       ]
     })
-    // ─── populate sender pour récupérer sender.fullName + sender.email
-    .populate('sender', 'fullName email')
-    // ─── populate receiver pour récupérer receiver.fullName + receiver.email
-    .populate('receiver', 'fullName email')
-    .sort({ createdAt: -1 })
-    .lean();
+      .sort({ createdAt: -1 })  // Tri par date de création décroissante
+      .lean();                  // On demande un objet JavaScript brut (pas de document Mongoose)
 
-    // À ce stade, chaque objet tx a :
-    //   tx.sender.fullName       (ex. "Parker_Konan")
-    //   tx.sender.email          (ex. "wilstones34@gmail.com")
-    //   tx.receiver.fullName     (nom du destinataire réel)
-    //   tx.receiver.email        (email du destinataire réel)
-    //   tx.nameDestinataire      (nom fourni dans initiateInternal)
-    //   tx.recipientEmail        (email fourni dans initiateInternal)
-    //   tx.amount, tx.localAmount, tx.localCurrencySymbol, tx.senderCurrencySymbol, tx.transactionFees, tx.country, tx.destination, tx.status, etc.
+    // Chaque tx renvoyée contient :
+    //   - senderName       : nom complet de l’expéditeur (string)
+    //   - senderEmail      : email de l’expéditeur (string)
+    //   - receiver (ObjectId) et nameDestinataire / recipientEmail  : informations sur le destinataire
+    //   - amount, transactionFees, senderCurrencySymbol, localAmount, localCurrencySymbol, country, destination, status, createdAt, etc.
 
     res.json({ success: true, count: txs.length, data: txs });
   } catch (err) {
+    // En cas d’erreur, on passe au middleware d’erreur
     next(err);
   }
 };
 
 
-/**
- * getTransactionController : récupère une transaction par ID si l’utilisateur
- * connecté est bien expéditeur ou destinataire.
- *
- * En plus de renvoyer tx.services standard, on populate aussi sender + receiver
- * pour exposer fullName + email directement au front.
- */
+// ───────────────────────────────────────────────────────────────────────────────────
+// Détail d’une transaction interne par ID (sans populate)
+// ───────────────────────────────────────────────────────────────────────────────────
+
 exports.getTransactionController = async (req, res, next) => {
   try {
-    const { id }   = req.params;
-    const userId   = req.user.id; // le middleware `protect` a mis `req.user`
+    // 1) On récupère l’ID de la transaction depuis le paramètre d’URL
+    const { id } = req.params;
 
-    // 1) On récupère d’abord la transaction par son _id et populate sender + receiver
-    const tx = await TransactionModel()
-      .findById(id)
-      .populate('sender', 'fullName email')
-      .populate('receiver', 'fullName email')
-      .lean();
+    // 2) On récupère l’utilisateur connecté pour vérifier l’autorisation
+    const userId = req.user.id;
 
+    // 3) On cherche la transaction par son _id
+    //    On ne fait pas de populate sur User : on s’appuie sur senderName, senderEmail, etc. stockés en base
+    const tx = await TransactionModel().findById(id).lean();
+
+    // 4) Si la transaction n’existe pas, on renvoie 404
     if (!tx) {
       return res.status(404).json({
         success: false,
@@ -600,28 +589,25 @@ exports.getTransactionController = async (req, res, next) => {
       });
     }
 
-    // 2) Vérifier si l’utilisateur est bien sender ou receiver
-    const isSender   = tx.sender._id.toString()   === userId;
-    const isReceiver = tx.receiver._id.toString() === userId;
-
+    // 5) On vérifie que l’utilisateur connecté est soit expéditeur, soit destinataire
+    const isSender   = tx.sender?.toString()   === userId;
+    const isReceiver = tx.receiver?.toString() === userId;
     if (!isSender && !isReceiver) {
+      // Si l’utilisateur n’est pas lié à cette transaction, on renvoie 404 pour masquer l’existence
       return res.status(404).json({
         success: false,
         message: 'Transaction non trouvée',
       });
     }
 
-    // 3) Tout est OK : on renvoie la transaction complète
-    //    Le front pourra lire :
-    //      - tx.sender.fullName, tx.sender.email
-    //      - tx.receiver.fullName, tx.receiver.email
-    //      - tx.nameDestinataire, tx.recipientEmail      (tels qu’enregistrés dans initiateInternal)
-    //      - tx.amount, tx.localAmount, tx.localCurrencySymbol, tx.senderCurrencySymbol, tx.transactionFees, tx.country, tx.destination, tx.status, etc.
+    // 6) Tout est OK : on renvoie la transaction brute
+    //    Contient senderName, senderEmail, nameDestinataire, recipientEmail, amount, localAmount, status, etc.
     return res.status(200).json({
       success: true,
       data: tx,
     });
   } catch (err) {
+    // En cas d’erreur, on transmet au middleware d’erreur
     next(err);
   }
 };
