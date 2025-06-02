@@ -168,26 +168,19 @@ const MAX_DESC_LENGTH = 500;
 
 
 
-
 /**
- * notifyParties : envoie des notifications par email, push (via le backend principal) et in-app
- * pour l'expéditeur et le destinataire d'une transaction.
+ * notifyParties : envoie des notifications par email, push et in-app
+ * pour l’expéditeur et le destinataire d’une transaction, en respectant
+ * leurs préférences stockées dans notificationSettings.
  *
- * Paramètres :
- *  - tx            : document Transaction (Mongoose)
- *  - status        : 'initiated' | 'confirmed' | 'cancelled'
- *  - session       : session MongoDB (pour les opérations en transaction)
- *  - senderCurrency: symbole de la devise de l’expéditeur (ex. 'F CFA')
+ * @param {Object} tx             - document Transaction (Mongoose)
+ * @param {string} status         - 'initiated' | 'confirmed' | 'cancelled'
+ * @param {ClientSession} session - session MongoDB pour les opérations transactionnelles
+ * @param {string} senderCurrency - symbole de la devise de l’expéditeur (ex. 'F CFA')
  */
-
-
-/**
- * Fonction principale : envoie emails, push et notifications in-app
- */
-
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    // ─── 1) Définir le sujet d’email selon le statut ───────────────────────────
+    // ─── 1) Sujet d’email selon le statut ────────────────────────────────────────
     const subjectMap = {
       initiated: 'Transaction en attente',
       confirmed: 'Transaction confirmée',
@@ -195,21 +188,25 @@ async function notifyParties(tx, status, session, senderCurrency) {
     };
     const emailSubject = subjectMap[status] || `Transaction ${status}`;
 
-    // ─── 2) Récupérer expéditeur & destinataire (email, fullName, pushTokens) ───
+    // ─── 2) Récupérer expéditeur & destinataire (email, fullName, pushTokens, notificationSettings) ─
     const [sender, receiver] = await Promise.all([
-      User.findById(tx.sender).select('email fullName pushTokens').lean(),
-      User.findById(tx.receiver).select('email fullName pushTokens').lean(),
+      User.findById(tx.sender)
+        .select('email fullName pushTokens notificationSettings')
+        .lean(),
+      User.findById(tx.receiver)
+        .select('email fullName pushTokens notificationSettings')
+        .lean(),
     ]);
     if (!sender || !receiver) return;
 
-    // ─── 3) Formatage de la date (locale française) ─────────────────────────────
+    // ─── 3) Formatage de la date (locale française) ───────────────────────────────
     const dateStr = new Date().toLocaleString('fr-FR');
 
-    // ─── 4) Construire les liens de confirmation (web + mobile) ──────────────────
+    // ─── 4) Construire les liens de confirmation (web + mobile) ────────────────────
     const webLink    = `${PRINCIPAL_URL}/confirm/${tx._id}?token=${tx.verificationToken}`;
     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
 
-    // ─── 5) Préparer le payload pour l’expéditeur ────────────────────────────────
+    // ─── 5) Préparer le payload pour l’expéditeur ─────────────────────────────────
     const dataSender = {
       transactionId:    tx._id.toString(),
       amount:           tx.amount.toString(),
@@ -223,7 +220,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
       securityQuestion: tx.securityQuestion,
     };
 
-    // ─── 6) Préparer le payload pour le destinataire ────────────────────────────
+    // ─── 6) Préparer le payload pour le destinataire ─────────────────────────────
     const dataReceiver = {
       transactionId:     tx._id.toString(),
       amount:            tx.localAmount.toString(),
@@ -238,45 +235,66 @@ async function notifyParties(tx, status, session, senderCurrency) {
       senderName:        sender.fullName,
     };
 
-    // ─── (A) Envoi des e-mails ───────────────────────────────────────────────────
-    if (sender.email) {
-      const htmlSender = {
-        initiated: initiatedSenderTemplate,
-        confirmed: confirmedSenderTemplate,
-        cancelled: cancelledSenderTemplate,
-      }[status](
-        status === 'cancelled'
-          ? { ...dataSender, reason: tx.cancelReason }
-          : dataSender
-      );
-      await sendEmail({
-        to:      sender.email,
-        subject: emailSubject,
-        html:    htmlSender,
-      });
+    // ────────────────────────────────────────────────────────────────────────────────
+    // 7) Chargement des préférences de notification pour expéditeur & destinataire
+    // ────────────────────────────────────────────────────────────────────────────────
+    const sSettings = sender.notificationSettings || {};
+    const rSettings = receiver.notificationSettings || {};
+
+    const {
+      channels: {
+        email: sEmailChan = true,
+        push:  sPushChan = true,
+        inApp: sInAppChan = true,
+      } = {},
+      types: {
+        txSent:       sTxSentType = true,
+        txReceived:   sTxReceivedType = true,
+        txFailed:     sTxFailedType = true,
+        promotions:   sPromoType = false,
+        lowBalance:   sLowBalanceType = true,
+        security:     sSecurityType = true,
+        system:       sSystemType = true,
+      } = {},
+    } = sSettings;
+
+    const {
+      channels: {
+        email: rEmailChan = true,
+        push:  rPushChan = true,
+        inApp: rInAppChan = true,
+      } = {},
+      types: {
+        txSent:       rTxSentType = true,
+        txReceived:   rTxReceivedType = true,
+        txFailed:     rTxFailedType = true,
+        promotions:   rPromoType = false,
+        lowBalance:   rLowBalanceType = true,
+        security:     rSecurityType = true,
+        system:       rSystemType = true,
+      } = {},
+    } = rSettings;
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // 8) Déterminer la “clé” type pour expéditeur et destinataire selon status
+    // ────────────────────────────────────────────────────────────────────────────────
+    // initiated / confirmed → txSent pour expéditeur, txReceived pour destinataire
+    // cancelled → txFailed pour les deux
+    let sTypeKey, rTypeKey;
+    if (status === 'initiated' || status === 'confirmed') {
+      sTypeKey = 'txSent';
+      rTypeKey = 'txReceived';
+    } else if (status === 'cancelled') {
+      sTypeKey = 'txFailed';
+      rTypeKey = 'txFailed';
+    } else {
+      sTypeKey = null;
+      rTypeKey = null;
     }
 
-    if (receiver.email) {
-      const htmlReceiver = {
-        initiated: initiatedReceiverTemplate,
-        confirmed: confirmedReceiverTemplate,
-        cancelled: cancelledReceiverTemplate,
-      }[status](
-        status === 'cancelled'
-          ? { ...dataReceiver, reason: tx.cancelReason }
-          : dataReceiver
-      );
-      await sendEmail({
-        to:      receiver.email,
-        subject: emailSubject,
-        html:    htmlReceiver,
-      });
-    }
-
-    // ─── (B) Envoi des push via le Backend Principal ──────────────────────────────
-    // Personnalisation du message push :
-    //   - Ligne 1 : libellé en français selon le statut ("Transaction en attente", "Transaction confirmée", ...)
-    //   - Ligne 2 : "Montant : X DEV"
+    // ────────────────────────────────────────────────────────────────────────────────
+    // 9) Construction des messages pour push et in-app
+    // ────────────────────────────────────────────────────────────────────────────────
     const statusTextMap = {
       initiated: 'Transaction en attente',
       confirmed: 'Transaction confirmée',
@@ -287,7 +305,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
     const messageForSender   = `${statusText}\nMontant : ${dataSender.amount} ${dataSender.currency}`;
     const messageForReceiver = `${statusText}\nMontant : ${dataReceiver.amount} ${dataReceiver.currency}`;
 
-    // Fonction utilitaire pour appeler l’endpoint interne
+    // Fonction utilitaire pour appeler l’endpoint interne du backend principal
     async function triggerPush(userId, message) {
       try {
         await axios.post(
@@ -300,17 +318,91 @@ async function notifyParties(tx, status, session, senderCurrency) {
       }
     }
 
-    // B.1) Notifier l’expéditeur si tokens présents
-    if (sender.pushTokens && sender.pushTokens.length) {
-      await triggerPush(sender._id.toString(), messageForSender);
+    // ────────────────────────────────────────────────────────────────────────────────
+    // 10) Notifications pour l’expéditeur (sender)
+    // ────────────────────────────────────────────────────────────────────────────────
+    if (sTypeKey) {
+      // 10.A : EMAIL si activé et type correspondant
+      if (sEmailChan && ((sTypeKey === 'txSent' && sTxSentType) || (sTypeKey === 'txFailed' && sTxFailedType))) {
+        if (sender.email) {
+          const htmlSender = {
+            initiated: initiatedSenderTemplate,
+            confirmed: confirmedSenderTemplate,
+            cancelled: cancelledSenderTemplate,
+          }[status](
+            status === 'cancelled' ? { ...dataSender, reason: tx.cancelReason } : dataSender
+          );
+          await sendEmail({
+            to:      sender.email,
+            subject: emailSubject,
+            html:    htmlSender,
+          });
+        }
+      }
+
+      // 10.B : PUSH si activé et type correspondant
+      if (sPushChan && ((sTypeKey === 'txSent' && sTxSentType) || (sTypeKey === 'txFailed' && sTxFailedType))) {
+        if (sender.pushTokens && sender.pushTokens.length) {
+          await triggerPush(sender._id.toString(), messageForSender);
+        }
+      }
+
+      // 10.C : IN-APP si activé et type correspondant
+      if (sInAppChan && ((sTypeKey === 'txSent' && sTxSentType) || (sTypeKey === 'txFailed' && sTxFailedType))) {
+        await Notification.create([{
+          recipient: sender._id.toString(),
+          type:      `transaction_${status}`,
+          data:      dataSender,
+          read:      false,
+          date:      new Date(),
+        }], { session });
+      }
     }
 
-    // B.2) Notifier le destinataire si tokens présents
-    if (receiver.pushTokens && receiver.pushTokens.length) {
-      await triggerPush(receiver._id.toString(), messageForReceiver);
+    // ────────────────────────────────────────────────────────────────────────────────
+    // 11) Notifications pour le destinataire (receiver)
+    // ────────────────────────────────────────────────────────────────────────────────
+    if (rTypeKey) {
+      // 11.A : EMAIL si activé et type correspondant
+      if (rEmailChan && ((rTypeKey === 'txReceived' && rTxReceivedType) || (rTypeKey === 'txFailed' && rTxFailedType))) {
+        if (receiver.email) {
+          const htmlReceiver = {
+            initiated: initiatedReceiverTemplate,
+            confirmed: confirmedReceiverTemplate,
+            cancelled: cancelledReceiverTemplate,
+          }[status](
+            status === 'cancelled' ? { ...dataReceiver, reason: tx.cancelReason } : dataReceiver
+          );
+          await sendEmail({
+            to:      receiver.email,
+            subject: emailSubject,
+            html:    htmlReceiver,
+          });
+        }
+      }
+
+      // 11.B : PUSH si activé et type correspondant
+      if (rPushChan && ((rTypeKey === 'txReceived' && rTxReceivedType) || (rTypeKey === 'txFailed' && rTxFailedType))) {
+        if (receiver.pushTokens && receiver.pushTokens.length) {
+          await triggerPush(receiver._id.toString(), messageForReceiver);
+        }
+      }
+
+      // 11.C : IN-APP si activé et type correspondant
+      if (rInAppChan && ((rTypeKey === 'txReceived' && rTxReceivedType) || (rTypeKey === 'txFailed' && rTxFailedType))) {
+        await Notification.create([{
+          recipient: receiver._id.toString(),
+          type:      `transaction_${status}`,
+          data:      dataReceiver,
+          read:      false,
+          date:      new Date(),
+        }], { session });
+      }
     }
 
-    // ─── (C) Persister les événements Outbox pour trace/audit ────────────────────
+    // ────────────────────────────────────────────────────────────────────────────────
+    // 12) Persister les événements Outbox pour trace/audit (expéditeur + destinataire)
+    // ────────────────────────────────────────────────────────────────────────────────
     const events = [sender, receiver].map((u) => ({
       service: 'notifications',
       event:   `transaction_${status}`,
@@ -322,24 +414,11 @@ async function notifyParties(tx, status, session, senderCurrency) {
     }));
     await Outbox.insertMany(events, { session });
 
-    // ─── (D) Création des notifications in-app (collection Notification) ─────────
-    const inAppDocs = events.map((e) => ({
-      recipient: e.payload.userId,
-      type:      e.payload.type,
-      data:      e.payload.data,
-      read:      false,
-      date:      new Date(),
-    }));
-    await Notification.insertMany(inAppDocs, { session });
-
   } catch (err) {
     console.error('notifyParties : erreur lors de l’envoi des notifications', err);
     // Ne pas relancer l’erreur pour ne pas interrompre la transaction principale
   }
 }
-
-
-
 
 
 
