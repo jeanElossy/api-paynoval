@@ -184,9 +184,10 @@ const MAX_DESC_LENGTH = 500;
 /**
  * Fonction principale : envoie emails, push et notifications in-app
  */
+
 async function notifyParties(tx, status, session, senderCurrency) {
   try {
-    // ─── 1) Définir le sujet d'email selon le statut ────────────────────────────
+    // ─── 1) Définir le sujet d’email selon le statut ───────────────────────────
     const subjectMap = {
       initiated: 'Transaction en attente',
       confirmed: 'Transaction confirmée',
@@ -199,10 +200,7 @@ async function notifyParties(tx, status, session, senderCurrency) {
       User.findById(tx.sender).select('email fullName pushTokens').lean(),
       User.findById(tx.receiver).select('email fullName pushTokens').lean(),
     ]);
-    if (!sender || !receiver) {
-      // Si l'un des deux manque, on sort sans rien faire
-      return;
-    }
+    if (!sender || !receiver) return;
 
     // ─── 3) Formatage de la date (locale française) ─────────────────────────────
     const dateStr = new Date().toLocaleString('fr-FR');
@@ -211,38 +209,37 @@ async function notifyParties(tx, status, session, senderCurrency) {
     const webLink    = `${PRINCIPAL_URL}/confirm/${tx._id}?token=${tx.verificationToken}`;
     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
 
-    // ─── 5) Préparer le payload pour l'expéditeur ────────────────────────────────
+    // ─── 5) Préparer le payload pour l’expéditeur ────────────────────────────────
     const dataSender = {
       transactionId:    tx._id.toString(),
-      amount:           tx.amount.toString(),                      // montant brut
-      currency:         senderCurrency,                            // devise expéditeur
-      name:             sender.fullName,                           // nom complet expéditeur
-      senderEmail:      sender.email,                              // email expéditeur
-      receiverEmail:    tx.recipientEmail || receiver.email,       // email destinataire
-      date:             dateStr,                                    // date de création
-      confirmLinkWeb:   webLink,                                    // lien web de confirmation
-      country:          tx.country,                                 // pays
-      securityQuestion: tx.securityQuestion,                        // question de sécurité
+      amount:           tx.amount.toString(),
+      currency:         senderCurrency,
+      name:             sender.fullName,
+      senderEmail:      sender.email,
+      receiverEmail:    tx.recipientEmail || receiver.email,
+      date:             dateStr,
+      confirmLinkWeb:   webLink,
+      country:          tx.country,
+      securityQuestion: tx.securityQuestion,
     };
 
     // ─── 6) Préparer le payload pour le destinataire ────────────────────────────
     const dataReceiver = {
       transactionId:     tx._id.toString(),
-      amount:            tx.localAmount.toString(),                // montant converti local
-      currency:          tx.localCurrencySymbol,                   // devise locale
-      name:              tx.nameDestinataire,                      // nom destinataire
-      receiverEmail:     tx.recipientEmail,                        // email destinataire
-      senderEmail:       sender.email,                             // email expéditeur
+      amount:            tx.localAmount.toString(),
+      currency:          tx.localCurrencySymbol,
+      name:              tx.nameDestinataire,
+      receiverEmail:     tx.recipientEmail,
+      senderEmail:       sender.email,
       date:              dateStr,
-      confirmLink:       mobileLink,                                // lien mobile de confirmation
+      confirmLink:       mobileLink,
       country:           tx.country,
       securityQuestion:  tx.securityQuestion,
-      senderName:        sender.fullName,                           // nom expéditeur
+      senderName:        sender.fullName,
     };
 
     // ─── (A) Envoi des e-mails ───────────────────────────────────────────────────
     if (sender.email) {
-      // Choisir le template approprié selon le statut, en passant dataSender
       const htmlSender = {
         initiated: initiatedSenderTemplate,
         confirmed: confirmedSenderTemplate,
@@ -260,7 +257,6 @@ async function notifyParties(tx, status, session, senderCurrency) {
     }
 
     if (receiver.email) {
-      // Choisir le template approprié selon le statut, en passant dataReceiver
       const htmlReceiver = {
         initiated: initiatedReceiverTemplate,
         confirmed: confirmedReceiverTemplate,
@@ -278,11 +274,20 @@ async function notifyParties(tx, status, session, senderCurrency) {
     }
 
     // ─── (B) Envoi des push via le Backend Principal ──────────────────────────────
-    // Messages succincts pour la notification push
-    const messageForSender   = `Transaction #${tx._id} : ${tx.amount} ${senderCurrency} (${status})`;
-    const messageForReceiver = `Transaction #${tx._id} : ${tx.localAmount} ${tx.localCurrencySymbol} (${status})`;
+    // Personnalisation du message push :
+    //   - Ligne 1 : libellé en français selon le statut ("Transaction en attente", "Transaction confirmée", ...)
+    //   - Ligne 2 : "Montant : X DEV"
+    const statusTextMap = {
+      initiated: 'Transaction en attente',
+      confirmed: 'Transaction confirmée',
+      cancelled: 'Transaction annulée',
+    };
+    const statusText = statusTextMap[status] || `Transaction ${status}`;
 
-    // Fonction interne pour déclencher le push via l’endpoint interne du principal
+    const messageForSender   = `${statusText}\nMontant : ${dataSender.amount} ${dataSender.currency}`;
+    const messageForReceiver = `${statusText}\nMontant : ${dataReceiver.amount} ${dataReceiver.currency}`;
+
+    // Fonction utilitaire pour appeler l’endpoint interne
     async function triggerPush(userId, message) {
       try {
         await axios.post(
@@ -291,16 +296,16 @@ async function notifyParties(tx, status, session, senderCurrency) {
           { headers: { 'Content-Type': 'application/json' } }
         );
       } catch (err) {
-        console.warn(`Échec push pour user ${userId}: ${err.message}`);
+        console.warn(`Échec push pour user ${userId} : ${err.message}`);
       }
     }
 
-    // B.1) Notifier l'expéditeur
+    // B.1) Notifier l’expéditeur si tokens présents
     if (sender.pushTokens && sender.pushTokens.length) {
       await triggerPush(sender._id.toString(), messageForSender);
     }
 
-    // B.2) Notifier le destinataire
+    // B.2) Notifier le destinataire si tokens présents
     if (receiver.pushTokens && receiver.pushTokens.length) {
       await triggerPush(receiver._id.toString(), messageForReceiver);
     }
@@ -315,7 +320,6 @@ async function notifyParties(tx, status, session, senderCurrency) {
         data:   u._id.toString() === sender._id.toString() ? dataSender : dataReceiver,
       },
     }));
-    // Insertion en une seule opération, dans la session fournie
     await Outbox.insertMany(events, { session });
 
     // ─── (D) Création des notifications in-app (collection Notification) ─────────
@@ -324,25 +328,15 @@ async function notifyParties(tx, status, session, senderCurrency) {
       type:      e.payload.type,
       data:      e.payload.data,
       read:      false,
-      date:      new Date(), // date de création de la notification in-app
+      date:      new Date(),
     }));
-    // Insertion en une seule opération, dans la même session Mongo
     await Notification.insertMany(inAppDocs, { session });
 
   } catch (err) {
     console.error('notifyParties : erreur lors de l’envoi des notifications', err);
-    // On nève pas l’erreur pour ne pas interrompre la logique transactionnelle principale
+    // Ne pas relancer l’erreur pour ne pas interrompre la transaction principale
   }
 }
-
-
-
-
-
-
-
-
-
 
 
 
