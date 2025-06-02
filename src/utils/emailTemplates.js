@@ -197,7 +197,6 @@ function cancelledSenderTemplate(data) {
   });
 }
 
-
 /**
  * Template pour transaction annulée (destinataire)
  */
