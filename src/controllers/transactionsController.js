@@ -22,6 +22,10 @@ const {
 } = require('../utils/emailTemplates');
 const { convertAmount } = require('../tools/currency');
 
+
+// ** Import de la nouvelle fonction de génération de référence **
+const generateTransactionRef = require('../utils/generateRef');
+
 const PRINCIPAL_URL = config.principalUrl; // URL du backend principal (pour l’envoi de push)
 
 // ─── CONST & HELPERS ─────────────────────────────────────────────────────────
@@ -557,13 +561,19 @@ exports.initiateInternal = async (req, res, next) => {
       ? sanitize(recipientInfo.name)
       : receiver.fullName;
 
+    // ── ) Génération de la référence unique pour la transaction ──────────────
+    const reference = await generateTransactionRef();
+
     // ─── 12) Création du document Transaction en statut 'pending' ────────────────
     const [tx] = await TransactionModel().create(
       [
         {
+          // Référence de la transaction
+          reference,    
+
           // Références aux utilisateurs
           sender:               senderUser._id,     // ObjectId de l’expéditeur
-          receiver:             receiver._id,       // ObjectId du destinataire
+          receiver:             receiver._id,       // ObjectId du destinataire          
 
           // Montants & frais
           amount:               decAmt,             // Montant brut (Decimal128)
@@ -606,6 +616,7 @@ exports.initiateInternal = async (req, res, next) => {
     return res.status(201).json({
       success: true,
       transactionId: tx._id.toString(),
+      reference: tx.reference,
       adminFeeInCAD
     });
   } catch (err) {

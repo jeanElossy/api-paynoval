@@ -17,6 +17,15 @@ module.exports = conn => {
       ref: 'User',
       required: true
     },
+
+    // Champ ajouté : référence unique préfixée "PNV-"
+    reference: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true
+    },
+
     amount: {
       // Montant brut saisi par l’expéditeur
       type: Schema.Types.Decimal128,
@@ -173,6 +182,7 @@ module.exports = conn => {
   transactionSchema.set('toJSON', {
     transform(doc, ret) {
       ret.id              = ret._id;
+      ret.reference       = ret.reference; // expose la référence telle qu’elle a été créée
       ret.amount          = parseFloat(ret.amount.toString());
       ret.transactionFees = parseFloat(ret.transactionFees.toString());
       ret.netAmount       = parseFloat(ret.netAmount.toString());
