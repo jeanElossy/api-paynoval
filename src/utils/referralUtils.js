@@ -32,12 +32,14 @@ const AFRICA_COUNTRIES = [
 const PRINCIPAL_URL = config.principalUrl;
 
 /**
- * Retourne le modèle Transaction associé à la base “api_transactions_paynoval”.
- * On récupère la connexion via getTxConn(), comme dans vos contrôleurs.
+ * Supprime tout préfixe non-lettre (emoji, espaces) et décode l’entité HTML &#x27; en apostrophe.
  */
-function TransactionModel() {
-  const { getTxConn } = require('../config/db');
-  return getTxConn().model('Transaction');
+function cleanCountry(raw) {
+  if (typeof raw !== 'string') return '';
+  // 1) remplacer l’entité HTML &#x27; par une apostrophe ASCII
+  const step1 = raw.replace(/&#x27;/g, "'");
+  // 2) supprimer tout caractère non-lettre au début (emoji, espaces, etc.)
+  return step1.replace(/^[^\p{L}]*/u, "");
 }
 
 /**
@@ -51,6 +53,14 @@ function normalizeCountry(str) {
     .replace(/[\u0300-\u036f]/g, '');
   // Remplace apostrophe typographique par apostrophe ASCII
   return noAccents.replace(/’/g, "'").trim();
+}
+
+/**
+ * Retourne le modèle Transaction associé à la base “api_transactions_paynoval”.
+ */
+function TransactionModel() {
+  const { getTxConn } = require('../config/db');
+  return getTxConn().model('Transaction');
 }
 
 /**
@@ -171,12 +181,15 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
  * et, le cas échéant, génère son referralCode dans le backend principal.
  */
 async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
+  // Toujours obtenir un ObjectId valide à partir de senderId
+  const senderObjectId = mongoose.Types.ObjectId(senderId.toString());
+
   // 1) Compter les transactions “confirmed” pour le sender
   let txCount;
   try {
     txCount = await TransactionModel()
       .countDocuments({
-        sender: new mongoose.Types.ObjectId(senderId),
+        sender: senderObjectId,
         status: 'confirmed'
       })
       .session(sessionMongoose);
@@ -208,12 +221,15 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
  * éligible pour bonus, puis crédite la balance du filleul + du parrain.
  */
 async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
+  // Toujours obtenir un ObjectId valide à partir de receiverId
+  const receiverObjectId = mongoose.Types.ObjectId(receiverId.toString());
+
   // 1) Compter les transactions “confirmed” du receiver
   let confirmedCount;
   try {
     confirmedCount = await TransactionModel()
       .countDocuments({
-        receiver: new mongoose.Types.ObjectId(receiverId),
+        receiver: receiverObjectId,
         status: 'confirmed'
       })
       .session(sessionMongoose);
@@ -245,8 +261,11 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   }
 
   // 4) Déterminer seuil & bonus selon pays du filleul et du parrain
-  const paysReceiverNorm = normalizeCountry(receiverMain.country);
-  const paysParrainNorm  = normalizeCountry(parrainMain.country);
+  const paysReceiverClean = cleanCountry(receiverMain.country);
+  const paysParrainClean  = cleanCountry(parrainMain.country);
+
+  const paysReceiverNorm = normalizeCountry(paysReceiverClean);
+  const paysParrainNorm  = normalizeCountry(paysParrainClean);
 
   let montantRequis    = 0;
   let bonusReceiver    = 0;
