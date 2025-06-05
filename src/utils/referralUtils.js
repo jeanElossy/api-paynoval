@@ -29,6 +29,7 @@ const AFRICA_COUNTRIES = [
 ];
 
 // URL de base du backend principal (défini dans .env)
+// NE PAS inclure "/api/v1" ici, on construira les routes plus bas sans duplication.
 const PRINCIPAL_URL = config.principalUrl;
 
 /**
@@ -65,13 +66,18 @@ function TransactionModel() {
 
 /**
  * Récupère un utilisateur depuis le backend principal (service “users”).
- * Rethrow si erreur autre que 404.
+ * @param {String} userId - ID Mongo de l’utilisateur à récupérer
+ * @param {String} authToken - chaîne "Bearer <JWT>" à envoyer en header
+ * @returns {Object|null} l’objet user ou null si 404, renvoie l’erreur sinon
  */
-async function fetchUserFromMain(userId) {
+async function fetchUserFromMain(userId, authToken) {
   const url = `${PRINCIPAL_URL}/users/${userId}`;
-  
   try {
-    const response = await axios.get(url);
+    const response = await axios.get(url, {
+      headers: {
+        Authorization: authToken
+      }
+    });
     return response.data.data || null;
   } catch (err) {
     if (err.response) {
@@ -93,12 +99,18 @@ async function fetchUserFromMain(userId) {
 
 /**
  * Met à jour un user (PATCH) dans le backend principal.
- * Rethrow en cas d’erreur.
+ * @param {String} userId - ID Mongo de l’utilisateur à patcher
+ * @param {Object} updates - champ(s) à mettre à jour
+ * @param {String} authToken - chaîne "Bearer <JWT>" à envoyer en header
  */
-async function patchUserInMain(userId, updates) {
+async function patchUserInMain(userId, updates, authToken) {
   const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
   try {
-    await axios.patch(url, updates);
+    await axios.patch(url, updates, {
+      headers: {
+        Authorization: authToken
+      }
+    });
   } catch (err) {
     if (err.response) {
       logger.error(
@@ -115,12 +127,24 @@ async function patchUserInMain(userId, updates) {
 
 /**
  * Crédite la balance d’un user dans le backend principal.
- * Rethrow en cas d’erreur.
+ * @param {String} userId - ID Mongo de l’utilisateur à créditer
+ * @param {Number} amount - montant à créditer
+ * @param {String} currency - devise (ex: "EUR", "XOF"…)
+ * @param {String} description - description de l’opération
+ * @param {String} authToken - chaîne "Bearer <JWT>" à envoyer en header
  */
-async function creditBalanceInMain(userId, amount, currency, description) {
+async function creditBalanceInMain(userId, amount, currency, description, authToken) {
   const url = `${PRINCIPAL_URL}/api/v1/balances/${userId}/credit`;
   try {
-    await axios.post(url, { amount, currency, description });
+    await axios.post(
+      url,
+      { amount, currency, description },
+      {
+        headers: {
+          Authorization: authToken
+        }
+      }
+    );
   } catch (err) {
     if (err.response) {
       logger.error(
@@ -138,9 +162,11 @@ async function creditBalanceInMain(userId, amount, currency, description) {
 
 /**
  * Tente de générer un referralCode unique en bouclant tant qu’il y a un conflit.
- * Il génère “BASE_NANOID” puis essaie le PATCH ; si on reçoit un 409, on retente.
+ * @param {Object} userMain - objet user principal retourné par fetchUserFromMain
+ * @param {String} senderId - ID Mongo du sender
+ * @param {String} authToken - "Bearer <JWT>" pour patchUserInMain
  */
-async function generateAndAssignReferralInMain(userMain, senderId) {
+async function generateAndAssignReferralInMain(userMain, senderId, authToken) {
   const baseName = userMain.fullName.replace(/\s+/g, '').toUpperCase();
   let attempts = 0;
   let newCode;
@@ -151,10 +177,14 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
     newCode = `${baseName}_${suffix}`;
 
     try {
-      await patchUserInMain(senderId, {
-        referralCode:        newCode,
-        hasGeneratedReferral: true
-      });
+      await patchUserInMain(
+        senderId,
+        {
+          referralCode:        newCode,
+          hasGeneratedReferral: true
+        },
+        authToken
+      );
       // Patch réussi → sortir de la boucle
       logger.info(`generateAndAssignReferralInMain: code "${newCode}" assigné pour ${senderId}`);
       return;
@@ -180,8 +210,11 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
 /**
  * Vérifie si le sender a atteint 2 transactions “confirmed” internes,
  * et, le cas échéant, génère son referralCode dans le backend principal.
+ * @param {String} senderId - ID Mongo du sender
+ * @param {mongoose.ClientSession} sessionMongoose - session Mongoose en cours
+ * @param {String} authToken - "Bearer <JWT>" de la requête d’origine
  */
-async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
+async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose, authToken) {
   // Toujours obtenir un ObjectId valide à partir de senderId
   const senderObjectId = new mongoose.Types.ObjectId(senderId.toString());
 
@@ -203,8 +236,8 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
     return;
   }
 
-  // 2) Charger l’utilisateur principal
-  const userMain = await fetchUserFromMain(senderId);
+  // 2) Charger l’utilisateur principal en passant le token
+  const userMain = await fetchUserFromMain(senderId, authToken);
   if (!userMain) {
     logger.warn(`checkAndGenerateReferralCodeInMain: utilisateur principal ${senderId} introuvable`);
     return;
@@ -214,14 +247,18 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
   }
 
   // 3) Générer et assigner un code unique (avec retry en cas de conflit)
-  await generateAndAssignReferralInMain(userMain, senderId);
+  await generateAndAssignReferralInMain(userMain, senderId, authToken);
 }
 
 /**
  * Vérifie si la 1ʳᵉ transaction “confirmed” du receiver est
  * éligible pour bonus, puis crédite la balance du filleul + du parrain.
+ * @param {String} receiverId - ID Mongo du receveur
+ * @param {Object} tx - document transaction (avec tx.amount, etc.)
+ * @param {mongoose.ClientSession} sessionMongoose
+ * @param {String} authToken - "Bearer <JWT>" de la requête d’origine
  */
-async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
+async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose, authToken) {
   // Toujours obtenir un ObjectId valide à partir de receiverId
   const receiverObjectId = new mongoose.Types.ObjectId(receiverId.toString());
 
@@ -243,8 +280,8 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
     return;
   }
 
-  // 2) Charger le receveur dans le backend principal
-  const receiverMain = await fetchUserFromMain(receiverId);
+  // 2) Charger le receveur dans le backend principal (avec token)
+  const receiverMain = await fetchUserFromMain(receiverId, authToken);
   if (!receiverMain) {
     logger.warn(`processReferralBonusIfEligible: receveur ${receiverId} introuvable`);
     return;
@@ -255,7 +292,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
 
   // 3) Charger le parrain
   const parrainId   = receiverMain.referredBy;
-  const parrainMain = await fetchUserFromMain(parrainId);
+  const parrainMain = await fetchUserFromMain(parrainId, authToken);
   if (!parrainMain) {
     logger.warn(`processReferralBonusIfEligible: parrain ${parrainId} introuvable pour filleul ${receiverId}`);
     return;
@@ -287,7 +324,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   }
   // Cas Afrique tous les deux
   else if (
-    AFRICA_COUNTRIES.includes(payesReceiverNorm) &&
+    AFRICA_COUNTRIES.includes(paysReceiverNorm) &&
     AFRICA_COUNTRIES.includes(paysParrainNorm)
   ) {
     montantRequis    = 20000;
@@ -333,13 +370,14 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
     return;
   }
 
-  // 6) Créditer la balance du filleul
+  // 6) Créditer la balance du filleul (avec token)
   try {
     await creditBalanceInMain(
       receiverId,
       bonusReceiver,
       currencyReceiver,
-      'Bonus de parrainage reçu'
+      'Bonus de parrainage reçu',
+      authToken
     );
     logger.info(`processReferralBonusIfEligible: ${bonusReceiver} ${currencyReceiver} crédité à ${receiverId}`);
   } catch (err) {
@@ -347,13 +385,14 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
     throw err;
   }
 
-  // 7) Créditer la balance du parrain
+  // 7) Créditer la balance du parrain (avec token)
   try {
     await creditBalanceInMain(
       parrainId,
       bonusParrain,
       currencyParrain,
-      `Bonus de parrainage pour avoir parrainé ${receiverMain.fullName}`
+      `Bonus de parrainage pour avoir parrainé ${receiverMain.fullName}`,
+      authToken
     );
     logger.info(`processReferralBonusIfEligible: ${bonusParrain} ${currencyParrain} crédité à ${parrainId}`);
   } catch (err) {
