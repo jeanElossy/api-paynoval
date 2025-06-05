@@ -8,6 +8,7 @@ require('dotenv-safe').config({
 
 // Nouvelle variable pour URL du backend principal
 const PRINCIPAL_URL = process.env.PRINCIPAL_URL?.trim() || '';
+const PRINCIPAL_URL_OF_TRANSACTIONS = process.env.PRINCIPAL_URL_OF_TRANSACTIONS?.trim() || '';
 
 // Préparer l'URL de base pour l'API de change
 const rawExchangeUrl = process.env.EXCHANGE_API_URL?.trim();
@@ -26,6 +27,7 @@ module.exports = {
 
   // URL du backend principal
   principalUrl: PRINCIPAL_URL,
+  principalUrlOfTransactions: PRINCIPAL_URL_OF_TRANSACTIONS,
 
   // ─── MongoDB ────────────────────────────────────────────────────────────────
   mongo: {
