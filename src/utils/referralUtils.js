@@ -55,52 +55,72 @@ function normalizeCountry(str) {
 
 /**
  * Récupère un utilisateur depuis le backend principal (service “users”).
- * Renvoie `null` si non trouvé ou en cas d’erreur 404.
+ * Rethrow si erreur autre que 404.
  */
 async function fetchUserFromMain(userId) {
+  const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
   try {
-    const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
     const response = await axios.get(url);
     return response.data.data || null;
   } catch (err) {
-    if (err.response && err.response.status === 404) {
-      return null;
+    if (err.response) {
+      if (err.response.status === 404) {
+        logger.warn(`fetchUserFromMain: utilisateur ${userId} introuvable (404)`);
+        return null;
+      }
+      logger.error(
+        `fetchUserFromMain: requête GET ${url} a échoué ` +
+        `(status ${err.response.status}):`,
+        err.response.data || err.message
+      );
+    } else {
+      logger.error(`fetchUserFromMain: erreur réseau GET ${url} :`, err.message);
     }
-    logger.error(`Erreur fetchUserFromMain(${userId}) :`, err.response?.data || err.message);
     throw err;
   }
 }
 
 /**
  * Met à jour un user (PATCH) dans le backend principal.
- * Lance une exception si le patch échoue.
+ * Rethrow en cas d’erreur.
  */
 async function patchUserInMain(userId, updates) {
+  const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
   try {
-    const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
     await axios.patch(url, updates);
   } catch (err) {
-    logger.error(
-      `Erreur patchUserInMain(${userId}) avec updates=${JSON.stringify(updates)} :`,
-      err.response?.data || err.message
-    );
+    if (err.response) {
+      logger.error(
+        `patchUserInMain: requête PATCH ${url} avec ${JSON.stringify(updates)} ` +
+        `a échoué (status ${err.response.status}):`,
+        err.response.data || err.message
+      );
+    } else {
+      logger.error(`patchUserInMain: erreur réseau PATCH ${url} :`, err.message);
+    }
     throw err;
   }
 }
 
 /**
  * Crédite la balance d’un user dans le backend principal.
- * Lance une exception si le crédit échoue.
+ * Rethrow en cas d’erreur.
  */
 async function creditBalanceInMain(userId, amount, currency, description) {
+  const url = `${PRINCIPAL_URL}/api/v1/balances/${userId}/credit`;
   try {
-    const url = `${PRINCIPAL_URL}/api/v1/balances/${userId}/credit`;
     await axios.post(url, { amount, currency, description });
   } catch (err) {
-    logger.error(
-      `Erreur creditBalanceInMain(${userId}, ${amount}, ${currency}) :`,
-      err.response?.data || err.message
-    );
+    if (err.response) {
+      logger.error(
+        `creditBalanceInMain: requête POST ${url} ` +
+        `(amount=${amount}, currency=${currency}) a échoué ` +
+        `(status ${err.response.status}):`,
+        err.response.data || err.message
+      );
+    } else {
+      logger.error(`creditBalanceInMain: erreur réseau POST ${url} :`, err.message);
+    }
     throw err;
   }
 }
@@ -124,15 +144,19 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
         referralCode:        newCode,
         hasGeneratedReferral: true
       });
-      // Patch réussi → on sort
+      // Patch réussi → sortir de la boucle
+      logger.info(`generateAndAssignReferralInMain: code "${newCode}" assigné pour ${senderId}`);
       return;
     } catch (err) {
-      // Si c'est un conflit unique (409), on retente
+      // Si 409, nouvelle tentative
       if (err.response && err.response.status === 409) {
-        logger.warn(`Collision referralCode “${newCode}”, tentative ${attempts}/5 pour user ${senderId}`);
+        logger.warn(
+          `generateAndAssignReferralInMain: collision referralCode "${newCode}", ` +
+          `tentative ${attempts}/5 pour user ${senderId}`
+        );
         continue;
       }
-      // Autre erreur, on remonte
+      // Toute autre erreur, on remonte directement
       throw err;
     }
   }
@@ -157,7 +181,7 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
       })
       .session(sessionMongoose);
   } catch (err) {
-    logger.error(`Erreur countDocuments pour sender ${senderId} :`, err.message);
+    logger.error(`checkAndGenerateReferralCodeInMain: erreur countDocuments pour sender ${senderId}:`, err.message);
     throw err;
   }
 
@@ -165,17 +189,17 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
     return;
   }
 
-  // 2) Charger l’utilisateur dans le backend principal
+  // 2) Charger l’utilisateur principal
   const userMain = await fetchUserFromMain(senderId);
   if (!userMain) {
-    logger.warn(`Utilisateur principal ${senderId} introuvable lors de génération referralCode`);
+    logger.warn(`checkAndGenerateReferralCodeInMain: utilisateur principal ${senderId} introuvable`);
     return;
   }
   if (userMain.hasGeneratedReferral) {
     return;
   }
 
-  // 3) Générer et assigner un code unique (avec boucle de retry en cas de conflit)
+  // 3) Générer et assigner un code unique (avec retry en cas de conflit)
   await generateAndAssignReferralInMain(userMain, senderId);
 }
 
@@ -184,7 +208,7 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
  * éligible pour bonus, puis crédite la balance du filleul + du parrain.
  */
 async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
-  // 1) Compiler le nombre de transactions “confirmed” du receiver
+  // 1) Compter les transactions “confirmed” du receiver
   let confirmedCount;
   try {
     confirmedCount = await TransactionModel()
@@ -194,7 +218,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
       })
       .session(sessionMongoose);
   } catch (err) {
-    logger.error(`Erreur countDocuments pour receiver ${receiverId} :`, err.message);
+    logger.error(`processReferralBonusIfEligible: erreur countDocuments pour receiver ${receiverId}:`, err.message);
     throw err;
   }
 
@@ -205,7 +229,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   // 2) Charger le receveur dans le backend principal
   const receiverMain = await fetchUserFromMain(receiverId);
   if (!receiverMain) {
-    logger.warn(`Utilisateur receveur ${receiverId} introuvable lors du bonus`);
+    logger.warn(`processReferralBonusIfEligible: receveur ${receiverId} introuvable`);
     return;
   }
   if (!receiverMain.referredBy) {
@@ -216,7 +240,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   const parrainId   = receiverMain.referredBy;
   const parrainMain = await fetchUserFromMain(parrainId);
   if (!parrainMain) {
-    logger.warn(`Parrain ${parrainId} introuvable pour filleul ${receiverId}`);
+    logger.warn(`processReferralBonusIfEligible: parrain ${parrainId} introuvable pour filleul ${receiverId}`);
     return;
   }
 
@@ -224,11 +248,11 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   const paysReceiverNorm = normalizeCountry(receiverMain.country);
   const paysParrainNorm  = normalizeCountry(parrainMain.country);
 
-  let montantRequis = 0,
-      bonusReceiver = 0,
-      bonusParrain  = 0,
-      currencyReceiver = '',
-      currencyParrain  = '';
+  let montantRequis    = 0;
+  let bonusReceiver    = 0;
+  let bonusParrain     = 0;
+  let currencyReceiver = '';
+  let currencyParrain  = '';
 
   // Cas Europe/USA tous les deux
   if (
@@ -283,7 +307,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
     }
   }
 
-  // 5) Ne verser le bonus que si le montant de la transaction >= montantRequis
+  // 5) Vérifier que le montant de la transaction est suffisant
   const montantTx = parseFloat(tx.amount.toString());
   if (isNaN(montantTx) || montantTx < montantRequis) {
     return;
@@ -297,8 +321,9 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
       currencyReceiver,
       'Bonus de parrainage reçu'
     );
+    logger.info(`processReferralBonusIfEligible: ${bonusReceiver} ${currencyReceiver} crédité à ${receiverId}`);
   } catch (err) {
-    logger.error(`Échec crédit bonus filleul ${receiverId} :`, err.message);
+    logger.error(`processReferralBonusIfEligible: échec crédit bonus filleul ${receiverId}:`, err.message);
     throw err;
   }
 
@@ -310,8 +335,9 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
       currencyParrain,
       `Bonus de parrainage pour avoir parrainé ${receiverMain.fullName}`
     );
+    logger.info(`processReferralBonusIfEligible: ${bonusParrain} ${currencyParrain} crédité à ${parrainId}`);
   } catch (err) {
-    logger.error(`Échec crédit bonus parrain ${parrainId} :`, err.message);
+    logger.error(`processReferralBonusIfEligible: échec crédit bonus parrain ${parrainId}:`, err.message);
     throw err;
   }
 }
