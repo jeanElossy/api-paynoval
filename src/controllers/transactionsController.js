@@ -626,7 +626,15 @@ exports.confirmController = async (req, res, next) => {
       throw createError(400, 'transactionId et securityCode sont requis');
     }
 
-    // 2) Récupération de la transaction (montants, receiver, sender)
+    // 2) Récupération du token JWT depuis les en-têtes HTTP
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      // Aucun token n’a été fourni
+      throw createError(401, 'Token manquant');
+    }
+    const authToken = authHeader; // on transmettra "Bearer <token>" tel quel aux utilitaires
+
+    // 3) Récupération de la transaction (montants, receiver, sender)
     const tx = await TransactionModel()
       .findById(transactionId)
       .select([
@@ -643,12 +651,12 @@ exports.confirmController = async (req, res, next) => {
       throw createError(400, 'Transaction invalide ou déjà traitée');
     }
 
-    // 3) Vérifier que l’utilisateur connecté est destinataire
+    // 4) Vérifier que l’utilisateur connecté est bien le destinataire
     if (String(tx.receiver) !== String(req.user.id)) {
       throw createError(403, 'Vous n’êtes pas le destinataire de cette transaction');
     }
 
-    // 4) Vérification du code de sécurité
+    // 5) Vérification du code de sécurité
     const sanitizedCode = sanitize(securityCode);
     if (sanitizedCode !== tx.securityCode) {
       tx.status      = 'cancelled';
@@ -659,7 +667,7 @@ exports.confirmController = async (req, res, next) => {
       throw createError(401, 'Code de sécurité incorrect');
     }
 
-    // 5) Calcul du montant net en devise expéditeur puis conversion
+    // 6) Calcul du montant net en devise expéditeur puis conversion
     const amtFloat = parseFloat(tx.amount.toString());
     if (amtFloat <= 0) {
       throw createError(500, 'Montant brut invalide en base');
@@ -674,7 +682,7 @@ exports.confirmController = async (req, res, next) => {
     );
     const localNetRounded = parseFloat(localNet.toFixed(2));
 
-    // 6) Créditer le solde du destinataire (en devise locale)
+    // 7) Créditer le solde du destinataire (en devise locale)
     const credited = await Balance.findOneAndUpdate(
       { user: tx.receiver },
       { $inc: { amount: localNetRounded } },
@@ -684,21 +692,15 @@ exports.confirmController = async (req, res, next) => {
       throw createError(500, 'Erreur lors du crédit au destinataire');
     }
 
-    // 7) Mise à jour du statut en 'confirmed'
+    // 8) Mise à jour du statut en 'confirmed'
     tx.status      = 'confirmed';
     tx.confirmedAt = new Date();
     await tx.save({ session });
 
-    // 8) Récupérer le JWT envoyé par le client dans l’en‐tête Authorization
-    const authToken = req.headers.authorization;
-    if (!authToken) {
-      logger.warn('confirmController : Authorization header manquant, le service Users répondra 401.');
-    }
-
     // 9) Générer (éventuellement) le referralCode du sender (2ᵉ transaction)
     await checkAndGenerateReferralCodeInMain(tx.sender, session, authToken);
 
-    // 10) Traiter l’attribution du bonus de parrainage (1ʳᵉ transaction validée du filleul)
+    // 10) Traiter l’attribution du bonus de parrainage
     await processReferralBonusIfEligible(tx.receiver, tx, session, authToken);
 
     // 11) Notifications “confirmed”
