@@ -12,7 +12,7 @@ const nanoid = customAlphabet(
   6
 );
 
-// Listes des pays Europe/USA vs Afrique (non accentués, apostrophe ASCII)
+// Listes des pays Europe/USA vs Afrique (sans accents, apostrophe ASCII)
 const EUROPE_USA_COUNTRIES = [
   'Canada',
   'USA',
@@ -80,8 +80,10 @@ async function patchUserInMain(userId, updates) {
     const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
     await axios.patch(url, updates);
   } catch (err) {
-    logger.error(`Erreur patchUserInMain(${userId}) avec updates=${JSON.stringify(updates)} :`,
-      err.response?.data || err.message);
+    logger.error(
+      `Erreur patchUserInMain(${userId}) avec updates=${JSON.stringify(updates)} :`,
+      err.response?.data || err.message
+    );
     throw err;
   }
 }
@@ -95,15 +97,17 @@ async function creditBalanceInMain(userId, amount, currency, description) {
     const url = `${PRINCIPAL_URL}/api/v1/balances/${userId}/credit`;
     await axios.post(url, { amount, currency, description });
   } catch (err) {
-    logger.error(`Erreur creditBalanceInMain(${userId}, ${amount}, ${currency}) :`,
-      err.response?.data || err.message);
+    logger.error(
+      `Erreur creditBalanceInMain(${userId}, ${amount}, ${currency}) :`,
+      err.response?.data || err.message
+    );
     throw err;
   }
 }
 
 /**
  * Tente de générer un referralCode unique en bouclant tant qu’il y a un conflit.
- * Il génère “BASE_NANOID” et essaie de patcher ; si un duplicate key survient, il regénère.
+ * Il génère “BASE_NANOID” puis essaie le PATCH ; si on reçoit un 409, on retente.
  */
 async function generateAndAssignReferralInMain(userMain, senderId) {
   const baseName = userMain.fullName.replace(/\s+/g, '').toUpperCase();
@@ -117,13 +121,13 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
 
     try {
       await patchUserInMain(senderId, {
-        referralCode: newCode,
+        referralCode:        newCode,
         hasGeneratedReferral: true
       });
-      // Si le patch réussit, on sort de la boucle
+      // Patch réussi → on sort
       return;
     } catch (err) {
-      // Si c’est un conflit unique sur referralCode, on retente
+      // Si c'est un conflit unique (409), on retente
       if (err.response && err.response.status === 409) {
         logger.warn(`Collision referralCode “${newCode}”, tentative ${attempts}/5 pour user ${senderId}`);
         continue;
@@ -133,7 +137,6 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
     }
   }
 
-  // Après 5 tentatives, si toujours en duplication, on log et on échoue
   const message = `Impossible de générer un referralCode unique pour ${senderId} après ${attempts} essais`;
   logger.error(message);
   throw new Error(message);
@@ -144,12 +147,12 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
  * et, le cas échéant, génère son referralCode dans le backend principal.
  */
 async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
-  // 1) Compter les transactions “confirmed” émises par sender
+  // 1) Compter les transactions “confirmed” pour le sender
   let txCount;
   try {
     txCount = await TransactionModel()
       .countDocuments({
-        sender: mongoose.Types.ObjectId(senderId),
+        sender: new mongoose.Types.ObjectId(senderId),
         status: 'confirmed'
       })
       .session(sessionMongoose);
@@ -172,7 +175,7 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
     return;
   }
 
-  // 3) Générer et assigner un code unique (avec boucle de retry en cas de duplicate)
+  // 3) Générer et assigner un code unique (avec boucle de retry en cas de conflit)
   await generateAndAssignReferralInMain(userMain, senderId);
 }
 
@@ -181,12 +184,12 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
  * éligible pour bonus, puis crédite la balance du filleul + du parrain.
  */
 async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
-  // 1) Vérifier que c’est la PREMIÈRE transaction “confirmed” du receiver
+  // 1) Compiler le nombre de transactions “confirmed” du receiver
   let confirmedCount;
   try {
     confirmedCount = await TransactionModel()
       .countDocuments({
-        receiver: mongoose.Types.ObjectId(receiverId),
+        receiver: new mongoose.Types.ObjectId(receiverId),
         status: 'confirmed'
       })
       .session(sessionMongoose);
@@ -199,7 +202,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
     return;
   }
 
-  // 2) Charger receiver dans le backend principal
+  // 2) Charger le receveur dans le backend principal
   const receiverMain = await fetchUserFromMain(receiverId);
   if (!receiverMain) {
     logger.warn(`Utilisateur receveur ${receiverId} introuvable lors du bonus`);
@@ -210,7 +213,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   }
 
   // 3) Charger le parrain
-  const parrainId = receiverMain.referredBy;
+  const parrainId   = receiverMain.referredBy;
   const parrainMain = await fetchUserFromMain(parrainId);
   if (!parrainMain) {
     logger.warn(`Parrain ${parrainId} introuvable pour filleul ${receiverId}`);
@@ -219,48 +222,48 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
 
   // 4) Déterminer seuil & bonus selon pays du filleul et du parrain
   const paysReceiverNorm = normalizeCountry(receiverMain.country);
-  const paysParrainNorm = normalizeCountry(parrainMain.country);
+  const paysParrainNorm  = normalizeCountry(parrainMain.country);
 
   let montantRequis = 0,
       bonusReceiver = 0,
-      bonusParrain = 0,
+      bonusParrain  = 0,
       currencyReceiver = '',
-      currencyParrain = '';
+      currencyParrain  = '';
 
   // Cas Europe/USA tous les deux
   if (
     EUROPE_USA_COUNTRIES.includes(paysReceiverNorm) &&
     EUROPE_USA_COUNTRIES.includes(paysParrainNorm)
   ) {
-    montantRequis = 100;
-    bonusReceiver = 5;
-    bonusParrain = 5;
+    montantRequis    = 100;
+    bonusReceiver    = 5;
+    bonusParrain     = 5;
     currencyReceiver = ['France', 'Belgique', 'Allemagne'].includes(paysReceiverNorm) ? 'EUR' : 'USD';
-    currencyParrain = ['France', 'Belgique', 'Allemagne'].includes(paysParrainNorm) ? 'EUR' : 'USD';
+    currencyParrain  = ['France', 'Belgique', 'Allemagne'].includes(paysParrainNorm)  ? 'EUR' : 'USD';
   }
   // Cas Afrique tous les deux
   else if (
     AFRICA_COUNTRIES.includes(paysReceiverNorm) &&
     AFRICA_COUNTRIES.includes(paysParrainNorm)
   ) {
-    montantRequis = 20000;
-    bonusReceiver = 500;
-    bonusParrain = 500;
+    montantRequis    = 20000;
+    bonusReceiver    = 500;
+    bonusParrain     = 500;
     currencyReceiver = 'XOF';
-    currencyParrain = 'XOF';
+    currencyParrain  = 'XOF';
   }
   // Cas cross‐continent
   else {
     // Filleul en Europe/USA
     if (EUROPE_USA_COUNTRIES.includes(paysReceiverNorm)) {
-      montantRequis = 100;
-      bonusReceiver = 5;
+      montantRequis    = 100;
+      bonusReceiver    = 5;
       currencyReceiver = ['France', 'Belgique', 'Allemagne'].includes(paysReceiverNorm) ? 'EUR' : 'USD';
     }
     // Filleul en Afrique
     else if (AFRICA_COUNTRIES.includes(paysReceiverNorm)) {
-      montantRequis = 20000;
-      bonusReceiver = 500;
+      montantRequis    = 20000;
+      bonusReceiver    = 500;
       currencyReceiver = 'XOF';
     } else {
       return;
@@ -268,12 +271,12 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
 
     // Parrain en Europe/USA
     if (EUROPE_USA_COUNTRIES.includes(paysParrainNorm)) {
-      bonusParrain = 5;
+      bonusParrain    = 5;
       currencyParrain = ['France', 'Belgique', 'Allemagne'].includes(paysParrainNorm) ? 'EUR' : 'USD';
     }
     // Parrain en Afrique
     else if (AFRICA_COUNTRIES.includes(paysParrainNorm)) {
-      bonusParrain = 500;
+      bonusParrain    = 500;
       currencyParrain = 'XOF';
     } else {
       return;
