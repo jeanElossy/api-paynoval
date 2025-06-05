@@ -1,5 +1,3 @@
-// File: src/utils/referralUtils.js
-
 const mongoose           = require('mongoose');
 const axios              = require('axios');
 const { customAlphabet } = require('nanoid');
@@ -29,7 +27,7 @@ const AFRICA_COUNTRIES = [
 ];
 
 // URL de base du backend principal (défini dans .env)
-// NE PAS inclure "/api/v1" ici, on construira les routes plus bas sans duplication.
+// Ne pas inclure "/api/v1" ici, on le concatène dans les appels axios
 const PRINCIPAL_URL = config.principalUrl;
 
 /**
@@ -134,7 +132,9 @@ async function patchUserInMain(userId, updates, authToken) {
  * @param {String} authToken - chaîne "Bearer <JWT>" à envoyer en header
  */
 async function creditBalanceInMain(userId, amount, currency, description, authToken) {
-  const url = `${PRINCIPAL_URL}/balances/${userId}/credit`;
+  // AVANT : /balances/{userId}/credit —> NE FONCTIONNE PAS
+  // MAINTENANT : /users/{userId}/credit
+  const url = `${PRINCIPAL_URL}/users/${userId}/credit`;
   try {
     await axios.post(
       url,
