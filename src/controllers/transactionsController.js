@@ -315,6 +315,201 @@ exports.getTransactionController = async (req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────────────
 // INITIATE INTERNAL
 // ───────────────────────────────────────────────────────────────────────────────────
+// exports.initiateInternal = async (req, res, next) => {
+//   const session = await mongoose.startSession();
+//   try {
+//     session.startTransaction();
+
+//     // 1) Lecture du body
+//     const {
+//       toEmail,
+//       amount,
+//       senderCurrencySymbol,
+//       localCurrencySymbol,
+//       recipientInfo = {},
+//       description = '',
+//       question,
+//       securityCode,
+//       destination,
+//       funds,
+//       country
+//     } = req.body;
+
+//     if (!toEmail || !sanitize(toEmail)) {
+//       throw createError(400, 'Email du destinataire requis');
+//     }
+//     if (!question || !securityCode) {
+//       throw createError(400, 'Question et code de sécurité requis');
+//     }
+//     if (!destination || !funds || !country) {
+//       throw createError(400, 'Données de transaction incomplètes');
+//     }
+//     if (description && description.length > MAX_DESC_LENGTH) {
+//       throw createError(400, 'Description trop longue');
+//     }
+
+//     // 2) Récupération de l’utilisateur expéditeur
+//     const senderId   = req.user.id;
+//     const senderUser = await User.findById(senderId)
+//       .select('fullName email')
+//       .lean()
+//       .session(session);
+//     if (!senderUser) {
+//       throw createError(403, 'Utilisateur invalide');
+//     }
+
+//     // 3) Recherche du destinataire par email
+//     const receiver = await User.findOne({ email: sanitize(toEmail) })
+//       .select('_id fullName email')
+//       .lean()
+//       .session(session);
+//     if (!receiver) {
+//       throw createError(404, 'Destinataire introuvable');
+//     }
+//     if (receiver._id.toString() === senderId) {
+//       throw createError(400, 'Auto-transfert impossible');
+//     }
+
+//     // 4) Vérification du montant saisi
+//     const amt = parseFloat(amount);
+//     if (isNaN(amt) || amt <= 0) {
+//       throw createError(400, 'Montant invalide');
+//     }
+
+//     // 5) Calcul des frais (1 %) et montant net
+//     const fee       = parseFloat((amt * 0.01).toFixed(2));
+//     const netAmount = parseFloat((amt - fee).toFixed(2));
+
+//     // 6) Vérification du solde expéditeur et débit
+//     const balDoc      = await Balance.findOne({ user: senderId }).session(session);
+//     const balanceFloat = balDoc?.amount ?? 0;
+//     if (balanceFloat < amt) {
+//       throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+//     }
+//     const debited = await Balance.findOneAndUpdate(
+//       { user: senderId },
+//       { $inc: { amount: -amt } },
+//       { new: true, session }
+//     );
+//     if (!debited) {
+//       throw createError(500, 'Erreur lors du débit du compte expéditeur');
+//     }
+
+//     // const debited = await Balance.withdrawFromBalance(senderId, amt);
+//     //  if (!debited) {
+//     //   throw createError(500, 'Erreur lors du débit du compte expéditeur');
+//     // }
+
+//     // 7) Crédit immédiat des frais au compte admin (converti en CAD)
+//     let adminFeeInCAD = 0;
+//     if (fee > 0) {
+//       const { converted } = await convertAmount(
+//         senderCurrencySymbol,
+//         'CAD',
+//         fee
+//       );
+//       adminFeeInCAD = parseFloat(converted.toFixed(2));
+//     }
+//     const adminEmail = 'admin@paynoval.com';
+//     const adminUser  = await User.findOne({ email: adminEmail })
+//       .select('_id')
+//       .session(session);
+//     if (!adminUser) {
+//       throw createError(500, 'Compte administrateur introuvable');
+//     }
+//     if (adminFeeInCAD > 0) {
+//       await Balance.findOneAndUpdate(
+//         { user: adminUser._id },
+//         { $inc: { amount: adminFeeInCAD } },
+//         { new: true, upsert: true, session }
+//       );
+//     }
+
+//     // if (adminFeeInCAD > 0) {
+//     //   await Balance.addToBalance(adminUser._id, adminFeeInCAD);
+//     // }
+
+
+//     // 8) Conversion du montant principal en devise locale
+//     const { rate, converted } = await convertAmount(
+//       senderCurrencySymbol,
+//       localCurrencySymbol,
+//       amt
+//     );
+
+//     // 9) Formatage en Decimal128
+//     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+//     const decFees     = mongoose.Types.Decimal128.fromString(fee.toFixed(2));
+//     const decNet      = mongoose.Types.Decimal128.fromString(netAmount.toFixed(2));
+//     const decLocal    = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
+//     const decExchange = mongoose.Types.Decimal128.fromString(rate.toString());
+
+//     // 10) Détermine le nom du destinataire
+//     const nameDest = recipientInfo.name && sanitize(recipientInfo.name)
+//       ? sanitize(recipientInfo.name)
+//       : receiver.fullName;
+
+//     // 11) Génération de la référence unique
+//     const reference = await generateTransactionRef();
+
+//     // 12) Création du document Transaction en statut 'pending'
+//     const [tx] = await TransactionModel().create(
+//       [
+//         {
+//           reference,
+//           sender:               senderUser._id,
+//           receiver:             receiver._id,
+//           amount:               decAmt,
+//           transactionFees:      decFees,
+//           netAmount:            decNet,
+//           senderCurrencySymbol: sanitize(senderCurrencySymbol),
+//           exchangeRate:         decExchange,
+//           localAmount:          decLocal,
+//           localCurrencySymbol:  sanitize(localCurrencySymbol),
+//           senderName:           senderUser.fullName,
+//           senderEmail:          senderUser.email,
+//           nameDestinataire:     nameDest,
+//           recipientEmail:       sanitize(toEmail),
+//           country:              sanitize(country),
+//           description:          sanitize(description),
+//           securityQuestion:     sanitize(question),
+//           securityCode:         sanitize(securityCode),
+//           destination:          sanitize(destination),
+//           funds:                sanitize(funds),
+//           status:               'pending'
+//         }
+//       ],
+//       { session }
+//     );
+
+//     // 13) Générer (éventuellement) le referralCode du sender (2ᵉ transaction)
+//     await checkAndGenerateReferralCodeInMain(senderUser._id, session);
+
+//     // 14) Notifications “initiated”
+//     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+
+//     // 15) Commit
+//     await session.commitTransaction();
+//     session.endSession();
+
+//     // 16) Réponse
+//     return res.status(201).json({
+//       success: true,
+//       transactionId: tx._id.toString(),
+//       reference:     tx.reference,
+//       adminFeeInCAD
+//     });
+//   } catch (err) {
+//     await session.abortTransaction();
+//     session.endSession();
+//     return next(err);
+//   }
+// };
+
+
+/**
+ * Route POST /api/v1/transactions/initiate
+ */
 exports.initiateInternal = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -348,7 +543,14 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(400, 'Description trop longue');
     }
 
-    // 2) Récupération de l’utilisateur expéditeur
+    // 2) Récupération du token JWT depuis les headers
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw createError(401, 'Token manquant');
+    }
+    const authToken = authHeader;
+
+    // 3) Récupération de l’utilisateur expéditeur
     const senderId   = req.user.id;
     const senderUser = await User.findById(senderId)
       .select('fullName email')
@@ -358,7 +560,7 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(403, 'Utilisateur invalide');
     }
 
-    // 3) Recherche du destinataire par email
+    // 4) Recherche du destinataire par email
     const receiver = await User.findOne({ email: sanitize(toEmail) })
       .select('_id fullName email')
       .lean()
@@ -370,17 +572,17 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(400, 'Auto-transfert impossible');
     }
 
-    // 4) Vérification du montant saisi
+    // 5) Vérification du montant saisi
     const amt = parseFloat(amount);
     if (isNaN(amt) || amt <= 0) {
       throw createError(400, 'Montant invalide');
     }
 
-    // 5) Calcul des frais (1 %) et montant net
+    // 6) Calcul des frais (1 %) et montant net
     const fee       = parseFloat((amt * 0.01).toFixed(2));
     const netAmount = parseFloat((amt - fee).toFixed(2));
 
-    // 6) Vérification du solde expéditeur et débit
+    // 7) Vérification du solde expéditeur et débit
     const balDoc      = await Balance.findOne({ user: senderId }).session(session);
     const balanceFloat = balDoc?.amount ?? 0;
     if (balanceFloat < amt) {
@@ -395,12 +597,7 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(500, 'Erreur lors du débit du compte expéditeur');
     }
 
-    // const debited = await Balance.withdrawFromBalance(senderId, amt);
-    //  if (!debited) {
-    //   throw createError(500, 'Erreur lors du débit du compte expéditeur');
-    // }
-
-    // 7) Crédit immédiat des frais au compte admin (converti en CAD)
+    // 8) Crédit immédiat des frais au compte admin (converti en CAD)
     let adminFeeInCAD = 0;
     if (fee > 0) {
       const { converted } = await convertAmount(
@@ -425,34 +622,29 @@ exports.initiateInternal = async (req, res, next) => {
       );
     }
 
-    // if (adminFeeInCAD > 0) {
-    //   await Balance.addToBalance(adminUser._id, adminFeeInCAD);
-    // }
-
-
-    // 8) Conversion du montant principal en devise locale
+    // 9) Conversion du montant principal en devise locale
     const { rate, converted } = await convertAmount(
       senderCurrencySymbol,
       localCurrencySymbol,
       amt
     );
 
-    // 9) Formatage en Decimal128
+    // 10) Formatage en Decimal128
     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
     const decFees     = mongoose.Types.Decimal128.fromString(fee.toFixed(2));
     const decNet      = mongoose.Types.Decimal128.fromString(netAmount.toFixed(2));
     const decLocal    = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
     const decExchange = mongoose.Types.Decimal128.fromString(rate.toString());
 
-    // 10) Détermine le nom du destinataire
+    // 11) Détermine le nom du destinataire
     const nameDest = recipientInfo.name && sanitize(recipientInfo.name)
       ? sanitize(recipientInfo.name)
       : receiver.fullName;
 
-    // 11) Génération de la référence unique
+    // 12) Génération de la référence unique
     const reference = await generateTransactionRef();
 
-    // 12) Création du document Transaction en statut 'pending'
+    // 13) Création du document Transaction en statut 'pending'
     const [tx] = await TransactionModel().create(
       [
         {
@@ -482,17 +674,21 @@ exports.initiateInternal = async (req, res, next) => {
       { session }
     );
 
-    // 13) Générer (éventuellement) le referralCode du sender (2ᵉ transaction)
-    await checkAndGenerateReferralCodeInMain(senderUser._id, session);
+    // 14) Générer (éventuellement) le referralCode du sender (2ᵉ transaction)
+    await checkAndGenerateReferralCodeInMain(
+      senderUser._id,
+      session,
+      authToken
+    );
 
-    // 14) Notifications “initiated”
+    // 15) Notifications “initiated”
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
 
-    // 15) Commit
+    // 16) Commit
     await session.commitTransaction();
     session.endSession();
 
-    // 16) Réponse
+    // 17) Réponse
     return res.status(201).json({
       success: true,
       transactionId: tx._id.toString(),
@@ -505,6 +701,8 @@ exports.initiateInternal = async (req, res, next) => {
     return next(err);
   }
 };
+
+
 
 // ───────────────────────────────────────────────────────────────────────────────────
 // CONFIRM INTERNAL
