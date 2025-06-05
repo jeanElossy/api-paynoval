@@ -104,7 +104,7 @@ async function fetchUserFromMain(userId, authToken) {
  * @param {String} authToken - chaîne "Bearer <JWT>" à envoyer en header
  */
 async function patchUserInMain(userId, updates, authToken) {
-  const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
+  const url = `${PRINCIPAL_URL}/users/${userId}`;
   try {
     await axios.patch(url, updates, {
       headers: {
@@ -134,7 +134,7 @@ async function patchUserInMain(userId, updates, authToken) {
  * @param {String} authToken - chaîne "Bearer <JWT>" à envoyer en header
  */
 async function creditBalanceInMain(userId, amount, currency, description, authToken) {
-  const url = `${PRINCIPAL_URL}/api/v1/balances/${userId}/credit`;
+  const url = `${PRINCIPAL_URL}/balances/${userId}/credit`;
   try {
     await axios.post(
       url,
