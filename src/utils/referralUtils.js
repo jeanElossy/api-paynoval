@@ -182,7 +182,7 @@ async function generateAndAssignReferralInMain(userMain, senderId) {
  */
 async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
   // Toujours obtenir un ObjectId valide à partir de senderId
-  const senderObjectId = mongoose.Types.ObjectId(senderId.toString());
+  const senderObjectId = new mongoose.Types.ObjectId(senderId.toString());
 
   // 1) Compter les transactions “confirmed” pour le sender
   let txCount;
@@ -222,7 +222,7 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose) {
  */
 async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   // Toujours obtenir un ObjectId valide à partir de receiverId
-  const receiverObjectId = mongoose.Types.ObjectId(receiverId.toString());
+  const receiverObjectId = new mongoose.Types.ObjectId(receiverId.toString());
 
   // 1) Compter les transactions “confirmed” du receiver
   let confirmedCount;
@@ -286,7 +286,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
   }
   // Cas Afrique tous les deux
   else if (
-    AFRICA_COUNTRIES.includes(paysReceiverNorm) &&
+    AFRICA_COUNTRIES.includes(payesReceiverNorm) &&
     AFRICA_COUNTRIES.includes(paysParrainNorm)
   ) {
     montantRequis    = 20000;
@@ -295,7 +295,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose) {
     currencyReceiver = 'XOF';
     currencyParrain  = 'XOF';
   }
-  // Cas cross‐continent
+  // Cas cross-continent
   else {
     // Filleul en Europe/USA
     if (EUROPE_USA_COUNTRIES.includes(paysReceiverNorm)) {
