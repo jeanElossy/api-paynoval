@@ -68,7 +68,8 @@ function TransactionModel() {
  * Rethrow si erreur autre que 404.
  */
 async function fetchUserFromMain(userId) {
-  const url = `${PRINCIPAL_URL}/api/v1/users/${userId}`;
+  const url = `${PRINCIPAL_URL}/users/${userId}`;
+  
   try {
     const response = await axios.get(url);
     return response.data.data || null;

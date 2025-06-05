@@ -925,7 +925,7 @@ const {
   processReferralBonusIfEligible
 }                     = require('../utils/referralUtils');
 
-const PRINCIPAL_URL_OF_TRANSACTIONS = config.principalUrlOfTransactions; // URL du backend principal
+const PRINCIPAL_URL = config.principalUrl; // URL du backend principal
 
 // ─── CONST & HELPERS ────────────────────────────────────────────────────────────────
 const sanitize        = text => String(text || '').replace(/[<>\\/{};]/g, '').trim();
@@ -961,7 +961,7 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
     const dateStr = new Date().toLocaleString('fr-FR');
 
     // 4) Construire les liens de confirmation (web + mobile)
-    const webLink    = `${PRINCIPAL_URL_OF_TRANSACTIONS}/confirm/${tx._id}?token=${tx.verificationToken}`;
+    const webLink    = `${PRINCIPAL_URL}/confirm/${tx._id}?token=${tx.verificationToken}`;
     const mobileLink = `panoval://confirm/${tx._id}?token=${tx.verificationToken}`;
 
     // 5) Préparer le payload pour l’expéditeur
@@ -1039,7 +1039,7 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
     async function triggerPush(userId, message) {
       try {
         await axios.post(
-          `${PRINCIPAL_URL_OF_TRANSACTIONS}/internal/notify`,
+          `${PRINCIPAL_URL}/internal/notify`,
           { userId, message },
           { headers: { 'Content-Type': 'application/json' } }
         );
