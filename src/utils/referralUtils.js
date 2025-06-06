@@ -33,6 +33,25 @@ const AFRICA_COUNTRIES = [
 ];
 
 
+/**
+ * Envoi d'une notification via l'API principale (push + in-app)
+ */
+async function sendNotificationToMain(userId, title, message, data = {}, authToken) {
+  const url = `${PRINCIPAL_URL}/notifications`;
+  try {
+    await axios.post(
+      url,
+      { recipient: userId, title, message, data },
+      { headers: { Authorization: authToken } }
+    );
+    console.log(`Notification envoyée à ${userId}`);
+  } catch (err) {
+    logger.error(`sendNotificationToMain: erreur POST ${url}:`, err.message);
+  }
+}
+
+
+
 function cleanCountry(raw) {
   if (typeof raw !== 'string') return '';
   const step1 = raw.replace(/&#x27;/g, "'");
@@ -233,21 +252,22 @@ async function processReferralBonusIfEligible(userId, tx, sessionMongoose, authT
     throw err;
   }
 
-  // Après avoir crédité les bonus pour le parrain et le filleul
-  await createNotification({
-    user: parrainId,
-    title: 'Bonus parrain crédité',
-    message: `Vous avez reçu un bonus de ${bonusParrain}FCFA. Nouvelle balance: ${nouvelleBalanceParrain}FCFA`,
-    data: { type: 'bonus', amount: bonusParrain }
-  });
+  // Envoi notifications via HTTP
+  await sendNotificationToMain(
+    parrainId,
+    'Bonus parrain crédité',
+    `Vous avez reçu un bonus de ${bonusParrain}${currParrain}. Nouvelle balance: ${nouvelleBalanceParrain}${currParrain}`,
+    { type: 'bonus', amount: bonusParrain },
+    authToken
+  );
 
-  await createNotification({
-    user: filleulId,
-    title: 'Bonus filleul crédité',
-    message: `Vous avez reçu un bonus de ${bonusFilleul}FCFA. Nouvelle balance: ${nouvelleBalanceFilleul}FCFA`,
-    data: { type: 'bonus', amount: bonusFilleul }
-  });
-
+  await sendNotificationToMain(
+    userId,
+    'Bonus filleul crédité',
+    `Vous avez reçu un bonus de ${bonusFilleul}${currFilleul}. Nouvelle balance: ${nouvelleBalanceFilleul}${currFilleul}`,
+    { type: 'bonus', amount: bonusFilleul },
+    authToken
+  );
 
   // 6) (Optionnel) créditer également via l’API principale
   try {
@@ -272,6 +292,8 @@ async function processReferralBonusIfEligible(userId, tx, sessionMongoose, authT
     throw err;
   }
 }
+
+
 
 
 module.exports = { 
