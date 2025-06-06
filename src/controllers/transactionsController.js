@@ -898,8 +898,8 @@ exports.confirmController = async (req, res, next) => {
     // 9) Générer (éventuellement) le referralCode du sender (2ᵉ transaction)
     await checkAndGenerateReferralCodeInMain(tx.sender, session, authToken);
 
-    // 10) Traiter l’attribution du bonus de parrainage
-    await processReferralBonusIfEligible(tx.receiver, tx, session, authToken);
+    // 10) On traite maintenant le bonus sur le sender (filleul)
+    await processReferralBonusIfEligible(tx.sender,   tx, session, authToken);
 
     // 11) Notifications “confirmed”
     await notifyParties(tx, 'confirmed', session, tx.senderCurrencySymbol);

@@ -528,87 +528,120 @@ async function checkAndGenerateReferralCodeInMain(senderId, sessionMongoose, aut
   await generateAndAssignReferralInMain(userMain, senderId, authToken);
 }
 
-async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose, authToken) {
-  console.log(`--> Début processReferralBonusIfEligible pour receiverId=${receiverId}`);
+
+async function processReferralBonusIfEligible(userId, tx, sessionMongoose, authToken) {
+  console.log(`--> Début processReferralBonusIfEligible pour userId=${userId}`);
   console.log(`Transaction amount: ${tx.amount}`);
 
-  const receiverObjectId = new mongoose.Types.ObjectId(receiverId);
+  const userObjectId = new mongoose.Types.ObjectId(userId);
   let confirmedCount;
   try {
     confirmedCount = await TransactionModel()
-      .countDocuments({ receiver: receiverObjectId, status: 'confirmed' })
+      .countDocuments({ sender: userObjectId, status: 'confirmed' })
       .session(sessionMongoose);
-    console.log(`Transactions confirmées pour le receveur: ${confirmedCount}`);
-  } catch (err) { throw err; }
+    console.log(`Transactions confirmées pour le filleul: ${confirmedCount}`);
+  } catch (err) {
+    throw err;
+  }
+  // on ne déclenche qu’à la 1ʳᵉ transaction confirmée du filleul
   if (confirmedCount !== 1) return;
 
-  const receiverMain = await fetchUserFromMain(receiverId, authToken);
-  console.log(`receiverMain.referredBy: ${receiverMain ? receiverMain.referredBy : 'null'}`);
-  if (!receiverMain || !receiverMain.referredBy) return;
+  // récupère le filleul principal
+  const filleulMain = await fetchUserFromMain(userId, authToken);
+  if (!filleulMain || !filleulMain.referredBy) return;
+  const parrainId = filleulMain.referredBy;
 
-  const parrainId = receiverMain.referredBy;
+  // récupère le parrain principal
   const parrainMain = await fetchUserFromMain(parrainId, authToken);
-  console.log(`parrainMain: ${parrainMain ? parrainMain._id : 'null'}`);
   if (!parrainMain) return;
 
-  const paysReceiverNorm = normalizeCountry(cleanCountry(receiverMain.country));
-  const paysParrainNorm  = normalizeCountry(cleanCountry(parrainMain.country));
+  // normalise pays
+  const paysFilleul = normalizeCountry(cleanCountry(filleulMain.country));
+  const paysParrain = normalizeCountry(cleanCountry(parrainMain.country));
 
-  let montantRequis = 0, bonusReceiver = 0, bonusParrain = 0;
-  let currencyReceiver = '', currencyParrain = '';
-
-  // Cas Europe/USA tous les deux
-  if (EUROPE_USA_COUNTRIES.includes(paysReceiverNorm) && EUROPE_USA_COUNTRIES.includes(paysParrainNorm)) {
-    montantRequis = 100; bonusReceiver = 3; bonusParrain = 5;
-    currencyReceiver = EUROPE_USA_COUNTRIES.slice(2).includes(paysReceiverNorm) ? 'EUR' : 'USD';
-    currencyParrain  = EUROPE_USA_COUNTRIES.slice(2).includes(paysParrainNorm)  ? 'EUR' : 'USD';
-  }
-  // Cas Afrique tous les deux
-  else if (AFRICA_COUNTRIES.includes(paysReceiverNorm) && AFRICA_COUNTRIES.includes(paysParrainNorm)) {
-    montantRequis = 20000; bonusReceiver = 500; bonusParrain = 500;
-    currencyReceiver = 'XOF'; currencyParrain = 'XOF';
-  }
-  // Cas cross-continent
-  else {
-    // Filleul → Europe/USA
-    if (EUROPE_USA_COUNTRIES.includes(paysReceiverNorm)) {
-      montantRequis = 100; bonusReceiver = 3;
-      currencyReceiver = EUROPE_USA_COUNTRIES.slice(2).includes(paysReceiverNorm) ? 'EUR' : 'USD';
-    } else if (AFRICA_COUNTRIES.includes(paysReceiverNorm)) {
-      montantRequis = 20000; bonusReceiver = 500; currencyReceiver = 'XOF';
+  // calcule seuil et bonus
+  let montantRequis = 0, bonusFilleul = 0, bonusParrain = 0;
+  let currencyFilleul = '', currencyParrain = '';
+  if (
+    EUROPE_USA_COUNTRIES.includes(paysFilleul) &&
+    EUROPE_USA_COUNTRIES.includes(paysParrain)
+  ) {
+    montantRequis   = 100;
+    bonusFilleul    = 3;
+    bonusParrain    = 5;
+    currencyFilleul = EUROPE_USA_COUNTRIES.slice(2).includes(paysFilleul) ? 'EUR' : 'USD';
+    currencyParrain = EUROPE_USA_COUNTRIES.slice(2).includes(paysParrain) ? 'EUR' : 'USD';
+  } else if (
+    AFRICA_COUNTRIES.includes(paysFilleul) &&
+    AFRICA_COUNTRIES.includes(paysParrain)
+  ) {
+    montantRequis   = 20000;
+    bonusFilleul    = 500;
+    bonusParrain    = 500;
+    currencyFilleul = currencyParrain = 'XOF';
+  } else {
+    // cross-continent
+    if (EUROPE_USA_COUNTRIES.includes(paysFilleul)) {
+      montantRequis   = 100;
+      bonusFilleul    = 3;
+      currencyFilleul = EUROPE_USA_COUNTRIES.slice(2).includes(paysFilleul) ? 'EUR' : 'USD';
+    } else if (AFRICA_COUNTRIES.includes(paysFilleul)) {
+      montantRequis   = 20000;
+      bonusFilleul    = 500;
+      currencyFilleul = 'XOF';
     } else return;
 
-    // Parrain → Europe/USA ou Afrique
-    if (EUROPE_USA_COUNTRIES.includes(paysParrainNorm)) {
-      bonusParrain = 5;
-      currencyParrain = EUROPE_USA_COUNTRIES.slice(2).includes(paysParrainNorm) ? 'EUR' : 'USD';
-    } else if (AFRICA_COUNTRIES.includes(paysParrainNorm)) {
-      bonusParrain = 500; currencyParrain = 'XOF';
+    if (EUROPE_USA_COUNTRIES.includes(paysParrain)) {
+      bonusParrain    = 5;
+      currencyParrain = EUROPE_USA_COUNTRIES.slice(2).includes(paysParrain) ? 'EUR' : 'USD';
+    } else if (AFRICA_COUNTRIES.includes(paysParrain)) {
+      bonusParrain    = 500;
+      currencyParrain = 'XOF';
     } else return;
   }
 
-  console.log(`montantRequis=${montantRequis}, bonusReceiver=${bonusReceiver}, bonusParrain=${bonusParrain}`);
-  console.log(`currencyReceiver=${currencyReceiver}, currencyParrain=${currencyParrain}`);
+  console.log(
+    `seuil=${montantRequis}, bonusFilleul=${bonusFilleul}, bonusParrain=${bonusParrain}`
+  );
 
-  const montantTx = parseFloat(tx.amount.toString());
+  const montantTx = parseFloat(tx.amount);
   if (isNaN(montantTx) || montantTx < montantRequis) {
     console.log(`Transaction insuffisante (${montantTx} < ${montantRequis})`);
     return;
   }
 
-  // Crédit filleul
-  console.log(`Crédit de ${bonusReceiver} ${currencyReceiver} au filleul ${receiverId}`);
+  // crédit filleul
+  console.log(`Crédit de ${bonusFilleul} ${currencyFilleul} au filleul ${userId}`);
   try {
-    await creditBalanceInMain(receiverId, bonusReceiver, currencyReceiver, 'Bonus de parrainage reçu', authToken);
-    console.log(`✅ Bonus filleul crédité avec succès`);
-  } catch (err) { console.error(`❌ Échec crédit filleul:`, err.message); throw err; }
+    await creditBalanceInMain(
+      userId,
+      bonusFilleul,
+      currencyFilleul,
+      'Bonus de parrainage reçu',
+      authToken
+    );
+    console.log('✅ Bonus filleul crédité');
+  } catch (err) {
+    console.error('❌ Échec crédit filleul:', err.message);
+    throw err;
+  }
 
-  // Crédit parrain
+  // crédit parrain
   console.log(`Crédit de ${bonusParrain} ${currencyParrain} au parrain ${parrainId}`);
   try {
-    await creditBalanceInMain(parrainId, bonusParrain, currencyParrain, `Bonus pour avoir parrainé ${receiverMain.fullName}`, authToken);
-    console.log(`✅ Bonus parrain crédité avec succès`);
-  } catch (err) { console.error(`❌ Échec crédit parrain:`, err.message); throw err; }
+    await creditBalanceInMain(
+      parrainId,
+      bonusParrain,
+      currencyParrain,
+      `Bonus pour avoir parrainé ${filleulMain.fullName}`,
+      authToken
+    );
+    console.log('✅ Bonus parrain crédité');
+  } catch (err) {
+    console.error('❌ Échec crédit parrain:', err.message);
+    throw err;
+  }
 }
+
 
 module.exports = { checkAndGenerateReferralCodeInMain, processReferralBonusIfEligible };
