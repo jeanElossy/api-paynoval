@@ -207,10 +207,10 @@ async function processReferralBonusIfEligible(userId, tx, sessionMongoose, authT
     return;
   }
 
-  // 5) Créditer la collection Balance de la base principale et récupérer la nouvelle balance
+  // 5) Créditer la collection Balance de la base principale
   try {
     const updatedFilleul = await Balance.findOneAndUpdate(
-      { userId: userId },
+      { user: userId },                // <— utilises 'user' ici
       { $inc: { amount: bonusFilleul } },
       { upsert: true, returnDocument: 'after', session: sessionMongoose }
     );
@@ -222,7 +222,7 @@ async function processReferralBonusIfEligible(userId, tx, sessionMongoose, authT
 
   try {
     const updatedParrain = await Balance.findOneAndUpdate(
-      { userId: parrainId },
+      { user: parrainId },             // <— et ici aussi
       { $inc: { amount: bonusParrain } },
       { upsert: true, returnDocument: 'after', session: sessionMongoose }
     );
