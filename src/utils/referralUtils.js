@@ -6,8 +6,8 @@ const config             = require('../config');
 
 // Générateur nanoid à 6 caractères alphanumériques
 const nanoid = customAlphabet(
-  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
-  6
+  '0123456789',
+  3
 );
 
 // Listes des pays Europe/USA vs Afrique (sans accents, apostrophe ASCII)
@@ -338,7 +338,7 @@ async function processReferralBonusIfEligible(receiverId, tx, sessionMongoose, a
     // Filleul en Europe/USA
     if (EUROPE_USA_COUNTRIES.includes(paysReceiverNorm)) {
       montantRequis    = 100;
-      bonusReceiver    = 5;
+      bonusReceiver    = 3;
       currencyReceiver = ['France', 'Belgique', 'Allemagne'].includes(paysReceiverNorm) ? 'EUR' : 'USD';
     }
     // Filleul en Afrique
