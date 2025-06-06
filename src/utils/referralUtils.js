@@ -7,6 +7,7 @@ const logger             = require('../utils/logger');
 const config             = require('../config');
 const { getTxConn }      = require('../config/db');
 const Balance            = require('../models/Balance');
+const { createNotification } = require('../controllers/notificationController');
 
 // URL de base du backend principal (défini dans .env)
 const PRINCIPAL_URL = config.principalUrl;
@@ -231,6 +232,22 @@ async function processReferralBonusIfEligible(userId, tx, sessionMongoose, authT
     console.error('❌ Échec crédit parrain dans Balance :', err.message);
     throw err;
   }
+
+  // Après avoir crédité les bonus pour le parrain et le filleul
+  await createNotification({
+    user: parrainId,
+    title: 'Bonus parrain crédité',
+    message: `Vous avez reçu un bonus de ${bonusParrain}FCFA. Nouvelle balance: ${nouvelleBalanceParrain}FCFA`,
+    data: { type: 'bonus', amount: bonusParrain }
+  });
+
+  await createNotification({
+    user: filleulId,
+    title: 'Bonus filleul crédité',
+    message: `Vous avez reçu un bonus de ${bonusFilleul}FCFA. Nouvelle balance: ${nouvelleBalanceFilleul}FCFA`,
+    data: { type: 'bonus', amount: bonusFilleul }
+  });
+
 
   // 6) (Optionnel) créditer également via l’API principale
   try {
