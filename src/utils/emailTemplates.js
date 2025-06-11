@@ -76,7 +76,7 @@ function detailsTableHtml(rowsHtml) {
  */
 function initiatedSenderTemplate(data) {
   const rows = `
-    <tr><th>ID Transaction</th><td class="detail">${data.transactionId}</td></tr>
+    <tr><th>ID Transaction & reference</th><td class="detail">${data.transactionId} ${data.reference}</td></tr>
     <tr><th>Montant</th><td class="detail">${data.amount} ${data.currency}</td></tr>
     <tr><th>Expéditeur</th><td class="detail">${data.senderEmail}</td></tr>
     <tr><th>Destinataire</th><td class="detail">${data.receiverEmail}</td></tr>
@@ -136,8 +136,12 @@ function confirmedSenderTemplate(data) {
   `;
   const bodyHtml = `
     <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
-    <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">Votre transaction a été validée par le destinataire.</p>
+    <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">
+      Nous vous informons que votre transaction a été validée avec succès par <strong>${data.name}</strong>.
+    </p>
     ${detailsTableHtml(rows)}
+    <p>Merci d’avoir choisi PayNoval pour vos transferts sécurisés.</p>
+    
     <div class="notice">⚠️ Pour votre sécurité, ne communiquez jamais vos données sensibles. En cas de doute, vérifiez auprès de PayNoval.</div>
   `;
   return buildTableTemplate({
@@ -154,13 +158,17 @@ function confirmedSenderTemplate(data) {
  */
 function confirmedReceiverTemplate(data) {
   const rows = `
-    <tr><th>ID Transaction</th><td class="detail">${data.transactionId}</td></tr>
+    <tr><th>ID Transaction & reference</th><td class="detail">${data.transactionId} ${data.reference}</td></tr>
     <tr><th>Montant</th><td class="detail">${data.amount} ${data.currency}</td></tr>
     <tr><th>Date</th><td class="detail">${data.date}</td></tr>
   `;
   const bodyHtml = `
-    <p style="font-size:26px;margin-bottom:20px;">Bonjour <strong>${data.name}</strong>,</p>
-    <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">Vous avez validé la transaction avec succès.</p>
+    <p style="font-size:26px;margin-bottom:20px;">Cher(e) <strong>${data.name}</strong>,</p>
+    <p style="margin-bottom:25px; font-size:24px;line-height: 0.8;">
+      Nous avons le plaisir de vous informer que votre transaction a été validée avec succès. Votre confiance nous honore et nous inspire chaque jour.
+      Soyez assuré(e) que nous mettons tout en œuvre pour vous offrir un service à la hauteur de vos attentes.
+      N’hésitez pas à nous solliciter pour toute question ou information supplémentaire : nous restons à votre entière disposition.
+    </p>
     ${detailsTableHtml(rows)}
     <div class="notice">⚠️ Soyez vigilant : PayNoval n’enverra jamais de liens non sécurisés. Vérifiez toujours l’URL.</div>
   `;
