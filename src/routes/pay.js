@@ -8,7 +8,7 @@ const {
   creditUserByEmail,
   findBalanceByUserId
 } = require('../services/transactions');
-const { protect } = require('../middlewares/authMiddleware');
+const { protect } = require('../middleware/authMiddleware');
 
 router.post('/', protect, async (req, res) => {
   const { toEmail, amount } = req.body;
