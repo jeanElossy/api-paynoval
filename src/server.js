@@ -87,10 +87,12 @@ app.get('/', (_req, res) =>
     // 2) Une fois les DBs prêtes, on peut importer les routes qui utilisent les modèles
     const transactionRoutes  = require('./routes/transactionsRoutes');
     const notificationRoutes = require('./routes/notificationRoutes');
-
+    const payRoutes          = require('./routes/pay');
     // 3) Routes protégées
     app.use('/api/v1/transactions', protect, transactionRoutes);
     app.use('/api/v1/notifications', protect, notificationRoutes);
+    app.use('/api/v1/pay', protect, payRoutes);
+
 
     // 4) 404 handler
     app.use((req, res) =>
