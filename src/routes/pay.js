@@ -9,9 +9,16 @@ const {
   findBalanceByUserId
 } = require('../services/transactions');
 const { protect } = require('../middleware/authMiddleware');
+const Transaction = require('../models/Transaction'); // pour enregistrer l'audit
 
 router.post('/', protect, async (req, res) => {
-  const { toEmail, amount } = req.body;
+  const {
+    toEmail,
+    amount,
+    description, // facultatif
+    reference,   // référence/facture/commande facultative
+    metadata     // objet facultatif, infos libres du marchand
+  } = req.body;
   const user = req.user; // déjà auth via middleware
 
   // Vérif basique des champs
@@ -39,11 +46,48 @@ router.post('/', protect, async (req, res) => {
       return res.status(404).json({ success: false, error: "Destinataire introuvable" });
     }
 
-    // 3️⃣ Effectuer le débit et le crédit
-    await debitUser(user._id, amount);
-    await creditUserByEmail(toEmail, amount);
+    // 3️⃣ Effectuer le débit et le crédit avec contexte pour audit
+    await debitUser(user._id, amount, 'Paiement marchand', {
+      description,
+      reference,
+      metadata,
+      to: toEmail
+    });
 
-    // (optionnel) Historique, notifications...
+    await creditUserByEmail(toEmail, amount, 'Paiement marchand', {
+      description,
+      reference,
+      metadata,
+      from: user.email
+    });
+
+    // 4️⃣ Historiser dans la collection Transaction (optionnel, mais recommandé)
+    await Transaction.create({
+      sender: user._id,
+      receiver: destUser._id,
+      reference: reference || (Math.random().toString(36).substring(2, 12)), // fallback référence unique
+      amount,
+      transactionFees: 0,
+      netAmount: amount,
+      senderName: user.fullName || user.email,
+      senderEmail: user.email,
+      senderCurrencySymbol: 'F CFA', // ou adapte selon ton contexte devise
+      exchangeRate: 1,
+      localAmount: amount,
+      localCurrencySymbol: 'F CFA',
+      nameDestinataire: destUser.fullName || destUser.email,
+      recipientEmail: destUser.email,
+      country: user.selectedCountry || '',
+      securityQuestion: '',
+      securityCode: '', // Pas de code pour paiement direct
+      destination: 'PayNoval',
+      funds: 'Solde PayNoval',
+      status: 'confirmed',
+      description,
+      orderId: reference || null,
+      metadata: metadata || null,
+      confirmedAt: new Date()
+    });
 
     return res.json({ success: true, message: 'Paiement effectué avec succès' });
 

@@ -14,37 +14,32 @@ async function findBalanceByUserId(userId) {
 }
 
 // Débiter un utilisateur (renvoie la balance MAJ)
-async function debitUser(userId, amount, reason = '') {
+async function debitUser(userId, amount, reason = '', context = {}) {
   const balance = await findBalanceByUserId(userId);
   if (!balance) throw new Error('Solde introuvable');
   if (balance.amount < amount) throw new Error('Solde insuffisant');
   balance.amount -= amount;
-  // Optionnel : ajoute un log ou historise le débit ici (audit)
   await balance.save();
+  // Audit transaction optionnel : laisse la route/pay.js créer la Transaction complète
   return balance;
 }
 
 // Créditer un utilisateur par email (renvoie la balance MAJ)
-async function creditUserByEmail(email, amount, reason = '') {
+async function creditUserByEmail(email, amount, reason = '', context = {}) {
   const user = await findUserByEmail(email);
   if (!user) throw new Error('Destinataire introuvable');
   const balance = await findBalanceByUserId(user._id);
   if (!balance) throw new Error('Balance destinataire introuvable');
   balance.amount += amount;
-  // Optionnel : ajoute un log ou historise le crédit ici (audit)
   await balance.save();
+  // Audit transaction optionnel : laisse la route/pay.js créer la Transaction complète
   return balance;
 }
 
 // Fonction de transfert interne (tout-en-un)
-async function transfer(fromUserId, toEmail, amount) {
-  // 1. Vérifier et débiter l'expéditeur
-  await debitUser(fromUserId, amount, 'Virement interne');
-
-  // 2. Crédite le destinataire
-  await creditUserByEmail(toEmail, amount, 'Virement interne');
-
-  // Ici tu peux logguer, notifier, etc.
+async function transfer(fromUserId, toEmail, amount, context = {}) {
+  await debitUser(fromUserId, amount, 'Virement interne', context);
+  await creditUserByEmail(toEmail, amount, 'Virement interne', context);
   return true;
 }
 
