@@ -9,7 +9,7 @@ const expo            = new Expo();
 const { getTxConn }   = require('../config/db');
 const TransactionModel = () => getTxConn().model('Transaction');
 const Balance         = require('../models/Balance');
-const User            = require('../models/User');
+const User            = require('../models/User')(); 
 const Outbox          = require('../models/Outbox');
 const Notification    = require('../models/Notification');
 const { sendEmail }   = require('../utils/mail');

@@ -1,6 +1,6 @@
 // src/services/transactions.js
 
-const User = require('../models/User');
+const User = require('../models/User')();
 const Balance = require('../models/Balance');
 
 // Trouver un utilisateur par email

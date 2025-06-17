@@ -1,4 +1,3 @@
-// src/config/db.js
 const mongoose = require('mongoose');
 const config   = require('../config');
 
@@ -21,31 +20,20 @@ async function connectTransactionsDB() {
     socketTimeoutMS: 45000,
   };
 
-  //
   // 1) Connexion principale (default) → pour le User “global”
-  //
   await mongoose.connect(uriUsers, opts);
   console.log(`✅ DB Users connectée : ${mongoose.connection.name}`);
-  // On enregistre ici le modèle User sur la connexion principale
-  require('../models/User'); // ceci enregistre mongoose.model('User', userSchema) sur la connexion par défaut
+  require('../models/User')(); // Ceci enregistre le modèle User sur la connexion principale
 
-  //
-  // 2) Création d’une connexion dédiée txConn → pour le service “transactions”
-  //
+  // 2) Connexion dédiée txConn → pour le service “transactions”
   txConn = mongoose.createConnection(uriTx, opts);
-  // Attendre la connexion effective
   await txConn.asPromise();
   console.log(`✅ DB Transactions connectée : ${txConn.name}`);
 
-  //
-  // 3) Enregistrer **le même** schéma User sur txConn, AVANT d’enregistrer Transaction
-  //    afin que “ref: 'User'” du schéma Transaction pointe bien vers un modèle User existant.
-  //
+  // 3) Enregistrer le schéma User sur txConn, AVANT d’enregistrer Transaction
   require('../models/User')(txConn);
 
-  //
   // 4) Enregistrer ensuite les autres modèles sur txConn
-  //
   require('../models/Transaction')(txConn);
   require('../models/Outbox')(txConn);
   require('../models/Notification')(txConn);
