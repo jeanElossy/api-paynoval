@@ -1,9 +1,9 @@
-// File: src/models/User.js
-
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
-// Définition du schéma User avec des validations et protection de champs sensibles
+/**
+ * Schéma utilisateur (gère users sur plusieurs connexions)
+ */
 const userSchema = new mongoose.Schema({
   email: {
     type: String,
@@ -23,24 +23,35 @@ const userSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Decimal128,
     required: true,
     default: mongoose.Types.Decimal128.fromString('0.00'),
-    // Convertit Decimal128 en Number à la lecture
     get: v => parseFloat(v.toString()),
-    // Convertit Number ou string en Decimal128 à l'écriture
     set: v => mongoose.Types.Decimal128.fromString(v.toString())
   },
   role: {
     type: String,
     enum: ['user', 'admin'],
     default: 'user'
+  },
+  fullName: { // Ajoute si besoin (nom complet)
+    type: String,
+    trim: true,
+    maxlength: 100,
+    default: ''
+  },
+  pushTokens: { // Pour notifications push
+    type: [String],
+    default: []
+  },
+  notificationSettings: { // Préférences notif
+    type: Object,
+    default: {}
   }
 }, {
-  timestamps: true,              // createdAt & updatedAt
-  versionKey: '__v',             // Version clé pour optimistic concurrency
+  timestamps: true,
+  versionKey: '__v',
   optimisticConcurrency: true,
   toJSON: {
     getters: true,
     transform(doc, ret) {
-      // Supprimer les champs techniques
       delete ret._id;
       delete ret.__v;
       delete ret.password;
@@ -49,10 +60,8 @@ const userSchema = new mongoose.Schema({
   }
 });
 
-// Index unique sur l'email
 userSchema.index({ email: 1 }, { unique: true });
 
-// Hook avant sauvegarde pour hasher le mot de passe
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   try {
@@ -64,9 +73,14 @@ userSchema.pre('save', async function(next) {
   }
 });
 
-// Méthode pour comparer le mot de passe en entrée avec le hash stocké
 userSchema.methods.comparePassword = function(candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-module.exports = mongoose.model('User', userSchema);
+/**
+ * Export du modèle multi-connexion
+ * - Sans paramètre => mongoose par défaut
+ * - Avec paramètre (ex: txConn) => connexion custom
+ */
+module.exports = (conn = mongoose) =>
+  conn.models.User || conn.model('User', userSchema);

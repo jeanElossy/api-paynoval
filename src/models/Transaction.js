@@ -1,8 +1,9 @@
-// models/Transaction.js
-
 const mongoose = require('mongoose');
-const crypto   = require('crypto');
+const crypto = require('crypto');
 
+/**
+ * Schéma Transaction (multi-connexion, sécurisé)
+ */
 const transactionSchema = new mongoose.Schema({
   sender:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   receiver:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -30,11 +31,11 @@ const transactionSchema = new mongoose.Schema({
   cancelReason:      { type: String, default: null },
 
   // E-commerce / Facture / Audit fields
-  description:    { type: String, default: null },     // description du paiement (facultatif)
-  orderId:        { type: String, default: null },     // orderId, référence e-commerce/facture
-  metadata:       { type: Object, default: null },     // Objet libre pour données custom du marchand
+  description:    { type: String, default: null },
+  orderId:        { type: String, default: null },
+  metadata:       { type: Object, default: null },
 
-  // PATCH brute-force protection (anti-brute-force security code)
+  // Protection brute-force security code
   attemptCount:    { type: Number, default: 0 },
   lastAttemptAt:   { type: Date, default: null },
   lockedUntil:     { type: Date, default: null }
@@ -59,7 +60,6 @@ transactionSchema.set('toJSON', {
     delete ret._id;
     delete ret.securityCode;
     delete ret.verificationToken;
-    // Supprime les infos brute-force du JSON API
     delete ret.attemptCount;
     delete ret.lastAttemptAt;
     delete ret.lockedUntil;
@@ -74,4 +74,10 @@ transactionSchema.pre('validate', function(next) {
   next();
 });
 
-module.exports = mongoose.model('Transaction', transactionSchema);
+/**
+ * Export du modèle multi-connexion
+ * - Sans paramètre => mongoose par défaut
+ * - Avec paramètre (ex: txConn) => connexion custom
+ */
+module.exports = (conn = mongoose) =>
+  conn.models.Transaction || conn.model('Transaction', transactionSchema);
