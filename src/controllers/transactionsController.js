@@ -11,7 +11,8 @@ const User         = require('../models/User')(getUsersConn());
 const Notification = require('../models/Notification')(getUsersConn());
 const Outbox       = require('../models/Outbox')(getUsersConn());
 const Transaction  = require('../models/Transaction')(getTxConn());
-const Balance      = require('../models/Balance'); // Balance reste sur la DB principale Users
+const Balance = require('../models/Balance')(getUsersConn());
+
 
 const { sendEmail } = require('../utils/mail');
 const {
