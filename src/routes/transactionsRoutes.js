@@ -9,14 +9,14 @@ const {
   initiateInternal,
   confirmController,
   cancelController,
-  getTransactionController, 
+  getTransactionController,
 } = require('../controllers/transactionsController');
 const { protect }      = require('../middleware/authMiddleware');
 const requestValidator = require('../middleware/requestValidator');
 
 const router = express.Router();
 
-// Rate limiter pour endpoints sensibles
+// Limiteur de requêtes pour les routes critiques (anti-brute-force)
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 10,
@@ -25,13 +25,12 @@ const limiter = rateLimit({
   message: { success: false, status: 429, message: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
 
-// Appliquer le limiter sur les POST sensibles
+// Applique le limiter sur les routes POST critiques
 router.use(['/initiate', '/confirm', '/cancel'], limiter);
-
 
 /**
  * GET /api/v1/transactions/:id
- * Récupère une transaction par ID (utilisé pour vérifier le statut côté mobile)
+ * Récupère une transaction par ID (mobile/web)
  */
 router.get(
   '/:id',
@@ -39,10 +38,9 @@ router.get(
   asyncHandler(getTransactionController)
 );
 
-
 /**
  * GET /api/v1/transactions
- * Liste les transactions de l'utilisateur connecté
+ * Liste toutes les transactions liées à l'utilisateur connecté
  */
 router.get(
   '/',
@@ -50,10 +48,9 @@ router.get(
   asyncHandler(listInternal)
 );
 
-
 /**
  * POST /api/v1/transactions/initiate
- * Initie une nouvelle transaction interne (débit immédiat expéditeur)
+ * Crée une transaction interne (débit immédiat expéditeur)
  */
 router.post(
   '/initiate',
@@ -104,7 +101,7 @@ router.post(
 
 /**
  * POST /api/v1/transactions/confirm
- * Confirme une transaction existante (vérifie securityCode + crédite destinataire)
+ * Confirme une transaction "pending" (crédite le destinataire après securityCode)
  */
 router.post(
   '/confirm',
@@ -122,7 +119,7 @@ router.post(
 
 /**
  * POST /api/v1/transactions/cancel
- * Annule une transaction "pending", rembourse 99% de la somme débité
+ * Annule une transaction "pending" (remboursement)
  */
 router.post(
   '/cancel',

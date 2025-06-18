@@ -3,19 +3,21 @@
 const express      = require('express');
 const asyncHandler = require('express-async-handler');
 const { protect }  = require('../middleware/authMiddleware');
-const Notification = require('../models/Notification');
+
+// ALWAYS inject connection if you are in a multi-DB architecture
+const { getUsersConn } = require('../config/db');
+const Notification = require('../models/Notification')(getUsersConn());
 
 const router = express.Router();
 
 /**
  * GET /api/v1/notifications
- * Récupère les notifications reçues pour l'utilisateur connecté
+ * Récupère les notifications de l'utilisateur connecté (par ordre décroissant)
  */
 router.get(
   '/',
   protect,
   asyncHandler(async (req, res) => {
-    // Recherche toutes les notifications dont le recipient correspond à l'utilisateur
     const notifs = await Notification
       .find({ recipient: req.user.id })
       .sort({ createdAt: -1 })
@@ -49,7 +51,7 @@ router.patch(
 
 /**
  * DELETE /api/v1/notifications/:id
- * Supprime une notification
+ * Supprime une notification de l'utilisateur connecté
  */
 router.delete(
   '/:id',
@@ -69,7 +71,7 @@ router.delete(
 
 /**
  * GET /api/v1/notifications/count
- * Renvoie le nombre de notifications non lues
+ * Renvoie le nombre de notifications non lues pour l'utilisateur connecté
  */
 router.get(
   '/count',
@@ -85,4 +87,3 @@ router.get(
 );
 
 module.exports = router;
-

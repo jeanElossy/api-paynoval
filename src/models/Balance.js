@@ -48,10 +48,13 @@ balanceSchema.statics.withdrawFromBalance = async function(userId, amount) {
   session.startTransaction();
   try {
     const bal = await this.findOne({ user: userId }).session(session);
-    if (!bal || bal.amount < amount) {
+    if (!bal || parseFloat(bal.amount.toString()) < amount) {
       throw new Error('Fonds insuffisants pour le retrait');
     }
-    bal.amount -= amount;
+    // Utiliser Decimal128 pour éviter les erreurs de précision
+    bal.amount = mongoose.Types.Decimal128.fromString(
+      (parseFloat(bal.amount.toString()) - amount).toFixed(2)
+    );
     await bal.save({ session });
     await session.commitTransaction();
     logger.info(`Retrait de ${amount} pour user=${userId}, remaining=${bal.amount}`);
@@ -73,4 +76,6 @@ balanceSchema.post('remove', function(doc) {
   logger.info(`Balance supprimée pour user=${doc.user}`);
 });
 
-module.exports = mongoose.model('Balance', balanceSchema);
+// Factory pour multi-connexion
+module.exports = (conn = mongoose) =>
+  conn.models.Balance || conn.model('Balance', balanceSchema);
