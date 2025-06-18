@@ -22,8 +22,38 @@ const transactionSchema = new mongoose.Schema({
   country:           { type: String, required: true, trim: true, maxlength: 100 },
   securityQuestion:  { type: String, required: true, trim: true, maxlength: 200 },
   securityCode:      { type: String, required: true, select: false },
-  destination:       { type: String, required: true, enum: ['PayNoval','Banque','Mobile Money'] },
-  funds:             { type: String, required: true, enum: ['Solde PayNoval','Carte de crédit'] },
+
+  // AJUSTE ici 👇👇👇
+  destination: {
+    type: String,
+    required: true,
+    enum: [
+      'paynoval',
+      'stripe',
+      'bank',
+      'mobilemoney',
+      'visa_direct',
+      'stripe2momo',
+      'cashin',
+      'cashout',
+      // Ajoute ici tout flux autorisé dans ta gateway !
+    ]
+  },
+  funds: {
+    type: String,
+    required: true,
+    enum: [
+      'paynoval',
+      'stripe',
+      'bank',
+      'mobilemoney',
+      'visa_direct',
+      'stripe2momo',
+      'cashin',
+      'cashout',
+      // Ajoute ici tout flux autorisé dans ta gateway !
+    ]
+  },
   status:            { type: String, enum: ['pending','confirmed','cancelled'], default: 'pending' },
   verificationToken: { type: String, required: true, select: false, unique: true },
   confirmedAt:       { type: Date, default: null },
