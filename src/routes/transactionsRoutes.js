@@ -111,6 +111,9 @@ router.post(
       .isMongoId().withMessage('ID de transaction invalide'),
     body('securityCode')
       .notEmpty().withMessage('Code de sécurité requis')
+      .trim().escape(),
+    body('provider') // Ajoute ceci si ce n'est pas encore fait
+      .notEmpty().withMessage('Fournisseur requis')
       .trim().escape()
   ],
   requestValidator,
