@@ -697,8 +697,6 @@ const Outbox       = require('../models/Outbox')(getUsersConn());
 const Transaction  = require('../models/Transaction')(getTxConn());
 const Balance      = require('../models/Balance')(getUsersConn());
 
-const validationService = require('../services/validationService');
-
 const { sendEmail } = require('../utils/mail');
 const {
   initiatedSenderTemplate,

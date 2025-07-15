@@ -17,6 +17,9 @@ const { protect }   = require('./middleware/authMiddleware');
 const errorHandler  = require('./middleware/errorHandler');
 const logger        = require('./utils/logger');
 
+const { requireRole } = require('./middleware/authz');
+
+
 // ───── Optionnel : Sentry monitoring erreurs ─────
 let sentry = null;
 if (process.env.SENTRY_DSN) {
