@@ -1,4 +1,4 @@
-// src/utils/logger.js
+// File: src/utils/logger.js
 const { createLogger, format, transports } = require('winston');
 
 const logger = createLogger({
@@ -12,6 +12,7 @@ const logger = createLogger({
   defaultMeta: { service: 'paynoval-transactions' },
   transports: [
     new transports.Console(),
+    // Pour log file: décommente si besoin
     // new transports.File({ filename: 'logs/error.log', level: 'error' }),
     // new transports.File({ filename: 'logs/combined.log' })
   ],

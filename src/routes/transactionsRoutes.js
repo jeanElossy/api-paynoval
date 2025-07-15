@@ -10,9 +10,17 @@ const {
   confirmController,
   cancelController,
   getTransactionController,
+  refundController,
+  validateController,
+  reassignController,
+  archiveController,
+  relaunchController,
 } = require('../controllers/transactionsController');
 const { protect }      = require('../middleware/authMiddleware');
+const requireRole      = require('../middleware/requireRole');
 const requestValidator = require('../middleware/requestValidator');
+
+
 
 const router = express.Router();
 
@@ -112,7 +120,7 @@ router.post(
     body('securityCode')
       .notEmpty().withMessage('Code de sécurité requis')
       .trim().escape(),
-    body('provider') // Ajoute ceci si ce n'est pas encore fait
+    body('provider')
       .notEmpty().withMessage('Fournisseur requis')
       .trim().escape()
   ],
@@ -137,5 +145,79 @@ router.post(
   requestValidator,
   asyncHandler(cancelController)
 );
+
+/**
+ * POST /api/v1/transactions/refund
+ * Rembourse une transaction confirmée (admin/superadmin ONLY)
+ */
+router.post(
+  '/refund',
+  protect,
+  requireRole(['admin', 'superadmin']),        // <--- Contrôle d'accès ici
+  [
+    body('transactionId').isMongoId().withMessage('ID de transaction invalide'),
+    body('reason').optional().trim().escape(),
+  ],
+  requestValidator,
+  asyncHandler(refundController)
+);
+
+/**
+ * POST /api/v1/transactions/validate
+ * Valide une transaction (admin/superadmin ONLY)
+ */
+router.post(
+  '/validate',
+  protect,
+  requireRole(['admin', 'superadmin']),
+  [
+    body('transactionId').isMongoId().withMessage('ID de transaction invalide'),
+    body('status').notEmpty().isString().withMessage('Nouveau statut requis'),
+    body('adminNote').optional().trim().escape(),
+  ],
+  requestValidator,
+  asyncHandler(validateController)
+);
+
+/**
+ * POST /api/v1/transactions/reassign
+ * Réassigne la transaction à un autre destinataire (admin/superadmin ONLY)
+ */
+router.post(
+  '/reassign',
+  protect,
+  requireRole(['admin', 'superadmin']),
+  [
+    body('transactionId').isMongoId().withMessage('ID de transaction invalide'),
+    body('newReceiverEmail').isEmail().withMessage('Email du nouveau destinataire invalide').normalizeEmail(),
+  ],
+  requestValidator,
+  asyncHandler(reassignController)
+);
+
+router.post(
+  '/archive',
+  protect,
+  requireRole(['admin', 'superadmin']),
+  [
+    body('transactionId').isMongoId().withMessage('ID de transaction invalide'),
+  ],
+  requestValidator,
+  asyncHandler(archiveController)
+);
+
+router.post(
+  '/relaunch',
+  protect,
+  requireRole(['admin', 'superadmin']),
+  [
+    body('transactionId').isMongoId().withMessage('ID de transaction invalide'),
+  ],
+  requestValidator,
+  asyncHandler(relaunchController)
+);
+
+
+
 
 module.exports = router;

@@ -23,6 +23,25 @@ const transactionSchema = new mongoose.Schema({
   securityQuestion:  { type: String, required: true, trim: true, maxlength: 200 },
   securityCode:      { type: String, required: true, select: false },
 
+  refundedAt:    { type: Date, default: null },
+  refundReason:  { type: String, default: null },
+  validatedAt:   { type: Date, default: null },
+  adminNote:     { type: String, default: null },
+  reassignedAt:  { type: Date, default: null },
+
+
+  archived:      { type: Boolean, default: false },
+  archivedAt:    { type: Date },
+  archivedBy:    { type: String }, // email ou ID admin
+
+  relaunchedAt:  { type: Date },
+  relaunchedBy:  { type: String }, // email ou ID admin
+  relaunchCount: { type: Number, default: 0 },
+
+
+
+
+
   // AJUSTE ici 👇👇👇
   destination: {
     type: String,
