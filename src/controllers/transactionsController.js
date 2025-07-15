@@ -697,6 +697,8 @@ const Outbox       = require('../models/Outbox')(getUsersConn());
 const Transaction  = require('../models/Transaction')(getTxConn());
 const Balance      = require('../models/Balance')(getUsersConn());
 
+const logger = require('../utils/logger');
+
 const { sendEmail } = require('../utils/mail');
 const {
   initiatedSenderTemplate,
@@ -1010,6 +1012,176 @@ exports.getTransactionController = async (req, res, next) => {
 };
 
 
+// // -------------------------------------------------------------------
+// // INITIATE INTERNAL TRANSACTION (création)
+// // -------------------------------------------------------------------
+// exports.initiateInternal = async (req, res, next) => {
+//   const session = await mongoose.startSession();
+//   try {
+//     session.startTransaction();
+
+//     // 1) Lecture et validation du body
+//     const {
+//       toEmail,
+//       amount,
+//       senderCurrencySymbol,
+//       localCurrencySymbol,
+//       recipientInfo = {},
+//       description = '',
+//       question,
+//       securityCode,
+//       destination,
+//       funds,
+//       country
+//     } = req.body;
+
+//     if (!toEmail || !sanitize(toEmail)) throw createError(400, 'Email du destinataire requis');
+//     if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
+//     if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
+//     if (description && description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
+
+//     // 2) Auth JWT
+//     const authHeader = req.headers.authorization;
+//     if (!authHeader || !authHeader.startsWith('Bearer ')) throw createError(401, 'Token manquant');
+//     const authToken = authHeader;
+
+//     // 3) Expéditeur
+//     const senderId   = req.user.id;
+//     const senderUser = await User.findById(senderId).select('fullName email').lean().session(session);
+//     if (!senderUser) throw createError(403, 'Utilisateur invalide');
+
+//     // 4) Destinataire
+//     const receiver = await User.findOne({ email: sanitize(toEmail) })
+//       .select('_id fullName email')
+//       .lean()
+//       .session(session);
+//     if (!receiver) throw createError(404, 'Destinataire introuvable');
+//     if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
+
+//     // 5) --- VALIDATION AVEC LE SERVICE ---
+//     await validationService.validateTransactionAmount({ amount: req.body.amount });
+//     await validationService.detectBasicFraud({
+//       sender: req.user.id,
+//       receiver: receiver._id,
+//       amount: req.body.amount,
+//       currency: req.body.senderCurrencySymbol,
+//     });
+
+//     // 6) Calcul montant
+//     const amt = parseFloat(amount);
+//     if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
+
+//     // 7) Frais & net
+//     const fee       = parseFloat((amt * 0.01).toFixed(2));
+//     const netAmount = parseFloat((amt - fee).toFixed(2));
+
+//     // 8) Débit expéditeur (solde)
+//     const balDoc = await Balance.findOne({ user: senderId }).session(session);
+//     const balanceFloat = balDoc?.amount ?? 0;
+//     if (balanceFloat < amt) throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+
+//     const debited = await Balance.findOneAndUpdate(
+//       { user: senderId },
+//       { $inc: { amount: -amt } },
+//       { new: true, session }
+//     );
+//     if (!debited) throw createError(500, 'Erreur lors du débit du compte expéditeur');
+
+//     // 9) Crédit admin fees
+//     let adminFeeInCAD = 0;
+//     if (fee > 0) {
+//       const { converted } = await convertAmount(
+//         senderCurrencySymbol,
+//         'CAD',
+//         fee
+//       );
+//       adminFeeInCAD = parseFloat(converted.toFixed(2));
+//     }
+//     const adminEmail = 'admin@paynoval.com';
+//     const adminUser  = await User.findOne({ email: adminEmail }).select('_id').session(session);
+//     if (!adminUser) throw createError(500, 'Compte administrateur introuvable');
+//     if (adminFeeInCAD > 0) {
+//       await Balance.findOneAndUpdate(
+//         { user: adminUser._id },
+//         { $inc: { amount: adminFeeInCAD } },
+//         { new: true, upsert: true, session }
+//       );
+//     }
+
+//     // 10) Conversion montant principal
+//     const { rate, converted } = await convertAmount(
+//       senderCurrencySymbol,
+//       localCurrencySymbol,
+//       amt
+//     );
+
+//     // 11) Formatage en Decimal128
+//     const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+//     const decFees     = mongoose.Types.Decimal128.fromString(fee.toFixed(2));
+//     const decNet      = mongoose.Types.Decimal128.fromString(netAmount.toFixed(2));
+//     const decLocal    = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
+//     const decExchange = mongoose.Types.Decimal128.fromString(rate.toString());
+
+//     // 12) Nom du destinataire
+//     const nameDest = recipientInfo.name && sanitize(recipientInfo.name)
+//       ? sanitize(recipientInfo.name)
+//       : receiver.fullName;
+
+//     // 13) Génération ref
+//     const reference = await generateTransactionRef();
+
+//     // 14) Création doc Transaction
+//     const [tx] = await Transaction.create(
+//       [{
+//         reference,
+//         sender:               senderUser._id,
+//         receiver:             receiver._id,
+//         amount:               decAmt,
+//         transactionFees:      decFees,
+//         netAmount:            decNet,
+//         senderCurrencySymbol: sanitize(senderCurrencySymbol),
+//         exchangeRate:         decExchange,
+//         localAmount:          decLocal,
+//         localCurrencySymbol:  sanitize(localCurrencySymbol),
+//         senderName:           senderUser.fullName,
+//         senderEmail:          senderUser.email,
+//         nameDestinataire:     nameDest,
+//         recipientEmail:       sanitize(toEmail),
+//         country:              sanitize(country),
+//         description:          sanitize(description),
+//         securityQuestion:     sanitize(question),
+//         securityCode:         sanitize(securityCode),
+//         destination:          sanitize(destination),
+//         funds:                sanitize(funds),
+//         status:               'pending'
+//       }],
+//       { session }
+//     );
+
+//     // 15) Referral (bonus, code, ...)
+//     await checkAndGenerateReferralCodeInMain(senderUser._id, session, authToken);
+
+//     // 16) Notifications
+//     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+
+//     // 17) Commit
+//     await session.commitTransaction();
+//     session.endSession();
+
+//     // 18) Réponse
+//     return res.status(201).json({
+//       success: true,
+//       transactionId: tx._id.toString(),
+//       reference:     tx.reference,
+//       adminFeeInCAD
+//     });
+//   } catch (err) {
+//     await session.abortTransaction();
+//     session.endSession();
+//     return next(err);
+//   }
+// };
+
 // -------------------------------------------------------------------
 // INITIATE INTERNAL TRANSACTION (création)
 // -------------------------------------------------------------------
@@ -1069,9 +1241,23 @@ exports.initiateInternal = async (req, res, next) => {
     const amt = parseFloat(amount);
     if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
 
-    // 7) Frais & net
-    const fee       = parseFloat((amt * 0.01).toFixed(2));
-    const netAmount = parseFloat((amt - fee).toFixed(2));
+    // 7) -- APPELLE LA LOGIQUE DE FRAIS DU GATEWAY --
+    const GATEWAY_URL = process.env.GATEWAY_URL || 'https://api-gateway-8cgy.onrender.com/api/v1';
+    const simulateParams = {
+      provider: 'paynoval',
+      amount: amt,
+      fromCurrency: senderCurrencySymbol,
+      toCurrency: localCurrencySymbol,
+      country: country,
+    };
+    const feeRes = await axios.get(`${GATEWAY_URL}/fees/simulate`, { params: simulateParams });
+    if (!feeRes.data.success) throw createError(500, 'Erreur calcul frais');
+    const feeData = feeRes.data.data; // ex: { amount, fees, feePercent, ... }
+
+    const fee         = parseFloat(feeData.fees);
+    const netAmount   = parseFloat(feeData.netAfterFees);
+    const feeId       = feeData.feeId || null;
+    const feeSnapshot = feeData;
 
     // 8) Débit expéditeur (solde)
     const balDoc = await Balance.findOne({ user: senderId }).session(session);
@@ -1085,7 +1271,7 @@ exports.initiateInternal = async (req, res, next) => {
     );
     if (!debited) throw createError(500, 'Erreur lors du débit du compte expéditeur');
 
-    // 9) Crédit admin fees
+    // 9) Crédit admin fees (en CAD ici)
     let adminFeeInCAD = 0;
     if (fee > 0) {
       const { converted } = await convertAmount(
@@ -1137,6 +1323,8 @@ exports.initiateInternal = async (req, res, next) => {
         amount:               decAmt,
         transactionFees:      decFees,
         netAmount:            decNet,
+        feeSnapshot,          // 👈 snapshot complet
+        feeId,                // 👈 id mongo Fee si dispo
         senderCurrencySymbol: sanitize(senderCurrencySymbol),
         exchangeRate:         decExchange,
         localAmount:          decLocal,
@@ -1181,6 +1369,126 @@ exports.initiateInternal = async (req, res, next) => {
 };
 
 
+// exports.confirmController = async (req, res, next) => {
+//   const session = await mongoose.startSession();
+//   try {
+//     session.startTransaction();
+
+//     const { transactionId, securityCode } = req.body;
+//     if (!transactionId || !securityCode)
+//       throw createError(400, 'transactionId et securityCode sont requis');
+
+//     const authHeader = req.headers.authorization;
+//     if (!authHeader || !authHeader.startsWith('Bearer '))
+//       throw createError(401, 'Token manquant');
+//     const authToken = authHeader;
+
+//     const tx = await Transaction
+//       .findById(transactionId)
+//       .select([
+//         '+securityCode',
+//         '+amount',
+//         '+senderCurrencySymbol',
+//         '+localCurrencySymbol',
+//         '+receiver',
+//         '+sender',
+//         '+attemptCount',
+//         '+lastAttemptAt',
+//         '+lockedUntil',
+//         '+status'
+//       ])
+//       .session(session);
+
+//     if (!tx)
+//       throw createError(400, 'Transaction introuvable');
+      
+//     // ----- Validation cohérence de changement de statut -----
+//     validationService.validateTransactionStatusChange(tx.status, 'confirmed');
+
+//     if (tx.status !== 'pending')
+//       throw createError(400, 'Transaction déjà traitée ou annulée');
+
+//     // Protection anti-brute-force
+//     const now = new Date();
+//     if (tx.lockedUntil && tx.lockedUntil > now)
+//       throw createError(423, `Transaction temporairement bloquée, réessayez après ${tx.lockedUntil.toLocaleTimeString('fr-FR')}`);
+
+//     if ((tx.attemptCount || 0) >= 3) {
+//       tx.status = 'cancelled';
+//       tx.cancelledAt = now;
+//       tx.cancelReason = 'Code de sécurité erroné (trop d’essais)';
+//       tx.lockedUntil = new Date(now.getTime() + 15 * 60 * 1000); // blocage 15min
+//       await tx.save({ session });
+//       await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
+//       throw createError(401, 'Nombre d’essais dépassé, transaction annulée');
+//     }
+
+//     if (String(tx.receiver) !== String(req.user.id))
+//       throw createError(403, 'Vous n’êtes pas le destinataire de cette transaction');
+
+//     const sanitizedCode = String(securityCode).replace(/[<>\\/{};]/g, '').trim();
+//     if (sanitizedCode !== tx.securityCode) {
+//       tx.attemptCount = (tx.attemptCount || 0) + 1;
+//       tx.lastAttemptAt = now;
+
+//       if (tx.attemptCount >= 3) {
+//         tx.status = 'cancelled';
+//         tx.cancelledAt = now;
+//         tx.cancelReason = 'Code de sécurité erroné (trop d’essais)';
+//         tx.lockedUntil = new Date(now.getTime() + 15 * 60 * 1000);
+//         await tx.save({ session });
+//         await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
+//         throw createError(401, 'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.');
+//       } else {
+//         await tx.save({ session });
+//         throw createError(401, `Code de sécurité incorrect. Il vous reste ${3 - tx.attemptCount} essai(s).`);
+//       }
+//     }
+
+//     // Reset brute-force
+//     tx.attemptCount = 0;
+//     tx.lastAttemptAt = null;
+//     tx.lockedUntil = null;
+
+//     // Crédit destinataire
+//     const amtFloat = parseFloat(tx.amount.toString());
+//     if (amtFloat <= 0) throw createError(500, 'Montant brut invalide en base');
+//     const fee    = parseFloat((amtFloat * 0.01).toFixed(2));
+//     const netBrut = parseFloat((amtFloat - fee).toFixed(2));
+//     const { converted: localNet } = await convertAmount(
+//       tx.senderCurrencySymbol, tx.localCurrencySymbol, netBrut
+//     );
+//     const localNetRounded = parseFloat(localNet.toFixed(2));
+
+//     const credited = await Balance.findOneAndUpdate(
+//       { user: tx.receiver },
+//       { $inc: { amount: localNetRounded } },
+//       { new: true, upsert: true, session }
+//     );
+//     if (!credited) throw createError(500, 'Erreur lors du crédit au destinataire');
+
+//     tx.status      = 'confirmed';
+//     tx.confirmedAt = now;
+//     await tx.save({ session });
+
+//     await checkAndGenerateReferralCodeInMain(tx.sender, session, authToken);
+//     await processReferralBonusIfEligible(tx.sender, tx, session, authToken);
+//     await notifyParties(tx, 'confirmed', session, tx.senderCurrencySymbol);
+
+//     await session.commitTransaction();
+//     session.endSession();
+
+//     return res.json({ success: true, credited: localNetRounded });
+//   } catch (err) {
+//     await session.abortTransaction();
+//     session.endSession();
+//     return next(err);
+//   }
+// };
+
+// -------------------------------------------------------------------
+// ANNULATION DE TRANSACTION (avec validation statut)
+// -------------------------------------------------------------------
 
 
 exports.confirmController = async (req, res, next) => {
@@ -1197,15 +1505,20 @@ exports.confirmController = async (req, res, next) => {
       throw createError(401, 'Token manquant');
     const authToken = authHeader;
 
+    // Récupère la transaction (frais + net stockés)
     const tx = await Transaction
       .findById(transactionId)
       .select([
         '+securityCode',
         '+amount',
+        '+transactionFees',
+        '+netAmount',
         '+senderCurrencySymbol',
         '+localCurrencySymbol',
         '+receiver',
         '+sender',
+        '+feeSnapshot',
+        '+feeId',
         '+attemptCount',
         '+lastAttemptAt',
         '+lockedUntil',
@@ -1264,15 +1577,22 @@ exports.confirmController = async (req, res, next) => {
     tx.lastAttemptAt = null;
     tx.lockedUntil = null;
 
-    // Crédit destinataire
-    const amtFloat = parseFloat(tx.amount.toString());
-    if (amtFloat <= 0) throw createError(500, 'Montant brut invalide en base');
-    const fee    = parseFloat((amtFloat * 0.01).toFixed(2));
-    const netBrut = parseFloat((amtFloat - fee).toFixed(2));
-    const { converted: localNet } = await convertAmount(
-      tx.senderCurrencySymbol, tx.localCurrencySymbol, netBrut
-    );
-    const localNetRounded = parseFloat(localNet.toFixed(2));
+    // Crédit destinataire : utilise les données déjà stockées lors de l'initiate (SECURITÉ)
+    const amtFloat  = parseFloat(tx.amount.toString());
+    const fee       = parseFloat(tx.transactionFees.toString());
+    const netBrut   = parseFloat(tx.netAmount.toString());
+
+    // Conversion pour la devise locale
+    let localNetRounded = null;
+    if (tx.feeSnapshot && tx.feeSnapshot.netAfterFees) {
+      localNetRounded = parseFloat(tx.feeSnapshot.netAfterFees);
+    } else {
+      // Sécurité : fallback legacy (doit disparaître quand tout est migré)
+      const { converted: localNet } = await convertAmount(
+        tx.senderCurrencySymbol, tx.localCurrencySymbol, netBrut
+      );
+      localNetRounded = parseFloat(localNet.toFixed(2));
+    }
 
     const credited = await Balance.findOneAndUpdate(
       { user: tx.receiver },
@@ -1292,7 +1612,7 @@ exports.confirmController = async (req, res, next) => {
     await session.commitTransaction();
     session.endSession();
 
-    return res.json({ success: true, credited: localNetRounded });
+    return res.json({ success: true, credited: localNetRounded, feeId: tx.feeId, feeSnapshot: tx.feeSnapshot });
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
@@ -1300,9 +1620,115 @@ exports.confirmController = async (req, res, next) => {
   }
 };
 
-// -------------------------------------------------------------------
-// ANNULATION DE TRANSACTION (avec validation statut)
-// -------------------------------------------------------------------
+
+
+// exports.cancelController = async (req, res, next) => {
+//   const session = await mongoose.startSession();
+//   try {
+//     session.startTransaction();
+
+//     const { transactionId, reason = 'Annulé', senderCurrencySymbol } = req.body;
+//     if (!transactionId) throw createError(400, 'transactionId requis pour annuler');
+
+//     const tx = await Transaction
+//       .findById(transactionId)
+//       .select([
+//         '+netAmount',
+//         '+amount',
+//         '+senderCurrencySymbol',
+//         '+sender',
+//         '+receiver',
+//         '+status'
+//       ])
+//       .session(session);
+
+//     if (!tx)
+//       throw createError(400, 'Transaction introuvable');
+
+//     // ---- Validation cohérence de changement de statut ----
+//     validationService.validateTransactionStatusChange(tx.status, 'cancelled');
+
+//     if (tx.status !== 'pending')
+//       throw createError(400, 'Transaction déjà traitée ou annulée');
+
+//     const userId     = String(req.user.id);
+//     const senderId   = String(tx.sender);
+//     const receiverId = String(tx.receiver);
+//     if (userId !== senderId && userId !== receiverId)
+//       throw createError(403, 'Vous n’êtes pas autorisé à annuler cette transaction');
+
+//     // Frais d’annulation
+//     let cancellationFee = 0;
+//     const symbol = tx.senderCurrencySymbol.trim();
+//     if (['USD', '$USD', 'CAD', '$CAD', 'EUR', '€'].includes(symbol)) {
+//       cancellationFee = 2.99;
+//     } else if (['XOF', 'XAF', 'F CFA'].includes(symbol)) {
+//       cancellationFee = 300;
+//     }
+
+//     // Remboursement
+//     const netStored  = parseFloat(tx.netAmount.toString());
+//     const refundAmt  = parseFloat((netStored - cancellationFee).toFixed(2));
+//     if (refundAmt < 0)
+//       throw createError(400, 'Frais d’annulation supérieurs au montant net à rembourser');
+
+//     const refunded = await Balance.findOneAndUpdate(
+//       { user: tx.sender },
+//       { $inc: { amount: refundAmt } },
+//       { new: true, upsert: true, session }
+//     );
+//     if (!refunded)
+//       throw createError(500, 'Erreur lors du remboursement au compte expéditeur');
+
+//     // Crédit admin sur frais d’annulation
+//     const adminCurrency   = 'CAD';
+//     let adminFeeConverted = 0;
+//     if (cancellationFee > 0) {
+//       const { converted } = await convertAmount(
+//         tx.senderCurrencySymbol,
+//         adminCurrency,
+//         cancellationFee
+//       );
+//       adminFeeConverted = parseFloat(converted.toFixed(2));
+//     }
+//     const adminEmail = 'admin@paynoval.com';
+//     const adminUser  = await User.findOne({ email: adminEmail }).select('_id').session(session);
+//     if (!adminUser)
+//       throw createError(500, 'Compte administrateur introuvable');
+//     if (adminFeeConverted > 0) {
+//       await Balance.findOneAndUpdate(
+//         { user: adminUser._id },
+//         { $inc: { amount: adminFeeConverted } },
+//         { new: true, upsert: true, session }
+//       );
+//     }
+
+//     tx.status       = 'cancelled';
+//     tx.cancelledAt  = new Date();
+//     tx.cancelReason = `${userId === receiverId
+//       ? 'Annulé par le destinataire'
+//       : 'Annulé par l’expéditeur'} : ${sanitize(reason)}`;
+//     await tx.save({ session });
+
+//     await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
+
+//     await session.commitTransaction();
+//     session.endSession();
+
+//     return res.json({
+//       success: true,
+//       refunded,
+//       cancellationFeeInSenderCurrency: cancellationFee,
+//       adminFeeCredited:                adminFeeConverted,
+//       adminCurrency
+//     });
+//   } catch (err) {
+//     await session.abortTransaction();
+//     session.endSession();
+//     return next(err);
+//   }
+// };
+
 
 exports.cancelController = async (req, res, next) => {
   const session = await mongoose.startSession();
@@ -1339,13 +1765,43 @@ exports.cancelController = async (req, res, next) => {
     if (userId !== senderId && userId !== receiverId)
       throw createError(403, 'Vous n’êtes pas autorisé à annuler cette transaction');
 
-    // Frais d’annulation
+    // --- Simulation des frais d’annulation via Gateway ---
     let cancellationFee = 0;
-    const symbol = tx.senderCurrencySymbol.trim();
-    if (['USD', '$USD', 'CAD', '$CAD', 'EUR', '€'].includes(symbol)) {
-      cancellationFee = 2.99;
-    } else if (['XOF', 'XAF', 'F CFA'].includes(symbol)) {
-      cancellationFee = 300;
+    let cancellationFeeType = 'fixed';
+    let cancellationFeePercent = 0;
+    let cancellationFeeId = null;
+
+    try {
+      const { data } = await axios.get(
+        `${config.gatewayUrl}/fees/simulate`, // ex: https://api-gateway.../fees/simulate
+        {
+          params: {
+            provider: tx.funds || 'paynoval',
+            amount: tx.amount.toString(),
+            fromCurrency: tx.senderCurrencySymbol,
+            toCurrency: tx.senderCurrencySymbol,
+            type: 'cancellation'
+          },
+          timeout: 6000,
+        }
+      );
+      if (data && data.success) {
+        cancellationFee      = data.data.fees;
+        cancellationFeeType  = data.data.type || 'fixed';
+        cancellationFeePercent = data.data.feePercent || 0;
+        cancellationFeeId    = data.data.feeId || null; // si tu le renvoies côté API
+      } else {
+        // fallback : met un log ici, et continue avec 0
+        cancellationFee = 0;
+      }
+    } catch (e) {
+      // fallback legacy :
+      const symbol = tx.senderCurrencySymbol.trim();
+      if (['USD', '$USD', 'CAD', '$CAD', 'EUR', '€'].includes(symbol)) {
+        cancellationFee = 2.99;
+      } else if (['XOF', 'XAF', 'F CFA'].includes(symbol)) {
+        cancellationFee = 300;
+      }
     }
 
     // Remboursement
@@ -1385,11 +1841,16 @@ exports.cancelController = async (req, res, next) => {
       );
     }
 
+    // Archive dans le tx
     tx.status       = 'cancelled';
     tx.cancelledAt  = new Date();
     tx.cancelReason = `${userId === receiverId
       ? 'Annulé par le destinataire'
       : 'Annulé par l’expéditeur'} : ${sanitize(reason)}`;
+    tx.cancellationFee = cancellationFee;
+    tx.cancellationFeeType = cancellationFeeType;
+    tx.cancellationFeePercent = cancellationFeePercent;
+    tx.cancellationFeeId = cancellationFeeId;
     await tx.save({ session });
 
     await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
@@ -1401,7 +1862,10 @@ exports.cancelController = async (req, res, next) => {
       success: true,
       refunded,
       cancellationFeeInSenderCurrency: cancellationFee,
-      adminFeeCredited:                adminFeeConverted,
+      cancellationFeeType,
+      cancellationFeePercent,
+      cancellationFeeId,
+      adminFeeCredited: adminFeeConverted,
       adminCurrency
     });
   } catch (err) {
@@ -1410,9 +1874,6 @@ exports.cancelController = async (req, res, next) => {
     return next(err);
   }
 };
-
-
-const logger = require('../utils/logger');
 
 // Rembourse une transaction déjà confirmée (refund après paiement)
 exports.refundController = async (req, res, next) => {

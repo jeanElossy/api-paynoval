@@ -29,7 +29,6 @@ const transactionSchema = new mongoose.Schema({
   adminNote:     { type: String, default: null },
   reassignedAt:  { type: Date, default: null },
 
-
   archived:      { type: Boolean, default: false },
   archivedAt:    { type: Date },
   archivedBy:    { type: String }, // email ou ID admin
@@ -38,11 +37,14 @@ const transactionSchema = new mongoose.Schema({
   relaunchedBy:  { type: String }, // email ou ID admin
   relaunchCount: { type: Number, default: 0 },
 
+  cancellationFee:         { type: Number, default: 0 },
+  cancellationFeeType:     { type: String, enum: ['fixed', 'percent'], default: 'fixed' },
+  cancellationFeePercent:  { type: Number, default: 0 },
+  cancellationFeeId:       { type: mongoose.Schema.Types.ObjectId, ref: 'Fee', default: null },
 
 
 
 
-  // AJUSTE ici 👇👇👇
   destination: {
     type: String,
     required: true,
@@ -55,7 +57,6 @@ const transactionSchema = new mongoose.Schema({
       'stripe2momo',
       'cashin',
       'cashout',
-      // Ajoute ici tout flux autorisé dans ta gateway !
     ]
   },
   funds: {
@@ -70,7 +71,6 @@ const transactionSchema = new mongoose.Schema({
       'stripe2momo',
       'cashin',
       'cashout',
-      // Ajoute ici tout flux autorisé dans ta gateway !
     ]
   },
   status:            { type: String, enum: ['pending','confirmed','cancelled'], default: 'pending' },
@@ -87,7 +87,12 @@ const transactionSchema = new mongoose.Schema({
   // Protection brute-force security code
   attemptCount:    { type: Number, default: 0 },
   lastAttemptAt:   { type: Date, default: null },
-  lockedUntil:     { type: Date, default: null }
+  lockedUntil:     { type: Date, default: null },
+
+  // NOUVEAU : snapshot du barème de frais utilisé
+  feeSnapshot:     { type: Object, default: null },  // snapshot complet du calcul de frais
+  feeId:           { type: mongoose.Schema.Types.ObjectId, ref: 'Fee', default: null }, // ref vers Fee si connu
+
 }, {
   versionKey: false,
   timestamps: true
