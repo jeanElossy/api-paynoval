@@ -92,7 +92,6 @@ components:
         country: { type: string, example: "CI" }
         description: { type: string, maxLength: 500, example: "Transfert interne" }
         securityQuestion: { type: string, example: "Mot de passe ?" }
-        # securityCode non retourné par l'API
         destination: { type: string, example: "paynoval" }
         funds: { type: string, example: "wallet" }
         status:
@@ -255,7 +254,9 @@ paths:
                         items: { $ref: '#/components/schemas/Transaction' }
         '401':
           description: Non autorisé
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/{id}:
     get:
@@ -271,15 +272,18 @@ paths:
       responses:
         '200':
           description: OK
-          content: { application/json: { schema:
-            type: object
-            properties:
-              success: { type: boolean, example: true }
-              data: { $ref: '#/components/schemas/Transaction' }
-          } }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/Transaction' }
         '404':
           description: Introuvable
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/initiate:
     post:
@@ -304,7 +308,9 @@ paths:
               schema: { $ref: '#/components/schemas/TxInitiateResponse' }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/confirm:
     post:
@@ -328,10 +334,14 @@ paths:
               schema: { $ref: '#/components/schemas/TxConfirmResponse' }
         '401':
           description: Code incorrect / dépassement essais / lock actif
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/cancel:
     post:
@@ -355,7 +365,9 @@ paths:
               schema: { $ref: '#/components/schemas/TxCancelResponse' }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/refund:
     post:
@@ -379,7 +391,9 @@ paths:
               schema: { $ref: '#/components/schemas/TxRefundResponse' }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/validate:
     post:
@@ -407,7 +421,9 @@ paths:
                   message: { type: string, example: "Transaction confirmed" }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/reassign:
     post:
@@ -439,7 +455,9 @@ paths:
                       email: { type: string, format: email, example: "new.receiver@client.com" }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/archive:
     post:
@@ -467,7 +485,9 @@ paths:
                   archived: { type: boolean, example: true }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
   /transactions/relaunch:
     post:
@@ -496,7 +516,9 @@ paths:
                   txId: { type: string, example: "65f1a3c2bd..." }
         '4XX':
           description: Erreur côté client
-          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
 
 x-webhooks:
   transaction.initiated:
