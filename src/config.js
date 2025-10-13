@@ -1,35 +1,31 @@
-// src/config.js
-
 const path = require('path');
 require('dotenv-safe').config({
   example: path.resolve(__dirname, '../.env.example'),
   allowEmptyValues: true,
 });
 
-// URL du backend principal
 const PRINCIPAL_URL = process.env.PRINCIPAL_URL?.trim() || '';
+const GATEWAY_URL   = process.env.GATEWAY_URL?.trim()   || '';
 
-// URL de l’API Gateway (NOUVEAU)
-const GATEWAY_URL = process.env.GATEWAY_URL?.trim() || '';
-
-// Préparer l'URL de base pour l'API de change
-const rawExchangeUrl = process.env.EXCHANGE_API_URL?.trim();
-const baseExchangeUrl = rawExchangeUrl
-  ? rawExchangeUrl.replace(/\/latest\/.*$/, '')
-  : '';
-const exchangeApiKey = process.env.EXCHANGE_API_KEY;
+const rawExchangeUrl   = process.env.EXCHANGE_API_URL?.trim();
+const baseExchangeUrl  = rawExchangeUrl ? rawExchangeUrl.replace(/\/latest\/.*$/, '') : '';
+const exchangeApiKey   = process.env.EXCHANGE_API_KEY;
 const defaultExchangeUrl = `https://v6.exchangerate-api.com/v6/${exchangeApiKey}`;
 
 module.exports = {
   env: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT) || 3000,
+  logLevel: process.env.LOG_LEVEL || 'info',
 
-  // URL du backend principal
+  // Observabilité / Docs
+  sentryDsn: process.env.SENTRY_DSN || '',
+  openapiSpecPath: process.env.OPENAPI_SPEC_PATH || path.join(__dirname, '../openapi.yaml'),
+
+  // URLs services
   principalUrl: PRINCIPAL_URL,
-
-  // URL de l’API Gateway
   gatewayUrl: GATEWAY_URL,
 
+  // Bases
   mongo: {
     users: process.env.MONGO_URI_USERS,
     transactions: process.env.MONGO_URI_TRANSACTIONS,
@@ -41,7 +37,7 @@ module.exports = {
 
   cors: {
     origin: process.env.CORS_ORIGIN
-      ? process.env.CORS_ORIGIN.split(',')
+      ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
       : ['http://localhost:3000'],
   },
 
@@ -59,7 +55,7 @@ module.exports = {
     },
   },
 
-  emailMicroserviceUrl: process.env.EMAIL_MICROSERVICE_URL,
+  emailMicroserviceUrl: process.env.EMAIL_MICROSERVICE_URL || '',
 
   exchange: {
     apiUrl: baseExchangeUrl || defaultExchangeUrl,
