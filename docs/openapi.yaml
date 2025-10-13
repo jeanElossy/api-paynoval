@@ -8,6 +8,9 @@ info:
     - Traçabilité: `X-Request-Id` recommandé sur toutes les requêtes
     - Anti-brute-force à la confirmation (verrouillage temporaire)
     - Calcul des frais via snapshot `feeSnapshot` (issu du simulateur Gateway)
+  x-logo:
+    url: https://raw.githubusercontent.com/jeanElossy/paynoval-docs/main/public/assets/defaultAvatar.png
+    altText: PayNoval
 servers:
   - url: https://internal.paynoval.com/api/v1
     description: Production
@@ -119,8 +122,7 @@ components:
 
     TxInitiate:
       type: object
-      required:
-        [toEmail, amount, senderCurrencySymbol, localCurrencySymbol, question, securityCode, destination, funds, country]
+      required: [toEmail, amount, senderCurrencySymbol, localCurrencySymbol, question, securityCode, destination, funds, country]
       properties:
         toEmail: { type: string, format: email, example: "destinataire@client.com" }
         amount:  { type: number, example: 100.00 }
@@ -306,7 +308,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TxInitiateResponse' }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -337,7 +339,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -363,7 +365,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TxCancelResponse' }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -389,7 +391,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TxRefundResponse' }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -419,7 +421,7 @@ paths:
                 properties:
                   success: { type: boolean, example: true }
                   message: { type: string, example: "Transaction confirmed" }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -453,7 +455,7 @@ paths:
                     properties:
                       id: { type: string, example: "usr_789" }
                       email: { type: string, format: email, example: "new.receiver@client.com" }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -483,7 +485,7 @@ paths:
                 properties:
                   success: { type: boolean, example: true }
                   archived: { type: boolean, example: true }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
@@ -514,13 +516,13 @@ paths:
                   success: { type: boolean, example: true }
                   relaunched: { type: boolean, example: true }
                   txId: { type: string, example: "65f1a3c2bd..." }
-        '4XX':
+        '400':
           description: Erreur côté client
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
 
-x-webhooks:
+webhooks:
   transaction.initiated:
     post:
       tags: [Internal]
