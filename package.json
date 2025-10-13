@@ -30,6 +30,7 @@
     "hpp": "^0.2.3",
     "http-errors": "^2.0.0",
     "joi": "^17.13.3",
+    "js-yaml": "^4.1.0",
     "jsonwebtoken": "^9.0.0",
     "lru-cache": "^11.1.0",
     "mongoose": "^7.8.7",
@@ -43,8 +44,11 @@
     "react-native-safe-area-context": "^5.4.1",
     "redis": "^5.1.0",
     "stripe": "^18.1.1",
+    "swagger-ui-express": "^5.0.1",
     "winston": "^3.17.0",
-    "xss-clean": "^0.1.4"
+    "xss-clean": "^0.1.4",
+    "yaml": "^2.8.1",
+    "yamljs": "^0.3.0"
   },
   "engines": {
     "node": ">=18"

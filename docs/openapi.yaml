@@ -1,0 +1,554 @@
+openapi: 3.1.0
+info:
+  title: PayNoval Internal API (PNV ↔ PNV)
+  version: 1.0.0
+  description: |
+    API interne pour les **transferts Wallet PayNoval ↔ PayNoval**.
+    - Authentification: `Bearer <token>`
+    - Traçabilité: `X-Request-Id` recommandé sur toutes les requêtes
+    - Anti-brute-force à la confirmation (verrouillage temporaire)
+    - Calcul des frais via snapshot `feeSnapshot` (issu du simulateur Gateway)
+servers:
+  - url: https://internal.paynoval.com/api/v1
+    description: Production
+  - url: https://sandbox.internal.paynoval.com/api/v1
+    description: Sandbox
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Internal
+    description: Transferts Wallet interne PayNoval ↔ PayNoval
+  - name: Admin
+    description: Opérations d’administration (validation, réassignation, archivage, relance)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    XRequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: UUID pour corrélation et audit
+      schema: { type: string, format: uuid }
+
+    PaginateSkip:
+      name: skip
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: Décalage de pagination
+    PaginateLimit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      description: Taille de page (max 100)
+
+  schemas:
+    ApiError:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:   { type: string, example: "Paramètre manquant/incorrect" }
+        message: { type: string, nullable: true }
+        code:    { type: string, nullable: true }
+      additionalProperties: true
+
+    Pagination:
+      type: object
+      properties:
+        skip:  { type: integer, example: 0 }
+        limit: { type: integer, example: 25 }
+        total: { type: integer, example: 120 }
+
+    Transaction:
+      type: object
+      description: Transaction interne PNV↔PNV
+      properties:
+        id: { type: string, example: "65f1a3c2bd..." }
+        reference: { type: string, example: "PNV-2025-001234" }
+        sender: { type: string, example: "usr_123" }
+        receiver: { type: string, example: "usr_456" }
+        amount: { type: number, example: 100.00 }
+        transactionFees: { type: number, example: 1.00 }
+        netAmount: { type: number, example: 99.00 }
+        feeId: { type: string, nullable: true, example: "fee_65f..." }
+        feeSnapshot:
+          type: object
+          description: Snapshot complet calculé (simulateur Gateway) — contient généralement amount, fees, netAfterFees, feePercent, etc.
+          additionalProperties: true
+        senderCurrencySymbol: { type: string, example: "CAD" }
+        exchangeRate: { type: number, example: 590 }
+        localAmount: { type: number, example: 59000 }
+        localCurrencySymbol: { type: string, example: "XOF" }
+        nameDestinataire: { type: string, example: "Destinataire" }
+        recipientEmail: { type: string, format: email, example: "destinataire@client.com" }
+        country: { type: string, example: "CI" }
+        description: { type: string, maxLength: 500, example: "Transfert interne" }
+        securityQuestion: { type: string, example: "Mot de passe ?" }
+        # securityCode non retourné par l'API
+        destination: { type: string, example: "paynoval" }
+        funds: { type: string, example: "wallet" }
+        status:
+          type: string
+          enum: [pending, confirmed, cancelled, refunded, rejected, relaunch, archived]
+          example: pending
+        attemptCount: { type: integer, example: 0 }
+        lockedUntil: { type: string, format: date-time, nullable: true }
+        cancelReason: { type: string, nullable: true }
+        cancellationFee: { type: number, nullable: true, example: 2.99 }
+        cancellationFeeType: { type: string, nullable: true, example: "fixed" }
+        cancellationFeePercent: { type: number, nullable: true, example: 0 }
+        cancellationFeeId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        confirmedAt: { type: string, format: date-time, nullable: true }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        refundedAt: { type: string, format: date-time, nullable: true }
+        validatedAt: { type: string, format: date-time, nullable: true }
+        archived: { type: boolean, example: false }
+        archivedAt: { type: string, format: date-time, nullable: true }
+        archivedBy: { type: string, nullable: true }
+        relaunchedAt: { type: string, format: date-time, nullable: true }
+        relaunchedBy: { type: string, nullable: true }
+        relaunchCount: { type: integer, nullable: true }
+
+    TxInitiate:
+      type: object
+      required:
+        [toEmail, amount, senderCurrencySymbol, localCurrencySymbol, question, securityCode, destination, funds, country]
+      properties:
+        toEmail: { type: string, format: email, example: "destinataire@client.com" }
+        amount:  { type: number, example: 100.00 }
+        senderCurrencySymbol: { type: string, example: "CAD" }
+        localCurrencySymbol:  { type: string, example: "XOF" }
+        recipientInfo:
+          type: object
+          properties:
+            name: { type: string, example: "Destinataire" }
+        description: { type: string, maxLength: 500, example: "Transfert interne" }
+        question: { type: string, example: "Mot de passe ?" }
+        securityCode: { type: string, example: "ABCD12" }
+        destination: { type: string, enum: [paynoval], example: "paynoval" }
+        funds: { type: string, enum: [wallet], example: "wallet" }
+        country: { type: string, example: "CI" }
+
+    TxInitiateResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+        reference: { type: string, example: "PNV-2025-001234" }
+        adminFeeInCAD: { type: number, example: 0.45 }
+
+    TxConfirm:
+      type: object
+      required: [transactionId, securityCode]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+        securityCode:  { type: string, example: "ABCD12" }
+
+    TxConfirmResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        credited: { type: number, example: 59000 }
+        feeId: { type: string, nullable: true }
+        feeSnapshot:
+          type: object
+          additionalProperties: true
+
+    TxCancel:
+      type: object
+      required: [transactionId]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+        reason: { type: string, example: "Annulé par le destinataire" }
+
+    TxCancelResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        refunded:
+          type: object
+          description: Document solde après remboursement (structure interne Balance)
+          additionalProperties: true
+        cancellationFeeInSenderCurrency: { type: number, example: 2.99 }
+        cancellationFeeType: { type: string, example: "fixed" }
+        cancellationFeePercent: { type: number, example: 0 }
+        cancellationFeeId: { type: string, nullable: true }
+        adminFeeCredited: { type: number, example: 1.12 }
+        adminCurrency: { type: string, example: "CAD" }
+
+    TxRefund:
+      type: object
+      required: [transactionId]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+        reason: { type: string, example: "Remboursement demandé" }
+
+    TxRefundResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        refunded: { type: number, example: 59000 }
+
+    TxValidate:
+      type: object
+      required: [transactionId, status]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+        status:
+          type: string
+          enum: [confirmed, rejected]
+          example: confirmed
+        adminNote: { type: string, nullable: true, example: "Vérification manuelle OK" }
+
+    TxReassign:
+      type: object
+      required: [transactionId, newReceiverEmail]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+        newReceiverEmail: { type: string, format: email, example: "new.receiver@client.com" }
+
+    TxArchive:
+      type: object
+      required: [transactionId]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+
+    TxRelaunch:
+      type: object
+      required: [transactionId]
+      properties:
+        transactionId: { type: string, example: "65f1a3c2bd..." }
+
+paths:
+  /transactions:
+    get:
+      tags: [Internal]
+      summary: Lister mes transactions internes (paginated)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/PaginateSkip'
+        - $ref: '#/components/parameters/PaginateLimit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Pagination'
+                  - type: object
+                    properties:
+                      success: { type: boolean, example: true }
+                      count: { type: integer, example: 25 }
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Transaction' }
+        '401':
+          description: Non autorisé
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/{id}:
+    get:
+      tags: [Internal]
+      summary: Récupérer une transaction interne (doit être l’expéditeur ou le destinataire)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema:
+            type: object
+            properties:
+              success: { type: boolean, example: true }
+              data: { $ref: '#/components/schemas/Transaction' }
+          } }
+        '404':
+          description: Introuvable
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/initiate:
+    post:
+      tags: [Internal]
+      summary: Initier un transfert PNV→PNV
+      description: |
+        Débite l’expéditeur, valorise les frais (snapshot), crée la transaction `pending` et notifie les parties.
+        **Requiert JWT Bearer.**
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxInitiate' }
+      responses:
+        '201':
+          description: Créée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TxInitiateResponse' }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/confirm:
+    post:
+      tags: [Internal]
+      summary: Confirmer (bénéficiaire) avec code de sécurité
+      description: |
+        Anti-brute-force (3 essais, lock 15 min). Crédit du bénéficiaire à partir du `feeSnapshot.netAfterFees` (si présent).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxConfirm' }
+      responses:
+        '200':
+          description: Confirmée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TxConfirmResponse' }
+        '401':
+          description: Code incorrect / dépassement essais / lock actif
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/cancel:
+    post:
+      tags: [Internal]
+      summary: Annuler une transaction `pending`
+      description: |
+        Rembourse l’expéditeur (net - frais d’annulation). Frais d’annulation simulés via Gateway (fallback legacy si indisponible).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxCancel' }
+      responses:
+        '200':
+          description: Annulée & remboursée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TxCancelResponse' }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/refund:
+    post:
+      tags: [Internal]
+      summary: Rembourser une transaction déjà confirmée
+      description: |
+        Débite le bénéficiaire (wallet local) et recrédite l’expéditeur. Échoue si solde bénéficiaire insuffisant.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxRefund' }
+      responses:
+        '200':
+          description: Remboursée
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TxRefundResponse' }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/validate:
+    post:
+      tags: [Admin]
+      summary: Valider/Rejeter manuellement une transaction `pending`
+      description: |
+        Usage admin. Seul un statut cible `confirmed` ou `rejected` est accepté.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxValidate' }
+      responses:
+        '200':
+          description: Transaction validée/rejetée
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  message: { type: string, example: "Transaction confirmed" }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/reassign:
+    post:
+      tags: [Admin]
+      summary: Réassigner une transaction à un autre bénéficiaire
+      description: |
+        Usage admin/spécial. Transaction `pending` ou `confirmed` uniquement.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxReassign' }
+      responses:
+        '200':
+          description: Réassignée
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  newReceiver:
+                    type: object
+                    properties:
+                      id: { type: string, example: "usr_789" }
+                      email: { type: string, format: email, example: "new.receiver@client.com" }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/archive:
+    post:
+      tags: [Admin]
+      summary: Archiver une transaction
+      description: |
+        Marque la transaction comme archivée (idempotent). Usage admin/superadmin.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxArchive' }
+      responses:
+        '200':
+          description: Archivée
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  archived: { type: boolean, example: true }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+  /transactions/relaunch:
+    post:
+      tags: [Admin]
+      summary: Relancer une transaction (pending/cancelled)
+      description: |
+        Passe le statut à `relaunch` et incrémente `relaunchCount`. Usage admin/superadmin.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TxRelaunch' }
+      responses:
+        '200':
+          description: Relancée
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  relaunched: { type: boolean, example: true }
+                  txId: { type: string, example: "65f1a3c2bd..." }
+        '4XX':
+          description: Erreur côté client
+          content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+
+x-webhooks:
+  transaction.initiated:
+    post:
+      tags: [Internal]
+      summary: Évènement — Transaction interne initiée
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string }
+                type: { type: string, example: "transaction.initiated" }
+                createdAt: { type: string, format: date-time }
+                data: { $ref: '#/components/schemas/Transaction' }
+      responses:
+        '200': { description: Accusé de réception }
+
+  transaction.confirmed:
+    post:
+      tags: [Internal]
+      summary: Évènement — Transaction interne confirmée
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string }
+                type: { type: string, example: "transaction.confirmed" }
+                createdAt: { type: string, format: date-time }
+                data: { $ref: '#/components/schemas/Transaction' }
+      responses:
+        '200': { description: Accusé de réception }
+
+  transaction.cancelled:
+    post:
+      tags: [Internal]
+      summary: Évènement — Transaction interne annulée
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string }
+                type: { type: string, example: "transaction.cancelled" }
+                createdAt: { type: string, format: date-time }
+                data: { $ref: '#/components/schemas/Transaction' }
+      responses:
+        '200': { description: Accusé de réception }
