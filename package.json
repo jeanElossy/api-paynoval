@@ -24,11 +24,13 @@
     "express-async-handler": "^1.2.0",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^6.11.2",
+    "express-slow-down": "^3.0.0",
     "express-sslify": "^1.2.0",
     "express-validator": "^6.15.0",
     "helmet": "^6.2.0",
     "hpp": "^0.2.3",
     "http-errors": "^2.0.0",
+    "ioredis": "^5.8.1",
     "joi": "^17.13.3",
     "js-yaml": "^4.1.0",
     "jsonwebtoken": "^9.0.0",
@@ -39,7 +41,7 @@
     "nodemailer": "^6.10.1",
     "pino": "^9.7.0",
     "promise-retry": "^2.0.1",
-    "rate-limit-redis": "^4.2.0",
+    "rate-limit-redis": "^4.2.2",
     "react-native-reanimated": "^3.18.0",
     "react-native-safe-area-context": "^5.4.1",
     "redis": "^5.1.0",
@@ -50,7 +52,10 @@
     "yaml": "^2.8.1",
     "yamljs": "^0.3.0"
   },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   }
 }
