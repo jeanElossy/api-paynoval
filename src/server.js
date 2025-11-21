@@ -247,7 +247,7 @@ const authLimiter = rateLimit({
 const authSlow = slowDown ? slowDown({
   windowMs: 10 * 60 * 1000,
   delayAfter: 10,
-  delayMs: 250,
+  delayMs: () => 250, // <-- nouvelle syntaxe
 }) : (req, res, next) => next();
 
 app.use(
