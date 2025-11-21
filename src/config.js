@@ -33,12 +33,13 @@ module.exports = {
 
   redis: {
     url: process.env.REDIS_URL,
+    tls: true, // TLS activé pour Upstash
   },
 
   cors: {
     origin: process.env.CORS_ORIGIN
       ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
-      : ['https://wwww.paynoval.com'],
+      : ['https://www.paynoval.com'],
   },
 
   jwtSecret: process.env.JWT_SECRET,

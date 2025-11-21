@@ -157,26 +157,28 @@ app.get('/openapi.json', (_req, res) => res.json(openapiSpec));
 
 // ---------- Rate limiters (global + sensibles) ----------
 let globalRateLimiter;
-let RedisStore, Redis;
+let RedisStore, Redis, redisClient;
 
 // Redis store si présent
 try {
   ({ RedisStore } = require('rate-limit-redis'));
   Redis = require('ioredis');
-} catch (_) { /* pas grave */ }
+} catch (_) { /* modules absents */ }
 
 if (process.env.REDIS_URL && RedisStore && Redis) {
-  const redis = new Redis(process.env.REDIS_URL);
+  redisClient = new Redis(process.env.REDIS_URL, { tls: {} }); // TLS activé
+
   globalRateLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
     standardHeaders: true,
     legacyHeaders: false,
-    store: new RedisStore({ sendCommand: (...args) => redis.call(...args) }),
+    store: new RedisStore({ sendCommand: (...args) => redisClient.call(...args) }),
     message: { success: false, error: 'Trop de requêtes, veuillez réessayer plus tard.' },
     skip: (req) => req.path.startsWith('/docs') || req.path.startsWith('/openapi'),
   });
-  logger.info('[rate-limit] Redis store enabled');
+
+  logger.info('[rate-limit] Redis store activé');
 } else {
   globalRateLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -186,11 +188,52 @@ if (process.env.REDIS_URL && RedisStore && Redis) {
     message: { success: false, error: 'Trop de requêtes, veuillez réessayer plus tard.' },
     skip: (req) => req.path.startsWith('/docs') || req.path.startsWith('/openapi'),
   });
+
   if (process.env.REDIS_URL) {
-    logger.warn('[rate-limit] REDIS_URL défini mais modules absents — fallback mémoire');
+    logger.warn('[rate-limit] REDIS_URL défini mais modules absents — fallback mémoire activé');
   }
 }
 app.use(globalRateLimiter);
+
+
+// let RedisStore, Redis;
+
+// // Redis store si présent
+// try {
+//   ({ RedisStore } = require('rate-limit-redis'));
+//   Redis = require('ioredis');
+// } catch (_) { /* pas grave */ }
+
+
+// if (process.env.REDIS_URL && RedisStore && Redis) {
+//   const redis = new Redis(process.env.REDIS_URL);
+
+//   globalRateLimiter = rateLimit({
+//     windowMs: 15 * 60 * 1000,
+//     max: 100,
+//     standardHeaders: true,
+//     legacyHeaders: false,
+//     store: new RedisStore({ sendCommand: (...args) => redis.call(...args) }),
+//     message: { success: false, error: 'Trop de requêtes, veuillez réessayer plus tard.' },
+//     skip: (req) => req.path.startsWith('/docs') || req.path.startsWith('/openapi'),
+//   });
+//   logger.info('[rate-limit] Redis store enabled');
+// } else {
+//   globalRateLimiter = rateLimit({
+//     windowMs: 15 * 60 * 1000,
+//     max: 100,
+//     standardHeaders: true,
+//     legacyHeaders: false,
+//     message: { success: false, error: 'Trop de requêtes, veuillez réessayer plus tard.' },
+//     skip: (req) => req.path.startsWith('/docs') || req.path.startsWith('/openapi'),
+//   });
+//   if (process.env.REDIS_URL) {
+//     logger.warn('[rate-limit] REDIS_URL défini mais modules absents — fallback mémoire');
+//   }
+// }
+// app.use(globalRateLimiter);
+
+
 
 // Slow-down optionnel (si module dispo), sinon no-op
 const slowDown = tryRequire('express-slow-down');
@@ -273,3 +316,7 @@ const graceful = async (signal) => {
 };
 process.on('SIGTERM', () => graceful('SIGTERM'));
 process.on('SIGINT',  () => graceful('SIGINT'));
+
+
+
+
