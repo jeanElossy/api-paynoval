@@ -38,7 +38,7 @@ module.exports = {
   cors: {
     origin: process.env.CORS_ORIGIN
       ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
-      : ['http://localhost:3000'],
+      : ['https://wwww.paynoval.com'],
   },
 
   jwtSecret: process.env.JWT_SECRET,
