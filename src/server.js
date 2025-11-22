@@ -274,6 +274,9 @@ let server;
     app.use('/api/v1/notifications',  protect, notificationRoutes);
     app.use('/api/v1/pay',            protect, payRoutes);
 
+    app.get('/api/v1/health', (req, res) => res.status(200).json({ status: 'ok' }));
+
+
     // 404
     app.use((req, res) => res.status(404).json({ success: false, error: 'Ressource non trouvée' }));
 
