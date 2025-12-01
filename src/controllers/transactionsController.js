@@ -1185,188 +1185,6 @@ exports.getTransactionController = async (req, res, next) => {
 // -------------------------------------------------------------------
 // INITIATE INTERNAL TRANSACTION (création)
 // -------------------------------------------------------------------
-exports.initiateInternal = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
-
-    // 1) Lecture et validation du body
-    const {
-      toEmail,
-      amount,
-      senderCurrencySymbol,
-      localCurrencySymbol,
-      recipientInfo = {},
-      description = '',
-      question,
-      securityCode,
-      destination,
-      funds,
-      country
-    } = req.body;
-
-    if (!toEmail || !sanitize(toEmail)) throw createError(400, 'Email du destinataire requis');
-    if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
-    if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
-    if (description && description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
-
-    // 2) Auth JWT
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) throw createError(401, 'Token manquant');
-    const authToken = authHeader;
-
-    // 3) Expéditeur
-    const senderId   = req.user.id;
-    const senderUser = await User.findById(senderId).select('fullName email').lean().session(session);
-    if (!senderUser) throw createError(403, 'Utilisateur invalide');
-
-    // 4) Destinataire
-    const receiver = await User.findOne({ email: sanitize(toEmail) })
-      .select('_id fullName email')
-      .lean()
-      .session(session);
-    if (!receiver) throw createError(404, 'Destinataire introuvable');
-    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
-
-    // 5) --- VALIDATION AVEC LE SERVICE ---
-    await validationService.validateTransactionAmount({ amount: req.body.amount });
-    await validationService.detectBasicFraud({
-      sender: req.user.id,
-      receiver: receiver._id,
-      amount: req.body.amount,
-      currency: req.body.senderCurrencySymbol,
-    });
-
-    // 6) Calcul montant
-    const amt = parseFloat(amount);
-    if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
-
-    // 7) -- APPELLE LA LOGIQUE DE FRAIS DU GATEWAY --
-    const GATEWAY_URL = process.env.GATEWAY_URL || 'https://api-gateway-8cgy.onrender.com/api/v1';
-    const simulateParams = {
-      provider: 'paynoval',
-      amount: amt,
-      fromCurrency: senderCurrencySymbol,
-      toCurrency: localCurrencySymbol,
-      country: country,
-    };
-    const feeRes = await axios.get(`${GATEWAY_URL}/fees/simulate`, { params: simulateParams });
-    if (!feeRes.data.success) throw createError(500, 'Erreur calcul frais');
-    const feeData = feeRes.data.data; // ex: { amount, fees, feePercent, ... }
-
-    const fee         = parseFloat(feeData.fees);
-    const netAmount   = parseFloat(feeData.netAfterFees);
-    const feeId       = feeData.feeId || null;
-    const feeSnapshot = feeData;
-
-    // 8) Débit expéditeur (solde)
-    const balDoc = await Balance.findOne({ user: senderId }).session(session);
-    const balanceFloat = balDoc?.amount ?? 0;
-    if (balanceFloat < amt) throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
-
-    const debited = await Balance.findOneAndUpdate(
-      { user: senderId },
-      { $inc: { amount: -amt } },
-      { new: true, session }
-    );
-    if (!debited) throw createError(500, 'Erreur lors du débit du compte expéditeur');
-
-    // 9) Crédit admin fees (en CAD ici)
-    let adminFeeInCAD = 0;
-    if (fee > 0) {
-      const { converted } = await convertAmount(
-        senderCurrencySymbol,
-        'CAD',
-        fee
-      );
-      adminFeeInCAD = parseFloat(converted.toFixed(2));
-    }
-    const adminEmail = 'admin@paynoval.com';
-    const adminUser  = await User.findOne({ email: adminEmail }).select('_id').session(session);
-    if (!adminUser) throw createError(500, 'Compte administrateur introuvable');
-    if (adminFeeInCAD > 0) {
-      await Balance.findOneAndUpdate(
-        { user: adminUser._id },
-        { $inc: { amount: adminFeeInCAD } },
-        { new: true, upsert: true, session }
-      );
-    }
-
-    // 10) Conversion montant principal
-    const { rate, converted } = await convertAmount(
-      senderCurrencySymbol,
-      localCurrencySymbol,
-      amt
-    );
-
-    // 11) Formatage en Decimal128
-    const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
-    const decFees     = mongoose.Types.Decimal128.fromString(fee.toFixed(2));
-    const decNet      = mongoose.Types.Decimal128.fromString(netAmount.toFixed(2));
-    const decLocal    = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
-    const decExchange = mongoose.Types.Decimal128.fromString(rate.toString());
-
-    // 12) Nom du destinataire
-    const nameDest = recipientInfo.name && sanitize(recipientInfo.name)
-      ? sanitize(recipientInfo.name)
-      : receiver.fullName;
-
-    // 13) Génération ref
-    const reference = await generateTransactionRef();
-
-    // 14) Création doc Transaction
-    const [tx] = await Transaction.create(
-      [{
-        reference,
-        sender:               senderUser._id,
-        receiver:             receiver._id,
-        amount:               decAmt,
-        transactionFees:      decFees,
-        netAmount:            decNet,
-        feeSnapshot,          // 👈 snapshot complet
-        feeId,                // 👈 id mongo Fee si dispo
-        senderCurrencySymbol: sanitize(senderCurrencySymbol),
-        exchangeRate:         decExchange,
-        localAmount:          decLocal,
-        localCurrencySymbol:  sanitize(localCurrencySymbol),
-        senderName:           senderUser.fullName,
-        senderEmail:          senderUser.email,
-        nameDestinataire:     nameDest,
-        recipientEmail:       sanitize(toEmail),
-        country:              sanitize(country),
-        description:          sanitize(description),
-        securityQuestion:     sanitize(question),
-        securityCode:         sanitize(securityCode),
-        destination:          sanitize(destination),
-        funds:                sanitize(funds),
-        status:               'pending'
-      }],
-      { session }
-    );
-
-    // 15) Referral (bonus, code, ...)
-    await checkAndGenerateReferralCodeInMain(senderUser._id, session, authToken);
-
-    // 16) Notifications
-    await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
-
-    // 17) Commit
-    await session.commitTransaction();
-    session.endSession();
-
-    // 18) Réponse
-    return res.status(201).json({
-      success: true,
-      transactionId: tx._id.toString(),
-      reference:     tx.reference,
-      adminFeeInCAD
-    });
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    return next(err);
-  }
-};
 
 
 // exports.confirmController = async (req, res, next) => {
@@ -1489,6 +1307,226 @@ exports.initiateInternal = async (req, res, next) => {
 // -------------------------------------------------------------------
 // ANNULATION DE TRANSACTION (avec validation statut)
 // -------------------------------------------------------------------
+
+
+exports.initiateInternal = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+
+    // 1) Lecture et validation du body
+    const {
+      toEmail,
+      amount,
+      senderCurrencySymbol,
+      localCurrencySymbol,
+      recipientInfo = {},
+      description = '',
+      question,
+      securityCode,
+      destination,
+      funds,
+      country
+    } = req.body;
+
+    if (!toEmail || !sanitize(toEmail)) throw createError(400, 'Email du destinataire requis');
+    if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
+    if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
+    if (description && description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
+
+    // 2) Auth JWT
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) throw createError(401, 'Token manquant');
+    const authToken = authHeader;
+
+    // 3) Expéditeur
+    const senderId   = req.user.id;
+    const senderUser = await User.findById(senderId).select('fullName email').lean().session(session);
+    if (!senderUser) throw createError(403, 'Utilisateur invalide');
+
+    // 4) Destinataire
+    const receiver = await User.findOne({ email: sanitize(toEmail) })
+      .select('_id fullName email')
+      .lean()
+      .session(session);
+    if (!receiver) throw createError(404, 'Destinataire introuvable');
+    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
+
+    // 5) --- VALIDATION AVEC LE SERVICE ---
+    await validationService.validateTransactionAmount({ amount: req.body.amount });
+    await validationService.detectBasicFraud({
+      sender: req.user.id,
+      receiver: receiver._id,
+      amount: req.body.amount,
+      currency: req.body.senderCurrencySymbol,
+    });
+
+    // 6) Calcul montant
+    const amt = parseFloat(amount);
+    if (isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
+
+    // 7) -- APPELLE LA LOGIQUE DE FRAIS DU GATEWAY --
+    const GATEWAY_URL =
+      config.gatewayUrl ||
+      process.env.GATEWAY_URL ||
+      'https://api-gateway-8cgy.onrender.com/api/v1';
+
+    const simulateParams = {
+      provider: 'paynoval',
+      amount: amt,
+      fromCurrency: senderCurrencySymbol,
+      toCurrency: localCurrencySymbol,
+      country: country,
+    };
+
+    let feeData;
+    try {
+      const feeRes = await axios.get(`${GATEWAY_URL}/fees/simulate`, {
+        params: simulateParams,
+        headers: {
+          // JWT utilisateur transmis au Gateway
+          ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
+          // Token interne microservice -> Gateway
+          ...(process.env.INTERNAL_TOKEN ? { 'x-internal-token': process.env.INTERNAL_TOKEN } : {}),
+        },
+        timeout: 7000,
+      });
+
+      if (!feeRes.data || !feeRes.data.success) {
+        throw createError(500, 'Erreur calcul frais (réponse invalide du Gateway)');
+      }
+
+      feeData = feeRes.data.data; // ex: { amount, fees, netAfterFees, feePercent, feeId, ... }
+    } catch (errAxios) {
+      logger.error('[fees/simulate] échec appel Gateway', {
+        url: `${GATEWAY_URL}/fees/simulate`,
+        status: errAxios.response?.status,
+        responseData: errAxios.response?.data,
+      });
+
+      // Si le Gateway refuse l’accès, on renvoie une 502 côté client
+      if (errAxios.response?.status === 401 || errAxios.response?.status === 403) {
+        throw createError(502, 'Erreur interne lors du calcul des frais (accès refusé au moteur de frais).');
+      }
+
+      throw errAxios;
+    }
+
+    const fee         = parseFloat(feeData.fees);
+    const netAmount   = parseFloat(feeData.netAfterFees);
+    const feeId       = feeData.feeId || null;
+    const feeSnapshot = feeData;
+
+    // 8) Débit expéditeur (solde)
+    const balDoc = await Balance.findOne({ user: senderId }).session(session);
+    const balanceFloat = balDoc?.amount ?? 0;
+    if (balanceFloat < amt) throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
+
+    const debited = await Balance.findOneAndUpdate(
+      { user: senderId },
+      { $inc: { amount: -amt } },
+      { new: true, session }
+    );
+    if (!debited) throw createError(500, 'Erreur lors du débit du compte expéditeur');
+
+    // 9) Crédit admin fees (en CAD ici)
+    let adminFeeInCAD = 0;
+    if (fee > 0) {
+      const { converted } = await convertAmount(
+        senderCurrencySymbol,
+        'CAD',
+        fee
+      );
+      adminFeeInCAD = parseFloat(converted.toFixed(2));
+    }
+    const adminEmail = 'admin@paynoval.com';
+    const adminUser  = await User.findOne({ email: adminEmail }).select('_id').session(session);
+    if (!adminUser) throw createError(500, 'Compte administrateur introuvable');
+    if (adminFeeInCAD > 0) {
+      await Balance.findOneAndUpdate(
+        { user: adminUser._id },
+        { $inc: { amount: adminFeeInCAD } },
+        { new: true, upsert: true, session }
+      );
+    }
+
+    // 10) Conversion montant principal
+    const { rate, converted } = await convertAmount(
+      senderCurrencySymbol,
+      localCurrencySymbol,
+      amt
+    );
+
+    // 11) Formatage en Decimal128
+    const decAmt      = mongoose.Types.Decimal128.fromString(amt.toFixed(2));
+    const decFees     = mongoose.Types.Decimal128.fromString(fee.toFixed(2));
+    const decNet      = mongoose.Types.Decimal128.fromString(netAmount.toFixed(2));
+    const decLocal    = mongoose.Types.Decimal128.fromString(converted.toFixed(2));
+    const decExchange = mongoose.Types.Decimal128.fromString(rate.toString());
+
+    // 12) Nom du destinataire
+    const nameDest = recipientInfo.name && sanitize(recipientInfo.name)
+      ? sanitize(recipientInfo.name)
+      : receiver.fullName;
+
+    // 13) Génération ref
+    const reference = await generateTransactionRef();
+
+    // 14) Création doc Transaction
+    const [tx] = await Transaction.create(
+      [{
+        reference,
+        sender:               senderUser._id,
+        receiver:             receiver._id,
+        amount:               decAmt,
+        transactionFees:      decFees,
+        netAmount:            decNet,
+        feeSnapshot,          // 👈 snapshot complet
+        feeId,                // 👈 id mongo Fee si dispo
+        senderCurrencySymbol: sanitize(senderCurrencySymbol),
+        exchangeRate:         decExchange,
+        localAmount:          decLocal,
+        localCurrencySymbol:  sanitize(localCurrencySymbol),
+        senderName:           senderUser.fullName,
+        senderEmail:          senderUser.email,
+        nameDestinataire:     nameDest,
+        recipientEmail:       sanitize(toEmail),
+        country:              sanitize(country),
+        description:          sanitize(description),
+        securityQuestion:     sanitize(question),
+        securityCode:         sanitize(securityCode),
+        destination:          sanitize(destination),
+        funds:                sanitize(funds),
+        status:               'pending'
+      }],
+      { session }
+    );
+
+    // 15) Referral (bonus, code, ...)
+    await checkAndGenerateReferralCodeInMain(senderUser._id, session, authToken);
+
+    // 16) Notifications
+    await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+
+    // 17) Commit
+    await session.commitTransaction();
+    session.endSession();
+
+    // 18) Réponse
+    return res.status(201).json({
+      success: true,
+      transactionId: tx._id.toString(),
+      reference:     tx.reference,
+      adminFeeInCAD
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    return next(err);
+  }
+};
+
+
 
 
 exports.confirmController = async (req, res, next) => {
