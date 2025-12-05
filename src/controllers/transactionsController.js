@@ -543,6 +543,7 @@ exports.initiateInternal = async (req, res, next) => {
   }
 };
 
+
 exports.confirmController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -688,6 +689,8 @@ exports.confirmController = async (req, res, next) => {
   }
 };
 
+
+
 exports.cancelController = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
@@ -756,6 +759,7 @@ exports.cancelController = async (req, res, next) => {
         cancellationFee = 0;
       }
     } catch (e) {
+
       // fallback legacy :
       const symbol = tx.senderCurrencySymbol.trim();
       if (['USD', '$USD', 'CAD', '$CAD', 'EUR', '€'].includes(symbol)) {
@@ -763,6 +767,7 @@ exports.cancelController = async (req, res, next) => {
       } else if (['XOF', 'XAF', 'F CFA'].includes(symbol)) {
         cancellationFee = 300;
       }
+      
     }
 
     // Remboursement

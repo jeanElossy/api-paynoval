@@ -1,7 +1,6 @@
-// src/middleware/errorHandler.js
+// File: src/middleware/errorHandler.js
 
 const logger = require('../utils/logger');
-const createErrorEH = require('http-errors');
 
 module.exports = (err, req, res, next) => {
   // Log interne complet
@@ -11,15 +10,17 @@ module.exports = (err, req, res, next) => {
     path: req.originalUrl,
     method: req.method,
     user: req.user?.id,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 
   let statusCode = err.status || err.statusCode || 500;
-  let message = err.expose ? err.message : (statusCode === 500 ? 'Une erreur interne est survenue.' : err.message);
+  let message = err.expose
+    ? err.message
+    : (statusCode === 500 ? 'Une erreur interne est survenue.' : err.message);
 
   const response = { success: false, status: statusCode, message };
 
-  // Détails pour la validation
+  // Détails pour la validation (ex: Joi, celebrate, etc.)
   if (err.details) response.errors = err.details;
 
   // Stack trace uniquement hors prod pour 500
