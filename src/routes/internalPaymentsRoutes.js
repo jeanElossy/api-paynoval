@@ -67,6 +67,7 @@ router.post(
       .optional({ nullable: true })
       .isMongoId()
       .withMessage('toUserId doit être un ObjectId Mongo valide.'),
+
     body('reason')
       .optional()
       .isString()
@@ -103,6 +104,19 @@ router.post(
       .trim()
       .isLength({ max: 200 })
       .withMessage('orderId trop long.'),
+
+    // 🔐 Infos optionnelles pour tracer un vault comme receiver
+    body('targetVaultId')
+      .optional({ nullable: true })
+      .isMongoId()
+      .withMessage('targetVaultId doit être un ObjectId Mongo valide.'),
+    body('targetVaultName')
+      .optional({ nullable: true })
+      .isString()
+      .trim()
+      .isLength({ max: 200 })
+      .withMessage('targetVaultName trop long (max 200 caractères).'),
+
     body('metadata')
       .optional()
       .isObject()

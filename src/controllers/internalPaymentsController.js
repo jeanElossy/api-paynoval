@@ -18,6 +18,16 @@ const sanitize = (text) =>
 
 const ADMIN_EMAIL = config.adminEmail || 'admin@paynoval.com';
 
+/**
+ * Détermine le "mode" d'une opération interne.
+ *
+ * - credit       : crédit wallet uniquement (bonus, cashback, etc.)
+ * - debit        : débit wallet + crédit admin (ajustement négatif)
+ * - transfer     : fromUser -> toUser
+ * - debit_only   : débit wallet uniquement (ex: cagnotte_participation → vault géré ailleurs)
+ * - log-only     : aucune écriture sur les balances, juste un log Transaction
+ * - generic      : opérations particulières gérées au cas par cas
+ */
 function resolveKind(kind) {
   switch (kind) {
     case 'bonus':
@@ -25,20 +35,30 @@ function resolveKind(kind) {
     case 'adjustment_credit':
     case 'cagnotte_withdrawal':
       return { mode: 'credit' };
+
     case 'adjustment_debit':
       return { mode: 'debit' };
+
     case 'purchase':
       return { mode: 'transfer' };
+
     case 'cagnotte_participation':
-      // Le débit réel / logique de cagnotte est géré par le backend Cagnotte ;
-      // ici on trace juste l’opération (log-only).
-      return { mode: 'log-only' };
+      // 💡 Participation cagnotte :
+      // - on DÉBITE le wallet du participant (fromUserId)
+      // - le CRÉDIT du coffre (Vault) est géré dans le backend principal (cagnottes)
+      //   mais on trace le vault comme "receiver" dans Transaction.
+      return { mode: 'debit_only' };
+
     case 'generic':
     default:
       return { mode: 'generic' };
   }
 }
 
+/**
+ * Création d’une Transaction interne (log) avec possibilité de forcer
+ * le receiver (ID + nom) pour les cas "vault".
+ */
 async function createInternalTransactionDocument({
   session,
   kind,
@@ -53,12 +73,21 @@ async function createInternalTransactionDocument({
   contextId,
   orderId,
   metadata,
+  receiverOverrideId,
+  receiverOverrideName,
 }) {
   const now = new Date();
   const senderName = senderUser.fullName || senderUser.email;
-  const receiverName = receiverUser
-    ? receiverUser.fullName || receiverUser.email
-    : 'Système PayNoval';
+
+  const receiverId =
+    receiverOverrideId ||
+    (receiverUser ? receiverUser._id : senderUser._id);
+
+  const receiverName =
+    receiverOverrideName ||
+    (receiverUser
+      ? receiverUser.fullName || receiverUser.email
+      : 'Système PayNoval');
 
   const decAmount = mongoose.Types.Decimal128.fromString(
     Number(amount).toFixed(2)
@@ -75,6 +104,7 @@ async function createInternalTransactionDocument({
     operationKind: kind,
     context: context || null,
     contextId: contextId || null,
+    receiverType: receiverOverrideId ? 'vault' : 'user',
   });
 
   const securityQuestion = `INTERNAL:${kind}`;
@@ -85,7 +115,7 @@ async function createInternalTransactionDocument({
       {
         reference,
         sender: senderUser._id,
-        receiver: receiverUser ? receiverUser._id : senderUser._id,
+        receiver: receiverId,
         amount: decAmount,
         transactionFees: decFees,
         netAmount: decNet,
@@ -96,7 +126,8 @@ async function createInternalTransactionDocument({
         senderName,
         senderEmail: senderUser.email,
         nameDestinataire: receiverName,
-        recipientEmail: receiverUser ? receiverUser.email : senderUser.email,
+        // Pour un vault, pas d'email spécifique
+        recipientEmail: receiverUser ? receiverUser.email : null,
         country: sanitize(country || senderUser.country || 'Unknown'),
         securityQuestion,
         securityCode,
@@ -149,6 +180,8 @@ exports.createInternalPayment = async (req, res, next) => {
       contextId,
       orderId,
       metadata,
+      targetVaultId,
+      targetVaultName,
     } = req.body;
 
     const amt = Number(amount);
@@ -163,7 +196,10 @@ exports.createInternalPayment = async (req, res, next) => {
     }
 
     const { mode } = resolveKind(kind);
+    const isLogOnly = mode === 'log-only';
+    const isDebitOnly = mode === 'debit_only';
 
+    // 🔍 Règles de validation selon le mode
     if (mode === 'transfer') {
       if (!fromUserId || !toUserId) {
         throw createError(
@@ -186,10 +222,10 @@ exports.createInternalPayment = async (req, res, next) => {
       );
     }
 
-    if (mode === 'debit' && !fromUserId) {
+    if ((mode === 'debit' || isDebitOnly) && !fromUserId) {
       throw createError(
         400,
-        'fromUserId est requis pour un débit interne (adjustment_debit).'
+        'fromUserId est requis pour un débit interne.'
       );
     }
 
@@ -200,6 +236,7 @@ exports.createInternalPayment = async (req, res, next) => {
       );
     }
 
+    // 👤 Admin "technique"
     const adminUser = await User.findOne({ email: ADMIN_EMAIL })
       .select('_id email fullName country')
       .session(session);
@@ -211,6 +248,7 @@ exports.createInternalPayment = async (req, res, next) => {
       );
     }
 
+    // 👤 Chargement des users
     let fromUser = null;
     let toUser = null;
 
@@ -232,16 +270,33 @@ exports.createInternalPayment = async (req, res, next) => {
       }
     }
 
+    // Ajustements de rôles selon le mode
     if (mode === 'credit' && !fromUser) {
       fromUser = adminUser;
     }
 
     if (mode === 'debit' && !toUser) {
+      // Pour un "débit classique" on crédite l'admin
       toUser = adminUser;
     }
 
-    // Mode log-only (ex: cagnotte_participation) : aucune modification de balance
-    if (mode === 'log-only') {
+    if (isDebitOnly) {
+      // 💡 cas cagnotte_participation :
+      // - fromUser = participant (obligatoire)
+      // - pas de crédit sur Balance
+      if (!fromUser) {
+        throw createError(
+          500,
+          'fromUser introuvable pour une opération debit_only.'
+        );
+      }
+      // Ici on NE change pas toUser (il peut rester null),
+      // car le receiver sera overridé par le vault.
+      toUser = null;
+    }
+
+    // 🧾 Mode "log-only" (pour compat, pas utilisé pour cagnotte_participation)
+    if (isLogOnly) {
       const sender = fromUser || adminUser;
       const receiver = adminUser;
 
@@ -259,6 +314,8 @@ exports.createInternalPayment = async (req, res, next) => {
         contextId,
         orderId,
         metadata,
+        receiverOverrideId: null,
+        receiverOverrideName: null,
       });
 
       await session.commitTransaction();
@@ -272,8 +329,9 @@ exports.createInternalPayment = async (req, res, next) => {
       });
     }
 
-    // Mouvements de solde
-    if (mode === 'debit' || mode === 'transfer') {
+    // 💰 Mouvements de solde
+    // Débit (debit, transfer, debit_only)
+    if (mode === 'debit' || mode === 'transfer' || isDebitOnly) {
       const sourceUser = fromUser || adminUser;
 
       const balanceFrom = await Balance.findOne({ user: sourceUser._id })
@@ -301,6 +359,7 @@ exports.createInternalPayment = async (req, res, next) => {
       }
     }
 
+    // Crédit (credit, transfer) – ⚠️ PAS pour debit_only
     if (mode === 'credit' || mode === 'transfer') {
       const targetUser = toUser || adminUser;
 
@@ -315,19 +374,20 @@ exports.createInternalPayment = async (req, res, next) => {
       }
     }
 
-    const senderUser =
-      mode === 'credit'
-        ? fromUser || adminUser
-        : mode === 'debit'
-        ? fromUser || adminUser
-        : fromUser || adminUser;
+    // 🧾 Transaction interne pour l’historique
+    const senderUser = fromUser || adminUser;
+    const receiverUser = toUser || adminUser;
 
-    const receiverUser =
-      mode === 'credit'
-        ? toUser || adminUser
-        : mode === 'debit'
-        ? toUser || adminUser
-        : toUser || adminUser;
+    // 🎯 Override receiver quand c'est une participation cagnotte
+    const receiverOverrideId = isDebitOnly
+      ? targetVaultId || contextId || null
+      : null;
+
+    const receiverOverrideName = isDebitOnly
+      ? targetVaultName ||
+        (metadata && metadata.vaultName) ||
+        'Coffre Cagnotte'
+      : null;
 
     const tx = await createInternalTransactionDocument({
       session,
@@ -343,6 +403,8 @@ exports.createInternalPayment = async (req, res, next) => {
       contextId,
       orderId,
       metadata,
+      receiverOverrideId,
+      receiverOverrideName,
     });
 
     await session.commitTransaction();
