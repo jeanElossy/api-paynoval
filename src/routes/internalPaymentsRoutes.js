@@ -60,11 +60,11 @@ router.post(
       .isLength({ min: 1, max: 5 })
       .withMessage('Symbole de devise invalide.'),
     body('fromUserId')
-      .optional()
+      .optional({ nullable: true })
       .isMongoId()
       .withMessage('fromUserId doit être un ObjectId Mongo valide.'),
     body('toUserId')
-      .optional()
+      .optional({ nullable: true })
       .isMongoId()
       .withMessage('toUserId doit être un ObjectId Mongo valide.'),
     body('reason')
