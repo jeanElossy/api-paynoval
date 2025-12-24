@@ -9,25 +9,16 @@ const { getUsersConn, getTxConn } = require('../config/db');
 const config = require('../config');
 const logger = require('../utils/logger');
 
-const User = require('../models/User')(getUsersConn());
-const Balance = require('../models/Balance')(getUsersConn());
-const Transaction = require('../models/Transaction')(getTxConn());
+const usersConn = getUsersConn();
+const txConn = getTxConn();
 
-const sanitize = (text) =>
-  String(text || '').replace(/[<>\\/{};]/g, '').trim();
+const User = require('../models/User')(usersConn);
+const Balance = require('../models/Balance')(usersConn);
+const Transaction = require('../models/Transaction')(txConn);
 
+const sanitize = (text) => String(text || '').replace(/[<>\\/{};]/g, '').trim();
 const ADMIN_EMAIL = config.adminEmail || 'admin@paynoval.com';
 
-/**
- * Détermine le "mode" d'une opération interne.
- *
- * - credit       : crédit wallet uniquement (bonus, cashback, etc.)
- * - debit        : débit wallet + crédit admin (ajustement négatif)
- * - transfer     : fromUser -> toUser
- * - debit_only   : débit wallet uniquement (ex: cagnotte_participation → vault géré ailleurs)
- * - log-only     : aucune écriture sur les balances, juste un log Transaction
- * - generic      : opérations particulières gérées au cas par cas
- */
 function resolveKind(kind) {
   switch (kind) {
     case 'bonus':
@@ -43,10 +34,6 @@ function resolveKind(kind) {
       return { mode: 'transfer' };
 
     case 'cagnotte_participation':
-      // 💡 Participation cagnotte :
-      // - on DÉBITE le wallet du participant (fromUserId)
-      // - le CRÉDIT du coffre (Vault) est géré dans le backend principal (cagnottes)
-      //   mais on trace le vault comme "receiver" dans Transaction.
       return { mode: 'debit_only' };
 
     case 'generic':
@@ -55,10 +42,36 @@ function resolveKind(kind) {
   }
 }
 
+function getCorrelationId(req) {
+  return (
+    req.headers['x-correlation-id'] ||
+    req.headers['x-request-id'] ||
+    crypto.randomBytes(8).toString('hex')
+  );
+}
+
+function ensureDbReady() {
+  // 1 = connected
+  const usersReady = usersConn?.readyState === 1;
+  const txReady = txConn?.readyState === 1;
+
+  return { usersReady, txReady, usersState: usersConn?.readyState, txState: txConn?.readyState };
+}
+
 /**
- * Création d’une Transaction interne (log) avec possibilité de forcer
- * le receiver (ID + nom) pour les cas "vault".
+ * IdempotencyKey: header "Idempotency-Key" (ou "idempotency-key")
+ * fallback metadata.idempotencyKey
  */
+function getIdempotencyKey(req, metadata) {
+  const h =
+    req.headers['idempotency-key'] ||
+    req.headers['Idempotency-Key'] ||
+    req.headers['x-idempotency-key'] ||
+    null;
+
+  return (h && String(h).trim()) || (metadata && metadata.idempotencyKey ? String(metadata.idempotencyKey).trim() : null);
+}
+
 async function createInternalTransactionDocument({
   session,
   kind,
@@ -75,6 +88,7 @@ async function createInternalTransactionDocument({
   metadata,
   receiverOverrideId,
   receiverOverrideName,
+  idempotencyKey,
 }) {
   const now = new Date();
   const senderName = senderUser.fullName || senderUser.email;
@@ -89,9 +103,7 @@ async function createInternalTransactionDocument({
       ? receiverUser.fullName || receiverUser.email
       : 'Système PayNoval');
 
-  const decAmount = mongoose.Types.Decimal128.fromString(
-    Number(amount).toFixed(2)
-  );
+  const decAmount = mongoose.Types.Decimal128.fromString(Number(amount).toFixed(2));
   const decFees = mongoose.Types.Decimal128.fromString('0.00');
   const decNet = decAmount;
   const decLocal = decAmount;
@@ -105,6 +117,7 @@ async function createInternalTransactionDocument({
     context: context || null,
     contextId: contextId || null,
     receiverType: receiverOverrideId ? 'vault' : 'user',
+    ...(idempotencyKey ? { idempotencyKey } : {}),
   });
 
   const securityQuestion = `INTERNAL:${kind}`;
@@ -126,7 +139,6 @@ async function createInternalTransactionDocument({
         senderName,
         senderEmail: senderUser.email,
         nameDestinataire: receiverName,
-        // Pour un vault, pas d'email spécifique
         recipientEmail: receiverUser ? receiverUser.email : null,
         country: sanitize(country || senderUser.country || 'Unknown'),
         securityQuestion,
@@ -135,8 +147,7 @@ async function createInternalTransactionDocument({
         funds: 'paynoval',
         status: 'confirmed',
         confirmedAt: now,
-        description:
-          description || reason || `Opération interne: ${kind}`,
+        description: description || reason || `Opération interne: ${kind}`,
         orderId: orderId || null,
         metadata: txMetadata,
         feeSnapshot: {
@@ -163,6 +174,22 @@ async function createInternalTransactionDocument({
  * POST /api/v1/internal-payments
  */
 exports.createInternalPayment = async (req, res, next) => {
+  const correlationId = getCorrelationId(req);
+
+  // ✅ timeout serveur (évite request infinie)
+  res.setTimeout(70_000);
+
+  // ✅ DB readiness (fail fast)
+  const db = ensureDbReady();
+  if (!db.usersReady || !db.txReady) {
+    logger.error('[internal-payments] DB not ready', { correlationId, ...db });
+    return res.status(503).json({
+      success: false,
+      error: 'Base de données indisponible (connexion en cours). Réessayez.',
+      details: { correlationId, db },
+    });
+  }
+
   const session = await mongoose.startSession();
   try {
     session.startTransaction();
@@ -184,75 +211,94 @@ exports.createInternalPayment = async (req, res, next) => {
       targetVaultName,
     } = req.body;
 
+    const idempotencyKey = getIdempotencyKey(req, metadata);
+
+    logger.info('[internal-payments] start', {
+      correlationId,
+      kind,
+      amount,
+      currencySymbol,
+      fromUserId,
+      toUserId,
+      context,
+      contextId,
+      orderId,
+      idempotencyKey,
+    });
+
     const amt = Number(amount);
     if (!amt || Number.isNaN(amt) || amt <= 0) {
       throw createError(400, 'Montant interne invalide.');
     }
     if (amt > 1_000_000_000) {
-      throw createError(
-        400,
-        'Montant interne trop élevé (limite de sécurité).'
-      );
+      throw createError(400, 'Montant interne trop élevé (limite de sécurité).');
     }
 
     const { mode } = resolveKind(kind);
     const isLogOnly = mode === 'log-only';
     const isDebitOnly = mode === 'debit_only';
 
+    // ✅ Idempotency (anti double-débit en cas de retry/timeouts)
+    if (idempotencyKey) {
+      const existing = await Transaction.findOne({ 'metadata.idempotencyKey': idempotencyKey })
+        .session(session)
+        .select('_id reference metadata sender receiver amount status confirmedAt')
+        .lean();
+
+      if (existing) {
+        await session.commitTransaction();
+        session.endSession();
+
+        logger.warn('[internal-payments] idempotent-hit', { correlationId, idempotencyKey, txId: existing._id });
+
+        return res.status(200).json({
+          success: true,
+          idempotent: true,
+          transactionId: String(existing._id),
+          reference: existing.reference,
+          kind,
+          mode,
+        });
+      }
+    }
+
     // 🔍 Règles de validation selon le mode
     if (mode === 'transfer') {
       if (!fromUserId || !toUserId) {
-        throw createError(
-          400,
-          'fromUserId et toUserId sont requis pour un transfert interne.'
-        );
+        throw createError(400, 'fromUserId et toUserId sont requis pour un transfert interne.');
       }
       if (String(fromUserId) === String(toUserId)) {
-        throw createError(
-          400,
-          'fromUserId et toUserId ne peuvent pas être identiques.'
-        );
+        throw createError(400, 'fromUserId et toUserId ne peuvent pas être identiques.');
       }
     }
 
     if (mode === 'credit' && !toUserId) {
-      throw createError(
-        400,
-        'toUserId est requis pour un crédit interne (bonus, cashback).'
-      );
+      throw createError(400, 'toUserId est requis pour un crédit interne (bonus, cashback).');
     }
 
     if ((mode === 'debit' || isDebitOnly) && !fromUserId) {
-      throw createError(
-        400,
-        'fromUserId est requis pour un débit interne.'
-      );
+      throw createError(400, 'fromUserId est requis pour un débit interne.');
     }
 
     if (mode === 'generic' && !fromUserId && !toUserId) {
-      throw createError(
-        400,
-        'Au moins fromUserId ou toUserId doit être renseigné pour une opération générique.'
-      );
+      throw createError(400, 'Au moins fromUserId ou toUserId doit être renseigné pour une opération générique.');
     }
 
-    // 👤 Admin "technique"
+    logger.info('[internal-payments] load-admin', { correlationId });
+
     const adminUser = await User.findOne({ email: ADMIN_EMAIL })
       .select('_id email fullName country')
       .session(session);
 
     if (!adminUser) {
-      throw createError(
-        500,
-        `Compte administrateur "${ADMIN_EMAIL}" introuvable.`
-      );
+      throw createError(500, `Compte administrateur "${ADMIN_EMAIL}" introuvable.`);
     }
 
-    // 👤 Chargement des users
     let fromUser = null;
     let toUser = null;
 
     if (fromUserId) {
+      logger.info('[internal-payments] load-fromUser', { correlationId, fromUserId });
       fromUser = await User.findById(fromUserId)
         .select('_id email fullName country')
         .session(session);
@@ -262,6 +308,7 @@ exports.createInternalPayment = async (req, res, next) => {
     }
 
     if (toUserId) {
+      logger.info('[internal-payments] load-toUser', { correlationId, toUserId });
       toUser = await User.findById(toUserId)
         .select('_id email fullName country')
         .session(session);
@@ -270,32 +317,18 @@ exports.createInternalPayment = async (req, res, next) => {
       }
     }
 
-    // Ajustements de rôles selon le mode
-    if (mode === 'credit' && !fromUser) {
-      fromUser = adminUser;
-    }
-
-    if (mode === 'debit' && !toUser) {
-      // Pour un "débit classique" on crédite l'admin
-      toUser = adminUser;
-    }
+    // Ajustements selon mode
+    if (mode === 'credit' && !fromUser) fromUser = adminUser;
+    if (mode === 'debit' && !toUser) toUser = adminUser;
 
     if (isDebitOnly) {
-      // 💡 cas cagnotte_participation :
-      // - fromUser = participant (obligatoire)
-      // - pas de crédit sur Balance
       if (!fromUser) {
-        throw createError(
-          500,
-          'fromUser introuvable pour une opération debit_only.'
-        );
+        throw createError(500, 'fromUser introuvable pour une opération debit_only.');
       }
-      // Ici on NE change pas toUser (il peut rester null),
-      // car le receiver sera overridé par le vault.
       toUser = null;
     }
 
-    // 🧾 Mode "log-only" (pour compat, pas utilisé pour cagnotte_participation)
+    // 🧾 Log-only
     if (isLogOnly) {
       const sender = fromUser || adminUser;
       const receiver = adminUser;
@@ -316,6 +349,7 @@ exports.createInternalPayment = async (req, res, next) => {
         metadata,
         receiverOverrideId: null,
         receiverOverrideName: null,
+        idempotencyKey,
       });
 
       await session.commitTransaction();
@@ -329,24 +363,21 @@ exports.createInternalPayment = async (req, res, next) => {
       });
     }
 
-    // 💰 Mouvements de solde
-    // Débit (debit, transfer, debit_only)
+    // 💰 Débit (debit, transfer, debit_only)
     if (mode === 'debit' || mode === 'transfer' || isDebitOnly) {
       const sourceUser = fromUser || adminUser;
 
-      const balanceFrom = await Balance.findOne({ user: sourceUser._id })
-        .session(session);
+      logger.info('[internal-payments] check-balance', { correlationId, userId: String(sourceUser._id), amt });
 
-      const currentBalance = balanceFrom
-        ? parseFloat(balanceFrom.amount.toString())
-        : 0;
+      const balanceFrom = await Balance.findOne({ user: sourceUser._id }).session(session);
+
+      const currentBalance = balanceFrom ? parseFloat(balanceFrom.amount.toString()) : 0;
 
       if (currentBalance < amt) {
-        throw createError(
-          400,
-          'Solde insuffisant pour l’opération interne.'
-        );
+        throw createError(400, 'Solde insuffisant pour l’opération interne.');
       }
+
+      logger.info('[internal-payments] debit', { correlationId, userId: String(sourceUser._id), amt });
 
       const updatedFrom = await Balance.findOneAndUpdate(
         { user: sourceUser._id },
@@ -359,9 +390,11 @@ exports.createInternalPayment = async (req, res, next) => {
       }
     }
 
-    // Crédit (credit, transfer) – ⚠️ PAS pour debit_only
+    // ✅ Crédit (credit, transfer) – PAS pour debit_only
     if (mode === 'credit' || mode === 'transfer') {
       const targetUser = toUser || adminUser;
+
+      logger.info('[internal-payments] credit', { correlationId, userId: String(targetUser._id), amt });
 
       const updatedTo = await Balance.findOneAndUpdate(
         { user: targetUser._id },
@@ -374,20 +407,15 @@ exports.createInternalPayment = async (req, res, next) => {
       }
     }
 
-    // 🧾 Transaction interne pour l’historique
     const senderUser = fromUser || adminUser;
     const receiverUser = toUser || adminUser;
 
-    // 🎯 Override receiver quand c'est une participation cagnotte
-    const receiverOverrideId = isDebitOnly
-      ? targetVaultId || contextId || null
+    const receiverOverrideId = isDebitOnly ? (targetVaultId || contextId || null) : null;
+    const receiverOverrideName = isDebitOnly
+      ? (targetVaultName || (metadata && metadata.vaultName) || 'Coffre Cagnotte')
       : null;
 
-    const receiverOverrideName = isDebitOnly
-      ? targetVaultName ||
-        (metadata && metadata.vaultName) ||
-        'Coffre Cagnotte'
-      : null;
+    logger.info('[internal-payments] create-tx-doc', { correlationId, receiverOverrideId, receiverOverrideName });
 
     const tx = await createInternalTransactionDocument({
       session,
@@ -405,10 +433,13 @@ exports.createInternalPayment = async (req, res, next) => {
       metadata,
       receiverOverrideId,
       receiverOverrideName,
+      idempotencyKey,
     });
 
     await session.commitTransaction();
     session.endSession();
+
+    logger.info('[internal-payments] done', { correlationId, txId: String(tx._id), ref: tx.reference });
 
     return res.status(201).json({
       success: true,
@@ -422,8 +453,15 @@ exports.createInternalPayment = async (req, res, next) => {
       await session.abortTransaction();
       session.endSession();
     } catch (e) {
-      logger.error('[internal-payments] rollback error:', e);
+      logger.error('[internal-payments] rollback error', { message: e?.message || e });
     }
+
+    logger.error('[internal-payments] error', {
+      correlationId,
+      message: err.message,
+      stack: err.stack,
+    });
+
     return next(err);
   }
 };
