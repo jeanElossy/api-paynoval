@@ -422,6 +422,234 @@ exports.getTransactionController = async (req, res, next) => {
 /* INITIATE (PayNoval -> PayNoval)                                     */
 /* ------------------------------------------------------------------ */
 
+// exports.initiateInternal = async (req, res, next) => {
+//   const session = await startTxSession();
+//   try {
+//     if (CAN_USE_SHARED_SESSION) session.startTransaction();
+
+//     const {
+//       toEmail,
+//       amount,
+//       senderCurrencySymbol,
+//       localCurrencySymbol,
+//       recipientInfo = {},
+//       description = '',
+//       question,
+//       securityCode,
+//       destination,
+//       funds,
+//       country,
+//     } = req.body;
+
+//     const cleanEmail = String(toEmail || '').trim().toLowerCase();
+//     if (!cleanEmail || !isEmailLike(cleanEmail)) throw createError(400, 'Email du destinataire requis');
+
+//     if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
+//     if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
+//     if (description && description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
+
+//     const authHeader = req.headers.authorization;
+//     if (!authHeader || !authHeader.startsWith('Bearer ')) throw createError(401, 'Token manquant');
+
+//     const senderId = req.user.id;
+
+//     // validations (service)
+//     await validationService.validateTransactionAmount({ amount: amount });
+//     await validationService.detectBasicFraud({
+//       sender: senderId,
+//       receiver: cleanEmail,
+//       amount: amount,
+//       currency: senderCurrencySymbol,
+//     });
+
+//     const amt = toFloat(amount);
+//     if (!amt || Number.isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
+
+//     const sessOpts = maybeSessionOpts(session);
+
+//     // Sender + receiver
+//     const senderUser = await User.findById(senderId)
+//       .select('fullName email')
+//       .lean()
+//       .session(sessOpts.session || null);
+//     if (!senderUser) throw createError(403, 'Utilisateur invalide');
+
+//     const receiver = await User.findOne({ email: cleanEmail })
+//       .select('_id fullName email')
+//       .lean()
+//       .session(sessOpts.session || null);
+//     if (!receiver) throw createError(404, 'Destinataire introuvable');
+
+//     if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
+
+//     // Gateway base + simulate fees
+//     let gatewayBase = (GATEWAY_URL || process.env.GATEWAY_URL || 'https://api-gateway-8cgy.onrender.com').replace(
+//       /\/+$/,
+//       ''
+//     );
+//     if (!gatewayBase.endsWith('/api/v1')) gatewayBase = `${gatewayBase}/api/v1`;
+
+//     const feeUrl = `${gatewayBase}/fees/simulate`;
+//     const simulateParams = {
+//       provider: 'paynoval',
+//       amount: amt,
+//       fromCurrency: senderCurrencySymbol,
+//       toCurrency: localCurrencySymbol,
+//       country,
+//     };
+
+//     let feeData;
+//     try {
+//       const feeRes = await axios.get(feeUrl, {
+//         params: simulateParams,
+//         headers: {
+//           Authorization: authHeader,
+//           ...(INTERNAL_TOKEN ? { 'x-internal-token': INTERNAL_TOKEN } : {}),
+//         },
+//         timeout: 10000,
+//       });
+
+//       if (!feeRes.data || feeRes.data.success === false) {
+//         throw createError(502, 'Erreur calcul frais (gateway)');
+//       }
+//       feeData = feeRes.data.data;
+//     } catch (e) {
+//       logger.error('[fees/simulate] échec appel Gateway', {
+//         url: feeUrl,
+//         params: simulateParams,
+//         status: e.response?.status,
+//         responseData: e.response?.data,
+//       });
+//       throw createError(502, 'Service de calcul des frais indisponible');
+//     }
+
+//     const fee = round2(toFloat(feeData.fees));
+//     const netAmount = round2(toFloat(feeData.netAfterFees));
+//     const feeId = feeData.feeId || null;
+//     const feeSnapshot = feeData;
+
+//     // ✅ Débit expéditeur atomique (solde >= amt)
+//     const debited = await Balance.findOneAndUpdate(
+//       { user: senderId, amount: { $gte: amt } },
+//       { $inc: { amount: -amt } },
+//       { new: true, ...sessOpts }
+//     );
+
+//     if (!debited) {
+//       throw createError(400, 'Solde insuffisant');
+//     }
+
+//     // Crédit admin sur fees (CAD)
+//     let adminFeeInCAD = 0;
+//     if (fee > 0) {
+//       const { converted } = await convertAmount(senderCurrencySymbol, 'CAD', fee);
+//       adminFeeInCAD = round2(converted);
+//     }
+
+//     const adminEmail = 'admin@paynoval.com';
+//     const adminUser = await User.findOne({ email: adminEmail }).select('_id').session(sessOpts.session || null);
+//     if (!adminUser) throw createError(500, 'Compte administrateur introuvable');
+
+//     if (adminFeeInCAD > 0) {
+//       await Balance.findOneAndUpdate(
+//         { user: adminUser._id },
+//         { $inc: { amount: adminFeeInCAD } },
+//         { new: true, upsert: true, ...sessOpts }
+//       );
+//     }
+
+//     // Conversion du NET vers devise destinataire (priorité snapshot gateway)
+//     let rateUsed = null;
+//     let convertedLocalNet = null;
+
+//     if (
+//       feeSnapshot &&
+//       feeSnapshot.convertedNetAfterFees !== undefined &&
+//       feeSnapshot.convertedNetAfterFees !== null
+//     ) {
+//       rateUsed = toFloat(feeSnapshot.exchangeRate, null);
+//       convertedLocalNet = round2(toFloat(feeSnapshot.convertedNetAfterFees));
+//     }
+
+//     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
+//       const { rate, converted } = await convertAmount(senderCurrencySymbol, localCurrencySymbol, netAmount);
+//       rateUsed = rate;
+//       convertedLocalNet = round2(converted);
+//     }
+
+//     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
+//       throw createError(500, 'Conversion devise échouée (montant local invalide)');
+//     }
+
+//     const decAmt = dec2(amt);
+//     const decFees = dec2(fee);
+//     const decNet = dec2(netAmount);
+//     const decLocal = dec2(convertedLocalNet);
+//     const decExchange = mongoose.Types.Decimal128.fromString(String(rateUsed || 1));
+
+//     const nameDest =
+//       recipientInfo.name && sanitize(recipientInfo.name) ? sanitize(recipientInfo.name) : receiver.fullName;
+
+//     const reference = await generateTransactionRef();
+
+//     // ✅ Stockage SHA-256 dans le champ existant securityCode (compatible anciens)
+//     const storedSecurityCode = sha256Hex(String(securityCode).replace(/[<>\\/{};]/g, '').trim());
+
+//     const [tx] = await Transaction.create(
+//       [
+//         {
+//           reference,
+//           sender: senderUser._id,
+//           receiver: receiver._id,
+//           amount: decAmt,
+//           transactionFees: decFees,
+//           netAmount: decNet,
+//           feeSnapshot,
+//           feeId,
+//           senderCurrencySymbol: sanitize(senderCurrencySymbol),
+//           exchangeRate: decExchange,
+//           localAmount: decLocal, // ✅ montant réellement crédité
+//           localCurrencySymbol: sanitize(localCurrencySymbol),
+//           senderName: senderUser.fullName,
+//           senderEmail: senderUser.email,
+//           nameDestinataire: nameDest,
+//           recipientEmail: cleanEmail,
+//           country: sanitize(country),
+//           description: sanitize(description),
+//           securityQuestion: sanitize(question),
+//           securityCode: storedSecurityCode, // ✅ hashed
+//           destination: sanitize(destination),
+//           funds: sanitize(funds),
+//           status: 'pending',
+//           attemptCount: 0,
+//           lockedUntil: null,
+//         },
+//       ],
+//       sessOpts
+//     );
+
+//     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
+
+//     if (CAN_USE_SHARED_SESSION) {
+//       await session.commitTransaction();
+//     }
+//     session.endSession();
+
+//     return res.status(201).json({
+//       success: true,
+//       transactionId: tx._id.toString(),
+//       reference: tx.reference,
+//       adminFeeInCAD,
+//     });
+//   } catch (err) {
+//     try {
+//       if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+//     } catch {}
+//     session.endSession();
+//     return next(err);
+//   }
+// };
+
 exports.initiateInternal = async (req, res, next) => {
   const session = await startTxSession();
   try {
@@ -453,17 +681,20 @@ exports.initiateInternal = async (req, res, next) => {
 
     const senderId = req.user.id;
 
-    // validations (service)
-    await validationService.validateTransactionAmount({ amount: amount });
-    await validationService.detectBasicFraud({
-      sender: senderId,
-      receiver: cleanEmail,
-      amount: amount,
-      currency: senderCurrencySymbol,
-    });
-
+    // ✅ convertir et valider le montant d’abord
     const amt = toFloat(amount);
     if (!amt || Number.isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
+
+    // validations (service)
+    await validationService.validateTransactionAmount({ amount: amt });
+
+    // ✅ FIX Cast ObjectId: on passe receiverEmail (string) au service anti-fraude
+    await validationService.detectBasicFraud({
+      sender: senderId,
+      receiverEmail: cleanEmail,
+      amount: amt,
+      currency: senderCurrencySymbol,
+    });
 
     const sessOpts = maybeSessionOpts(session);
 
@@ -562,11 +793,7 @@ exports.initiateInternal = async (req, res, next) => {
     let rateUsed = null;
     let convertedLocalNet = null;
 
-    if (
-      feeSnapshot &&
-      feeSnapshot.convertedNetAfterFees !== undefined &&
-      feeSnapshot.convertedNetAfterFees !== null
-    ) {
+    if (feeSnapshot && feeSnapshot.convertedNetAfterFees !== undefined && feeSnapshot.convertedNetAfterFees !== null) {
       rateUsed = toFloat(feeSnapshot.exchangeRate, null);
       convertedLocalNet = round2(toFloat(feeSnapshot.convertedNetAfterFees));
     }
@@ -592,7 +819,6 @@ exports.initiateInternal = async (req, res, next) => {
 
     const reference = await generateTransactionRef();
 
-    // ✅ Stockage SHA-256 dans le champ existant securityCode (compatible anciens)
     const storedSecurityCode = sha256Hex(String(securityCode).replace(/[<>\\/{};]/g, '').trim());
 
     const [tx] = await Transaction.create(
@@ -608,7 +834,7 @@ exports.initiateInternal = async (req, res, next) => {
           feeId,
           senderCurrencySymbol: sanitize(senderCurrencySymbol),
           exchangeRate: decExchange,
-          localAmount: decLocal, // ✅ montant réellement crédité
+          localAmount: decLocal,
           localCurrencySymbol: sanitize(localCurrencySymbol),
           senderName: senderUser.fullName,
           senderEmail: senderUser.email,
@@ -617,7 +843,7 @@ exports.initiateInternal = async (req, res, next) => {
           country: sanitize(country),
           description: sanitize(description),
           securityQuestion: sanitize(question),
-          securityCode: storedSecurityCode, // ✅ hashed
+          securityCode: storedSecurityCode,
           destination: sanitize(destination),
           funds: sanitize(funds),
           status: 'pending',
@@ -649,6 +875,10 @@ exports.initiateInternal = async (req, res, next) => {
     return next(err);
   }
 };
+
+
+
+
 
 /* ------------------------------------------------------------------ */
 /* CONFIRM                                                             */
