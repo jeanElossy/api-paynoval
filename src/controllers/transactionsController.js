@@ -1,4 +1,4 @@
-// File: src/controllers/transactionsController.js
+// File: api paynoval microservice paynoval src/controllers/transactionsController.js
 'use strict';
 
 /**
@@ -7,20 +7,42 @@
  * - Initiation PayNoval -> PayNoval : débit expéditeur, calcul frais (Gateway), stockage tx.
  * - Confirmation (destinataire) : vérif code sécurité, crédit destinataire dans SA devise locale.
  * - Annulation / remboursement / actions admin : gestion avancée.
+ *
+ * ✅ Correctifs apportés :
+ * 1) Sessions Mongo robustes avec multi-connections (usersConn / txConn) :
+ *    - Détection si les 2 connexions partagent le même client pour pouvoir utiliser une transaction Mongo.
+ *    - Sinon, on évite de passer un session incompatible (qui crash), et on fait “best effort”.
+ *
+ * 2) Débit/Crédit atomiques anti race-condition :
+ *    - Débit expéditeur via findOneAndUpdate conditionnel (solde >= montant).
+ *    - Refund/admin/receiver crédités de manière plus sûre.
+ *
+ * 3) Sécurité code :
+ *    - On stocke maintenant le code de sécurité en SHA-256 (dans le champ securityCode existant),
+ *      tout en gardant la compatibilité avec les anciennes tx (plain) lors de la confirmation.
+ *
+ * 4) Annulation automatique après 3 mauvais codes => remboursement du NET à l’expéditeur :
+ *    - Avant : status=cancelled mais aucun remboursement.
+ *    - Maintenant : refund du netAmount (frais conservés) + notifications.
  */
 
 const axios = require('axios');
 const config = require('../config');
 const mongoose = require('mongoose');
 const createError = require('http-errors');
+const crypto = require('crypto');
+
 const { getUsersConn, getTxConn } = require('../config/db');
 const validationService = require('../services/validationService');
 
-const User = require('../models/User')(getUsersConn());
-const Notification = require('../models/Notification')(getUsersConn());
-const Outbox = require('../models/Outbox')(getUsersConn());
-const Transaction = require('../models/Transaction')(getTxConn());
-const Balance = require('../models/Balance')(getUsersConn());
+const usersConn = getUsersConn();
+const txConn = getTxConn();
+
+const User = require('../models/User')(usersConn);
+const Notification = require('../models/Notification')(usersConn);
+const Outbox = require('../models/Outbox')(usersConn);
+const Transaction = require('../models/Transaction')(txConn);
+const Balance = require('../models/Balance')(usersConn);
 
 const logger = require('../utils/logger');
 const { notifyTransactionViaGateway } = require('../services/notifyGateway');
@@ -30,6 +52,9 @@ const generateTransactionRef = require('../utils/generateRef');
 const PRINCIPAL_URL = config.principalUrl;
 const GATEWAY_URL = config.gatewayUrl;
 
+const INTERNAL_TOKEN =
+  process.env.INTERNAL_TOKEN || config.internalToken || '';
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -38,10 +63,15 @@ const GATEWAY_URL = config.gatewayUrl;
  * Nettoie un texte simple (anti injection / caractères dangereux).
  * NB: ce n’est pas un sanitize HTML complet, juste une protection légère.
  */
-const sanitize = (text) =>
-  String(text || '').replace(/[<>\\/{};]/g, '').trim();
+const sanitize = (text) => String(text || '').replace(/[<>\\/{};]/g, '').trim();
 
 const MAX_DESC_LENGTH = 500;
+
+function isEmailLike(v) {
+  const s = String(v || '').trim().toLowerCase();
+  // Simple check (volontairement léger)
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
 
 /**
  * Convertit proprement un nombre (string/Decimal128/number) en float.
@@ -49,7 +79,8 @@ const MAX_DESC_LENGTH = 500;
 function toFloat(v, fallback = 0) {
   try {
     if (v === null || v === undefined) return fallback;
-    const n = parseFloat(String(v));
+    // Decimal128 -> string -> parseFloat ok
+    const n = parseFloat(String(v).replace(',', '.'));
     return Number.isFinite(n) ? n : fallback;
   } catch {
     return fallback;
@@ -72,6 +103,44 @@ function dec2(n) {
   return mongoose.Types.Decimal128.fromString(round2(n).toFixed(2));
 }
 
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value || '').trim()).digest('hex');
+}
+
+function looksLikeSha256Hex(v) {
+  return typeof v === 'string' && /^[a-f0-9]{64}$/i.test(v);
+}
+
+/**
+ * Sessions multi-conn :
+ * - Si usersConn et txConn partagent le même client Mongo, on peut utiliser une transaction multi-DB.
+ * - Sinon, on évite de passer un session incompatible aux modèles (sinon crash).
+ */
+function sameMongoClient(connA, connB) {
+  try {
+    const a = connA?.getClient?.();
+    const b = connB?.getClient?.();
+    return !!a && !!b && a === b;
+  } catch {
+    return false;
+  }
+}
+
+const CAN_USE_SHARED_SESSION = sameMongoClient(usersConn, txConn);
+
+async function startTxSession() {
+  // On démarre la session depuis txConn (Transaction est sur txConn)
+  if (typeof txConn?.startSession === 'function') {
+    return txConn.startSession();
+  }
+  // fallback
+  return mongoose.startSession();
+}
+
+function maybeSessionOpts(session) {
+  return CAN_USE_SHARED_SESSION && session ? { session } : {};
+}
+
 /* ------------------------------------------------------------------ */
 /* Notifications (push + in-app + outbox + email via gateway)          */
 /* ------------------------------------------------------------------ */
@@ -83,26 +152,37 @@ function dec2(n) {
  */
 async function notifyParties(tx, status, session, senderCurrencySymbol) {
   try {
-    // 1) Récupérer expéditeur et destinataire (infos utiles notifications)
+    const sessOpts = maybeSessionOpts(session);
+
+    // 1) Récupérer expéditeur et destinataire
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender)
         .select('email fullName pushTokens notificationSettings')
-        .lean(),
+        .lean()
+        .session(sessOpts.session || null)
+        .catch(() => null),
       User.findById(tx.receiver)
         .select('email fullName pushTokens notificationSettings')
-        .lean(),
+        .lean()
+        .session(sessOpts.session || null)
+        .catch(() => null),
     ]);
 
     if (!sender || !receiver) return;
 
-    // 2) Construire liens + payloads
+    // 2) Liens + payloads
     const dateStr = new Date().toLocaleString('fr-FR');
-    const webLink = `${PRINCIPAL_URL}/confirm/${tx._id}?token=${tx.verificationToken}`;
-    const mobileLink = `paynoval://confirm/${tx._id}?token=${tx.verificationToken}`;
+    const token = tx.verificationToken ? String(tx.verificationToken) : '';
+    const webLink = token
+      ? `${PRINCIPAL_URL}/confirm/${tx._id}?token=${encodeURIComponent(token)}`
+      : `${PRINCIPAL_URL}/confirm/${tx._id}`;
+    const mobileLink = token
+      ? `paynoval://confirm/${tx._id}?token=${encodeURIComponent(token)}`
+      : `paynoval://confirm/${tx._id}`;
 
     const dataSender = {
       transactionId: tx._id.toString(),
-      amount: tx.amount.toString(),
+      amount: tx.amount?.toString?.() ? tx.amount.toString() : String(tx.amount || ''),
       currency: senderCurrencySymbol,
       name: sender.fullName,
       senderEmail: sender.email,
@@ -113,13 +193,10 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
       securityQuestion: tx.securityQuestion,
     };
 
-    /**
-     * ✅ IMPORTANT : dataReceiver.amount = tx.localAmount
-     * Ici tx.localAmount est le montant réellement crédité (net converti).
-     */
+    // ✅ IMPORTANT : dataReceiver.amount = tx.localAmount (montant réellement crédité)
     const dataReceiver = {
       transactionId: tx._id.toString(),
-      amount: tx.localAmount.toString(),
+      amount: tx.localAmount?.toString?.() ? tx.localAmount.toString() : String(tx.localAmount || ''),
       currency: tx.localCurrencySymbol,
       name: tx.nameDestinataire,
       receiverEmail: tx.recipientEmail,
@@ -131,37 +208,21 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
       senderName: sender.fullName,
     };
 
-    // 3) Lire settings notifications (fallback safe)
+    // 3) Settings notifications (fallback safe)
     const sSettings = sender.notificationSettings || {};
     const rSettings = receiver.notificationSettings || {};
 
     const {
-      channels: {
-        email: sEmailChan = true,
-        push: sPushChan = true,
-        inApp: sInAppChan = true,
-      } = {},
-      types: {
-        txSent: sTxSentType = true,
-        txReceived: sTxReceivedType = true,
-        txFailed: sTxFailedType = true,
-      } = {},
+      channels: { email: sEmailChan = true, push: sPushChan = true, inApp: sInAppChan = true } = {},
+      types: { txSent: sTxSentType = true, txReceived: sTxReceivedType = true, txFailed: sTxFailedType = true } = {},
     } = sSettings;
 
     const {
-      channels: {
-        email: rEmailChan = true,
-        push: rPushChan = true,
-        inApp: rInAppChan = true,
-      } = {},
-      types: {
-        txSent: rTxSentType = true,
-        txReceived: rTxReceivedType = true,
-        txFailed: rTxFailedType = true,
-      } = {},
+      channels: { email: rEmailChan = true, push: rPushChan = true, inApp: rInAppChan = true } = {},
+      types: { txSent: rTxSentType = true, txReceived: rTxReceivedType = true, txFailed: rTxFailedType = true } = {},
     } = rSettings;
 
-    // 4) Déterminer type notif selon statut
+    // 4) Type notif selon statut
     let sTypeKey;
     let rTypeKey;
     if (status === 'initiated' || status === 'confirmed') {
@@ -170,6 +231,9 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
     } else if (status === 'cancelled') {
       sTypeKey = 'txFailed';
       rTypeKey = 'txFailed';
+    } else {
+      sTypeKey = 'txSent';
+      rTypeKey = 'txReceived';
     }
 
     const statusTextMap = {
@@ -182,7 +246,7 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
     const messageForSender = `${statusText}\nMontant : ${dataSender.amount} ${dataSender.currency}`;
     const messageForReceiver = `${statusText}\nMontant : ${dataReceiver.amount} ${dataReceiver.currency}`;
 
-    // 5) Helper push via principal /internal/notify
+    // 5) Push via principal /internal/notify
     async function triggerPush(userId, message) {
       try {
         await axios.post(
@@ -191,31 +255,25 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
           {
             headers: {
               'Content-Type': 'application/json',
-              'x-internal-token': process.env.INTERNAL_TOKEN,
+              ...(INTERNAL_TOKEN ? { 'x-internal-token': INTERNAL_TOKEN } : {}),
             },
+            timeout: 8000,
           }
         );
       } catch (err) {
-        console.warn(`Échec push pour user ${userId} : ${err.message || err}`);
+        logger?.warn?.(`Échec push pour user ${userId} : ${err?.message || err}`) ||
+          console.warn(`Échec push pour user ${userId} : ${err?.message || err}`);
       }
     }
 
     // ------------------- Sender -------------------
-    if (
-      sPushChan &&
-      ((sTypeKey === 'txSent' && sTxSentType) ||
-        (sTypeKey === 'txFailed' && sTxFailedType))
-    ) {
+    if (sPushChan && ((sTypeKey === 'txSent' && sTxSentType) || (sTypeKey === 'txFailed' && sTxFailedType))) {
       if (sender.pushTokens && sender.pushTokens.length) {
         await triggerPush(sender._id.toString(), messageForSender);
       }
     }
 
-    if (
-      sInAppChan &&
-      ((sTypeKey === 'txSent' && sTxSentType) ||
-        (sTypeKey === 'txFailed' && sTxFailedType))
-    ) {
+    if (sInAppChan && ((sTypeKey === 'txSent' && sTxSentType) || (sTypeKey === 'txFailed' && sTxFailedType))) {
       await Notification.create(
         [
           {
@@ -226,26 +284,18 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
             date: new Date(),
           },
         ],
-        { session }
+        sessOpts
       );
     }
 
     // ------------------- Receiver -------------------
-    if (
-      rPushChan &&
-      ((rTypeKey === 'txReceived' && rTxReceivedType) ||
-        (rTypeKey === 'txFailed' && rTxFailedType))
-    ) {
+    if (rPushChan && ((rTypeKey === 'txReceived' && rTxReceivedType) || (rTypeKey === 'txFailed' && rTxFailedType))) {
       if (receiver.pushTokens && receiver.pushTokens.length) {
         await triggerPush(receiver._id.toString(), messageForReceiver);
       }
     }
 
-    if (
-      rInAppChan &&
-      ((rTypeKey === 'txReceived' && rTxReceivedType) ||
-        (rTypeKey === 'txFailed' && rTxFailedType))
-    ) {
+    if (rInAppChan && ((rTypeKey === 'txReceived' && rTxReceivedType) || (rTypeKey === 'txFailed' && rTxFailedType))) {
       await Notification.create(
         [
           {
@@ -256,44 +306,38 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
             date: new Date(),
           },
         ],
-        { session }
+        sessOpts
       );
     }
 
-    // 6) Outbox (pour replay / async processing)
+    // 6) Outbox (replay / async)
     const events = [sender, receiver].map((u) => ({
       service: 'notifications',
       event: `transaction_${status}`,
       payload: {
         userId: u._id.toString(),
         type: `transaction_${status}`,
-        data:
-          u._id.toString() === sender._id.toString()
-            ? dataSender
-            : dataReceiver,
+        data: u._id.toString() === sender._id.toString() ? dataSender : dataReceiver,
       },
     }));
-    await Outbox.insertMany(events, { session });
 
-    // 7) Emails via Gateway (SendGrid)
+    await Outbox.insertMany(events, sessOpts);
+
+    // 7) Emails via Gateway
     const shouldEmailSender =
-      sEmailChan &&
-      ((sTypeKey === 'txSent' && sTxSentType) ||
-        (sTypeKey === 'txFailed' && sTxFailedType));
+      sEmailChan && ((sTypeKey === 'txSent' && sTxSentType) || (sTypeKey === 'txFailed' && sTxFailedType));
 
     const shouldEmailReceiver =
-      rEmailChan &&
-      ((rTypeKey === 'txReceived' && rTxReceivedType) ||
-        (rTypeKey === 'txFailed' && rTxFailedType));
+      rEmailChan && ((rTypeKey === 'txReceived' && rTxReceivedType) || (rTypeKey === 'txFailed' && rTxFailedType));
 
     if (shouldEmailSender || shouldEmailReceiver) {
       const payloadForGateway = {
         transaction: {
           id: tx._id.toString(),
           reference: tx.reference,
-          amount: parseFloat(tx.amount.toString()),
+          amount: toFloat(tx.amount),
           currency: senderCurrencySymbol,
-          dateIso: tx.createdAt?.toISOString() || new Date().toISOString(),
+          dateIso: tx.createdAt?.toISOString?.() || new Date().toISOString(),
         },
         sender: {
           email: sender.email,
@@ -312,12 +356,14 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
         },
       };
 
-      notifyTransactionViaGateway(status, payloadForGateway).catch((err) =>
-        console.error('[notifyParties] Erreur notif via Gateway:', err?.message || err)
-      );
+      notifyTransactionViaGateway(status, payloadForGateway).catch((err) => {
+        logger?.error?.('[notifyParties] Erreur notif via Gateway:', err?.message || err) ||
+          console.error('[notifyParties] Erreur notif via Gateway:', err?.message || err);
+      });
     }
   } catch (err) {
-    console.error('notifyParties : erreur lors de l’envoi des notifications', err);
+    logger?.error?.('notifyParties : erreur lors de l’envoi des notifications', err) ||
+      console.error('notifyParties : erreur lors de l’envoi des notifications', err);
   }
 }
 
@@ -331,31 +377,18 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
  */
 exports.listInternal = async (req, res, next) => {
   try {
-    // 1) Pagination
     const userId = req.user.id;
     const skip = parseInt(req.query.skip, 10) || 0;
     const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
 
-    // 2) Query : expéditeur OU destinataire
-    const query = {
-      $or: [{ sender: userId }, { receiver: userId }],
-    };
+    const query = { $or: [{ sender: userId }, { receiver: userId }] };
 
-    // 3) Récupération + total
     const [txs, total] = await Promise.all([
       Transaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
       Transaction.countDocuments(query),
     ]);
 
-    // 4) Réponse
-    res.json({
-      success: true,
-      count: txs.length,
-      total,
-      data: txs,
-      skip,
-      limit,
-    });
+    res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
   } catch (err) {
     next(err);
   }
@@ -365,18 +398,13 @@ exports.listInternal = async (req, res, next) => {
 /* GET BY ID                                                           */
 /* ------------------------------------------------------------------ */
 
-/**
- * Retourne une transaction par ID (doit être sender OU receiver)
- */
 exports.getTransactionController = async (req, res, next) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
 
     const tx = await Transaction.findById(id).lean();
-    if (!tx) {
-      return res.status(404).json({ success: false, message: 'Transaction non trouvée' });
-    }
+    if (!tx) return res.status(404).json({ success: false, message: 'Transaction non trouvée' });
 
     const isSender = tx.sender?.toString() === userId;
     const isReceiver = tx.receiver?.toString() === userId;
@@ -394,20 +422,11 @@ exports.getTransactionController = async (req, res, next) => {
 /* INITIATE (PayNoval -> PayNoval)                                     */
 /* ------------------------------------------------------------------ */
 
-/**
- * INITIATE
- * - Vérifie inputs
- * - Appelle Gateway /fees/simulate pour frais + taux + net converti
- * - Débite expéditeur (montant brut)
- * - Crédite admin (fees convertis en CAD)
- * - Stocke Transaction (pending)
- */
 exports.initiateInternal = async (req, res, next) => {
-  const session = await mongoose.startSession();
+  const session = await startTxSession();
   try {
-    session.startTransaction();
+    if (CAN_USE_SHARED_SESSION) session.startTransaction();
 
-    // 1) Récupération body
     const {
       toEmail,
       amount,
@@ -422,55 +441,53 @@ exports.initiateInternal = async (req, res, next) => {
       country,
     } = req.body;
 
-    // 2) Validations basiques
-    if (!toEmail || !sanitize(toEmail)) throw createError(400, 'Email du destinataire requis');
+    const cleanEmail = String(toEmail || '').trim().toLowerCase();
+    if (!cleanEmail || !isEmailLike(cleanEmail)) throw createError(400, 'Email du destinataire requis');
+
     if (!question || !securityCode) throw createError(400, 'Question et code de sécurité requis');
     if (!destination || !funds || !country) throw createError(400, 'Données de transaction incomplètes');
     if (description && description.length > MAX_DESC_LENGTH) throw createError(400, 'Description trop longue');
 
-    // 3) Auth requis (pour forward gateway si besoin)
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) throw createError(401, 'Token manquant');
 
-    // 4) Vérification sender + receiver
     const senderId = req.user.id;
 
-    const senderUser = await User.findById(senderId)
-      .select('fullName email')
-      .lean()
-      .session(session);
-    if (!senderUser) throw createError(403, 'Utilisateur invalide');
-
-    const receiver = await User.findOne({ email: sanitize(toEmail) })
-      .select('_id fullName email')
-      .lean()
-      .session(session);
-    if (!receiver) throw createError(404, 'Destinataire introuvable');
-
-    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
-
-    // 5) Anti-fraude / validations (service)
-    await validationService.validateTransactionAmount({ amount: req.body.amount });
+    // validations (service)
+    await validationService.validateTransactionAmount({ amount: amount });
     await validationService.detectBasicFraud({
-      sender: req.user.id,
-      receiver: receiver._id,
-      amount: req.body.amount,
-      currency: req.body.senderCurrencySymbol,
+      sender: senderId,
+      receiver: cleanEmail,
+      amount: amount,
+      currency: senderCurrencySymbol,
     });
 
     const amt = toFloat(amount);
     if (!amt || Number.isNaN(amt) || amt <= 0) throw createError(400, 'Montant invalide');
 
-    // 6) Gateway base URL + /fees/simulate
-    let gatewayBase =
-      GATEWAY_URL ||
-      process.env.GATEWAY_URL ||
-      'https://api-gateway-8cgy.onrender.com';
+    const sessOpts = maybeSessionOpts(session);
 
-    gatewayBase = gatewayBase.replace(/\/+$/, '');
-    if (!gatewayBase.endsWith('/api/v1')) {
-      gatewayBase = `${gatewayBase}/api/v1`;
-    }
+    // Sender + receiver
+    const senderUser = await User.findById(senderId)
+      .select('fullName email')
+      .lean()
+      .session(sessOpts.session || null);
+    if (!senderUser) throw createError(403, 'Utilisateur invalide');
+
+    const receiver = await User.findOne({ email: cleanEmail })
+      .select('_id fullName email')
+      .lean()
+      .session(sessOpts.session || null);
+    if (!receiver) throw createError(404, 'Destinataire introuvable');
+
+    if (receiver._id.toString() === senderId) throw createError(400, 'Auto-transfert impossible');
+
+    // Gateway base + simulate fees
+    let gatewayBase = (GATEWAY_URL || process.env.GATEWAY_URL || 'https://api-gateway-8cgy.onrender.com').replace(
+      /\/+$/,
+      ''
+    );
+    if (!gatewayBase.endsWith('/api/v1')) gatewayBase = `${gatewayBase}/api/v1`;
 
     const feeUrl = `${gatewayBase}/fees/simulate`;
     const simulateParams = {
@@ -481,14 +498,13 @@ exports.initiateInternal = async (req, res, next) => {
       country,
     };
 
-    // 7) Appel Gateway pour récupérer fees + netAfterFees + convertedNetAfterFees
     let feeData;
     try {
       const feeRes = await axios.get(feeUrl, {
         params: simulateParams,
         headers: {
           Authorization: authHeader,
-          ...(process.env.INTERNAL_TOKEN ? { 'x-internal-token': process.env.INTERNAL_TOKEN } : {}),
+          ...(INTERNAL_TOKEN ? { 'x-internal-token': INTERNAL_TOKEN } : {}),
         },
         timeout: 10000,
       });
@@ -496,7 +512,6 @@ exports.initiateInternal = async (req, res, next) => {
       if (!feeRes.data || feeRes.data.success === false) {
         throw createError(502, 'Erreur calcul frais (gateway)');
       }
-
       feeData = feeRes.data.data;
     } catch (e) {
       logger.error('[fees/simulate] échec appel Gateway', {
@@ -508,29 +523,23 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(502, 'Service de calcul des frais indisponible');
     }
 
-    // 8) Lire frais / net (devises expéditeur)
     const fee = round2(toFloat(feeData.fees));
     const netAmount = round2(toFloat(feeData.netAfterFees));
     const feeId = feeData.feeId || null;
     const feeSnapshot = feeData;
 
-    // 9) Vérifier solde expéditeur, puis débiter le BRUT (amt)
-    const balDoc = await Balance.findOne({ user: senderId }).session(session);
-    const balanceFloat = toFloat(balDoc?.amount, 0);
-
-    if (balanceFloat < amt) {
-      throw createError(400, `Solde insuffisant : ${balanceFloat.toFixed(2)}`);
-    }
-
+    // ✅ Débit expéditeur atomique (solde >= amt)
     const debited = await Balance.findOneAndUpdate(
-      { user: senderId },
+      { user: senderId, amount: { $gte: amt } },
       { $inc: { amount: -amt } },
-      { new: true, session }
+      { new: true, ...sessOpts }
     );
 
-    if (!debited) throw createError(500, 'Erreur lors du débit du compte expéditeur');
+    if (!debited) {
+      throw createError(400, 'Solde insuffisant');
+    }
 
-    // 10) Crédit admin sur les fees (en CAD)
+    // Crédit admin sur fees (CAD)
     let adminFeeInCAD = 0;
     if (fee > 0) {
       const { converted } = await convertAmount(senderCurrencySymbol, 'CAD', fee);
@@ -538,48 +547,32 @@ exports.initiateInternal = async (req, res, next) => {
     }
 
     const adminEmail = 'admin@paynoval.com';
-    const adminUser = await User.findOne({ email: adminEmail })
-      .select('_id')
-      .session(session);
-
+    const adminUser = await User.findOne({ email: adminEmail }).select('_id').session(sessOpts.session || null);
     if (!adminUser) throw createError(500, 'Compte administrateur introuvable');
 
     if (adminFeeInCAD > 0) {
       await Balance.findOneAndUpdate(
         { user: adminUser._id },
         { $inc: { amount: adminFeeInCAD } },
-        { new: true, upsert: true, session }
+        { new: true, upsert: true, ...sessOpts }
       );
     }
 
-    /**
-     * ✅ 11) Conversion du NET après frais vers devise destinataire
-     * Priorité au snapshot gateway (même taux / cohérence).
-     * On veut un localAmount = net converti (montant crédité).
-     */
+    // Conversion du NET vers devise destinataire (priorité snapshot gateway)
     let rateUsed = null;
     let convertedLocalNet = null;
 
-    // Si le gateway fournit exchangeRate + convertedNetAfterFees => meilleur cas
     if (
       feeSnapshot &&
-      typeof feeSnapshot.exchangeRate === 'number' &&
-      Number.isFinite(feeSnapshot.exchangeRate) &&
-      feeSnapshot.convertedNetAfterFees !== undefined
+      feeSnapshot.convertedNetAfterFees !== undefined &&
+      feeSnapshot.convertedNetAfterFees !== null
     ) {
-      rateUsed = feeSnapshot.exchangeRate;
-      convertedLocalNet = round2(toFloat(feeSnapshot.convertedNetAfterFees));
-    } else if (feeSnapshot && feeSnapshot.convertedNetAfterFees !== undefined) {
-      // au cas où exchangeRate est string, on accepte quand même
       rateUsed = toFloat(feeSnapshot.exchangeRate, null);
       convertedLocalNet = round2(toFloat(feeSnapshot.convertedNetAfterFees));
-    } else {
-      // fallback : conversion live
-      const { rate, converted } = await convertAmount(
-        senderCurrencySymbol,
-        localCurrencySymbol,
-        netAmount
-      );
+    }
+
+    if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
+      const { rate, converted } = await convertAmount(senderCurrencySymbol, localCurrencySymbol, netAmount);
       rateUsed = rate;
       convertedLocalNet = round2(converted);
     }
@@ -588,23 +581,20 @@ exports.initiateInternal = async (req, res, next) => {
       throw createError(500, 'Conversion devise échouée (montant local invalide)');
     }
 
-    // 12) Construire champs Decimal128
     const decAmt = dec2(amt);
     const decFees = dec2(fee);
     const decNet = dec2(netAmount);
     const decLocal = dec2(convertedLocalNet);
     const decExchange = mongoose.Types.Decimal128.fromString(String(rateUsed || 1));
 
-    // 13) Nom destinataire
     const nameDest =
-      recipientInfo.name && sanitize(recipientInfo.name)
-        ? sanitize(recipientInfo.name)
-        : receiver.fullName;
+      recipientInfo.name && sanitize(recipientInfo.name) ? sanitize(recipientInfo.name) : receiver.fullName;
 
-    // 14) Référence unique tx
     const reference = await generateTransactionRef();
 
-    // 15) Création transaction en DB (status = pending)
+    // ✅ Stockage SHA-256 dans le champ existant securityCode (compatible anciens)
+    const storedSecurityCode = sha256Hex(String(securityCode).replace(/[<>\\/{};]/g, '').trim());
+
     const [tx] = await Transaction.create(
       [
         {
@@ -618,32 +608,33 @@ exports.initiateInternal = async (req, res, next) => {
           feeId,
           senderCurrencySymbol: sanitize(senderCurrencySymbol),
           exchangeRate: decExchange,
-          localAmount: decLocal, // ✅ montant réellement crédité en devise destinataire
+          localAmount: decLocal, // ✅ montant réellement crédité
           localCurrencySymbol: sanitize(localCurrencySymbol),
           senderName: senderUser.fullName,
           senderEmail: senderUser.email,
           nameDestinataire: nameDest,
-          recipientEmail: sanitize(toEmail),
+          recipientEmail: cleanEmail,
           country: sanitize(country),
           description: sanitize(description),
           securityQuestion: sanitize(question),
-          securityCode: sanitize(securityCode),
+          securityCode: storedSecurityCode, // ✅ hashed
           destination: sanitize(destination),
           funds: sanitize(funds),
           status: 'pending',
+          attemptCount: 0,
+          lockedUntil: null,
         },
       ],
-      { session }
+      sessOpts
     );
 
-    // 16) Notifier (sender + receiver)
     await notifyParties(tx, 'initiated', session, senderCurrencySymbol);
 
-    // 17) Commit transaction Mongo
-    await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
     session.endSession();
 
-    // 18) Réponse API
     return res.status(201).json({
       success: true,
       transactionId: tx._id.toString(),
@@ -651,7 +642,9 @@ exports.initiateInternal = async (req, res, next) => {
       adminFeeInCAD,
     });
   } catch (err) {
-    await session.abortTransaction();
+    try {
+      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+    } catch {}
     session.endSession();
     return next(err);
   }
@@ -661,30 +654,20 @@ exports.initiateInternal = async (req, res, next) => {
 /* CONFIRM                                                             */
 /* ------------------------------------------------------------------ */
 
-/**
- * CONFIRM
- * - Seul le destinataire peut confirmer
- * - Vérifie le code de sécurité + anti brute-force (attemptCount/lockedUntil)
- * - Crédite le destinataire en devise locale avec le NET CONVERTI
- */
 exports.confirmController = async (req, res, next) => {
-  const session = await mongoose.startSession();
+  const session = await startTxSession();
   try {
-    session.startTransaction();
+    if (CAN_USE_SHARED_SESSION) session.startTransaction();
 
-    // 1) Inputs obligatoires
     const { transactionId, securityCode } = req.body;
-    if (!transactionId || !securityCode) {
-      throw createError(400, 'transactionId et securityCode sont requis');
-    }
+    if (!transactionId || !securityCode) throw createError(400, 'transactionId et securityCode sont requis');
 
-    // 2) Auth obligatoire
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw createError(401, 'Token manquant');
-    }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) throw createError(401, 'Token manquant');
 
-    // 3) Charger la transaction (avec champs sensibles)
+    const sessOpts = maybeSessionOpts(session);
+
+    // Charger la transaction
     const tx = await Transaction.findById(transactionId)
       .select([
         '+securityCode',
@@ -693,7 +676,7 @@ exports.confirmController = async (req, res, next) => {
         '+netAmount',
         '+senderCurrencySymbol',
         '+localCurrencySymbol',
-        '+localAmount', // ✅ important
+        '+localAmount',
         '+receiver',
         '+sender',
         '+feeSnapshot',
@@ -703,18 +686,13 @@ exports.confirmController = async (req, res, next) => {
         '+lockedUntil',
         '+status',
       ])
-      .session(session);
+      .session(sessOpts.session || null);
 
     if (!tx) throw createError(400, 'Transaction introuvable');
 
-    // 4) Vérifier que le statut permet la confirmation
     validationService.validateTransactionStatusChange(tx.status, 'confirmed');
+    if (tx.status !== 'pending') throw createError(400, 'Transaction déjà traitée ou annulée');
 
-    if (tx.status !== 'pending') {
-      throw createError(400, 'Transaction déjà traitée ou annulée');
-    }
-
-    // 5) Anti brute-force : lock temporaire
     const now = new Date();
     if (tx.lockedUntil && tx.lockedUntil > now) {
       throw createError(
@@ -723,134 +701,107 @@ exports.confirmController = async (req, res, next) => {
       );
     }
 
-    // 6) Si trop d'essais déjà enregistrés => annule
-    if ((tx.attemptCount || 0) >= 3) {
-      tx.status = 'cancelled';
-      tx.cancelledAt = now;
-      tx.cancelReason = 'Code de sécurité erroné (trop d’essais)';
-      tx.lockedUntil = new Date(now.getTime() + 15 * 60 * 1000);
-      await tx.save({ session });
+    // Seul destinataire
+    if (String(tx.receiver) !== String(req.user.id)) throw createError(403, 'Vous n’êtes pas le destinataire de cette transaction');
 
-      await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
-      throw createError(401, 'Nombre d’essais dépassé, transaction annulée');
-    }
-
-    // 7) Seul le destinataire peut confirmer
-    if (String(tx.receiver) !== String(req.user.id)) {
-      throw createError(403, 'Vous n’êtes pas le destinataire de cette transaction');
-    }
-
-    // 8) Vérifier code (sanitized)
+    // Code check (compat legacy plain / new sha256)
     const sanitizedCode = String(securityCode).replace(/[<>\\/{};]/g, '').trim();
+    const stored = String(tx.securityCode || '');
 
-    if (sanitizedCode !== tx.securityCode) {
+    const ok =
+      looksLikeSha256Hex(stored) ? sha256Hex(sanitizedCode) === stored : sanitizedCode === stored;
+
+    if (!ok) {
       tx.attemptCount = (tx.attemptCount || 0) + 1;
       tx.lastAttemptAt = now;
 
-      // 8.1) Si troisième erreur => annule et lock
+      // 3ème erreur => cancelled + lock + ✅ remboursement du NET à l’expéditeur
       if (tx.attemptCount >= 3) {
         tx.status = 'cancelled';
         tx.cancelledAt = now;
         tx.cancelReason = 'Code de sécurité erroné (trop d’essais)';
         tx.lockedUntil = new Date(now.getTime() + 15 * 60 * 1000);
-        await tx.save({ session });
 
+        // ✅ Refund du netAmount (frais conservés)
+        const refundNet = round2(toFloat(tx.netAmount, 0));
+        if (refundNet > 0) {
+          await Balance.findOneAndUpdate(
+            { user: tx.sender },
+            { $inc: { amount: refundNet } },
+            { new: true, upsert: true, ...sessOpts }
+          );
+        }
+
+        await tx.save(sessOpts);
         await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
-        throw createError(
-          401,
-          'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.'
-        );
+
+        throw createError(401, 'Code de sécurité incorrect. Nombre d’essais dépassé, transaction annulée.');
       }
 
-      // 8.2) Sinon, on sauvegarde et on renvoie le nombre restant
-      await tx.save({ session });
-      throw createError(
-        401,
-        `Code de sécurité incorrect. Il vous reste ${3 - tx.attemptCount} essai(s).`
-      );
+      await tx.save(sessOpts);
+      throw createError(401, `Code de sécurité incorrect. Il vous reste ${3 - tx.attemptCount} essai(s).`);
     }
 
-    // 9) Code OK => reset brute-force
+    // Code OK => reset brute-force
     tx.attemptCount = 0;
     tx.lastAttemptAt = null;
     tx.lockedUntil = null;
 
-    /**
-     * ✅ 10) Calcul du montant à créditer :
-     * - Priorité : tx.localAmount (stocké à l’initiation = net converti)
-     * - Sinon : snapshot gateway convertedNetAfterFees
-     * - Sinon : conversion live sur netAmount
-     */
+    // Montant à créditer (priorité localAmount)
     const netBrut = toFloat(tx.netAmount);
-
     let creditAmount = null;
 
-    // 10.1) localAmount
     if (tx.localAmount !== undefined && tx.localAmount !== null) {
       const v = toFloat(tx.localAmount, null);
       if (Number.isFinite(v) && v > 0) creditAmount = v;
     }
 
-    // 10.2) snapshot convertedNetAfterFees
     if (!creditAmount || !Number.isFinite(creditAmount) || creditAmount <= 0) {
       const snap = tx.feeSnapshot || {};
       const snapLocal =
-        snap.convertedNetAfterFees ??
-        snap.convertedNet ??
-        snap.convertedNetAfterFee ??
-        null;
-
+        snap.convertedNetAfterFees ?? snap.convertedNet ?? snap.convertedNetAfterFee ?? null;
       const v = toFloat(snapLocal, null);
       if (Number.isFinite(v) && v > 0) creditAmount = v;
     }
 
-    // 10.3) fallback conversion live
     if (!creditAmount || !Number.isFinite(creditAmount) || creditAmount <= 0) {
       if (String(tx.senderCurrencySymbol || '').trim() === String(tx.localCurrencySymbol || '').trim()) {
         creditAmount = netBrut;
       } else {
-        const { converted } = await convertAmount(
-          tx.senderCurrencySymbol,
-          tx.localCurrencySymbol,
-          netBrut
-        );
+        const { converted } = await convertAmount(tx.senderCurrencySymbol, tx.localCurrencySymbol, netBrut);
         creditAmount = round2(converted);
       }
     }
 
     creditAmount = round2(creditAmount);
-    if (!Number.isFinite(creditAmount) || creditAmount <= 0) {
-      throw createError(500, 'Montant à créditer invalide après conversion');
-    }
+    if (!Number.isFinite(creditAmount) || creditAmount <= 0) throw createError(500, 'Montant à créditer invalide après conversion');
 
-    // 11) Créditer le destinataire
+    // Créditer le destinataire
     const credited = await Balance.findOneAndUpdate(
       { user: tx.receiver },
       { $inc: { amount: creditAmount } },
-      { new: true, upsert: true, session }
+      { new: true, upsert: true, ...sessOpts }
     );
-
     if (!credited) throw createError(500, 'Erreur lors du crédit au destinataire');
 
-    // 12) Finaliser tx
+    // Finaliser tx
     tx.status = 'confirmed';
     tx.confirmedAt = now;
 
-    // 12.1) Sécuriser localAmount (utile si tx anciennes)
+    // sécuriser localAmount
     if (!tx.localAmount || round2(toFloat(tx.localAmount)) !== creditAmount) {
       tx.localAmount = dec2(creditAmount);
     }
 
-    await tx.save({ session });
+    await tx.save(sessOpts);
 
-    // 13) Notifier les parties
     await notifyParties(tx, 'confirmed', session, tx.senderCurrencySymbol);
 
-    // 14) Commit transaction Mongo
-    await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
     session.endSession();
 
-    // 15) Réponse API
     return res.json({
       success: true,
       credited: creditAmount,
@@ -859,7 +810,9 @@ exports.confirmController = async (req, res, next) => {
       feeSnapshot: tx.feeSnapshot,
     });
   } catch (err) {
-    await session.abortTransaction();
+    try {
+      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+    } catch {}
     session.endSession();
     return next(err);
   }
@@ -869,80 +822,56 @@ exports.confirmController = async (req, res, next) => {
 /* CANCEL                                                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * CANCEL
- * - Expéditeur ou destinataire peut annuler si status pending
- * - Calcule frais d'annulation (gateway ou fallback)
- * - Rembourse expéditeur (netAmount - cancellationFee)
- * - Crédite admin (fee annulation convertie CAD)
- */
 exports.cancelController = async (req, res, next) => {
-  const session = await mongoose.startSession();
+  const session = await startTxSession();
   try {
-    session.startTransaction();
+    if (CAN_USE_SHARED_SESSION) session.startTransaction();
 
-    // 1) Inputs
     const { transactionId, reason = 'Annulé' } = req.body;
-    if (!transactionId) {
-      throw createError(400, 'transactionId requis pour annuler');
-    }
+    if (!transactionId) throw createError(400, 'transactionId requis pour annuler');
 
-    // 2) Charger tx
+    const sessOpts = maybeSessionOpts(session);
+
     const tx = await Transaction.findById(transactionId)
-      .select([
-        '+netAmount',
-        '+amount',
-        '+senderCurrencySymbol',
-        '+sender',
-        '+receiver',
-        '+status',
-      ])
-      .session(session);
+      .select(['+netAmount', '+amount', '+senderCurrencySymbol', '+sender', '+receiver', '+status', '+funds'])
+      .session(sessOpts.session || null);
 
     if (!tx) throw createError(400, 'Transaction introuvable');
 
-    // 3) Statut compatible
     validationService.validateTransactionStatusChange(tx.status, 'cancelled');
+    if (tx.status !== 'pending') throw createError(400, 'Transaction déjà traitée ou annulée');
 
-    if (tx.status !== 'pending') {
-      throw createError(400, 'Transaction déjà traitée ou annulée');
-    }
-
-    // 4) Autorisation : sender ou receiver
     const userId = String(req.user.id);
     const senderId = String(tx.sender);
     const receiverId = String(tx.receiver);
+    if (userId !== senderId && userId !== receiverId) throw createError(403, 'Vous n’êtes pas autorisé à annuler cette transaction');
 
-    if (userId !== senderId && userId !== receiverId) {
-      throw createError(403, 'Vous n’êtes pas autorisé à annuler cette transaction');
-    }
-
-    // 5) Frais d’annulation via Gateway
+    // Frais d’annulation via Gateway
     let cancellationFee = 0;
     let cancellationFeeType = 'fixed';
     let cancellationFeePercent = 0;
     let cancellationFeeId = null;
 
     try {
-      let gatewayBase =
-        GATEWAY_URL ||
-        process.env.GATEWAY_URL ||
-        'https://api-gateway-8cgy.onrender.com';
-
-      gatewayBase = gatewayBase.replace(/\/+$/, '');
-      if (!gatewayBase.endsWith('/api/v1')) {
-        gatewayBase = `${gatewayBase}/api/v1`;
-      }
+      let gatewayBase = (GATEWAY_URL || process.env.GATEWAY_URL || 'https://api-gateway-8cgy.onrender.com').replace(
+        /\/+$/,
+        ''
+      );
+      if (!gatewayBase.endsWith('/api/v1')) gatewayBase = `${gatewayBase}/api/v1`;
 
       const { data } = await axios.get(`${gatewayBase}/fees/simulate`, {
         params: {
           provider: tx.funds || 'paynoval',
-          amount: tx.amount.toString(),
+          amount: String(tx.amount),
           fromCurrency: tx.senderCurrencySymbol,
           toCurrency: tx.senderCurrencySymbol,
           type: 'cancellation',
         },
-        timeout: 6000,
+        headers: {
+          ...(INTERNAL_TOKEN ? { 'x-internal-token': INTERNAL_TOKEN } : {}),
+          ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
+        },
+        timeout: 8000,
       });
 
       if (data && data.success) {
@@ -954,34 +883,27 @@ exports.cancelController = async (req, res, next) => {
         cancellationFee = 0;
       }
     } catch (e) {
-      // 6) fallback legacy
+      // fallback legacy
       const symbol = String(tx.senderCurrencySymbol || '').trim();
-      if (['USD', '$USD', 'CAD', '$CAD', 'EUR', '€'].includes(symbol)) {
-        cancellationFee = 2.99;
-      } else if (['XOF', 'XAF', 'F CFA'].includes(symbol)) {
-        cancellationFee = 300;
-      }
+      if (['USD', '$USD', 'CAD', '$CAD', 'EUR', '€'].includes(symbol)) cancellationFee = 2.99;
+      else if (['XOF', 'XAF', 'F CFA'].includes(symbol)) cancellationFee = 300;
     }
 
     cancellationFee = round2(cancellationFee);
 
-    // 7) Montant remboursé = netAmount - cancellationFee
     const netStored = toFloat(tx.netAmount);
     const refundAmt = round2(netStored - cancellationFee);
-    if (refundAmt < 0) {
-      throw createError(400, 'Frais d’annulation supérieurs au montant net à rembourser');
-    }
+    if (refundAmt < 0) throw createError(400, 'Frais d’annulation supérieurs au montant net à rembourser');
 
-    // 8) Rembourse expéditeur
+    // Rembourse expéditeur
     const refunded = await Balance.findOneAndUpdate(
       { user: tx.sender },
       { $inc: { amount: refundAmt } },
-      { new: true, upsert: true, session }
+      { new: true, upsert: true, ...sessOpts }
     );
-
     if (!refunded) throw createError(500, 'Erreur lors du remboursement au compte expéditeur');
 
-    // 9) Crédit admin sur frais d'annulation (CAD)
+    // Crédit admin sur frais d'annulation (CAD)
     const adminCurrency = 'CAD';
     let adminFeeConverted = 0;
 
@@ -991,38 +913,32 @@ exports.cancelController = async (req, res, next) => {
     }
 
     const adminEmail = 'admin@paynoval.com';
-    const adminUser = await User.findOne({ email: adminEmail })
-      .select('_id')
-      .session(session);
-
+    const adminUser = await User.findOne({ email: adminEmail }).select('_id').session(sessOpts.session || null);
     if (!adminUser) throw createError(500, 'Compte administrateur introuvable');
 
     if (adminFeeConverted > 0) {
       await Balance.findOneAndUpdate(
         { user: adminUser._id },
         { $inc: { amount: adminFeeConverted } },
-        { new: true, upsert: true, session }
+        { new: true, upsert: true, ...sessOpts }
       );
     }
 
-    // 10) Mettre à jour la tx
     tx.status = 'cancelled';
     tx.cancelledAt = new Date();
-    tx.cancelReason = `${
-      userId === receiverId ? 'Annulé par le destinataire' : 'Annulé par l’expéditeur'
-    } : ${sanitize(reason)}`;
+    tx.cancelReason = `${userId === receiverId ? 'Annulé par le destinataire' : 'Annulé par l’expéditeur'} : ${sanitize(reason)}`;
     tx.cancellationFee = cancellationFee;
     tx.cancellationFeeType = cancellationFeeType;
     tx.cancellationFeePercent = cancellationFeePercent;
     tx.cancellationFeeId = cancellationFeeId;
 
-    await tx.save({ session });
+    await tx.save(sessOpts);
 
-    // 11) Notifier
     await notifyParties(tx, 'cancelled', session, tx.senderCurrencySymbol);
 
-    // 12) Commit
-    await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
     session.endSession();
 
     return res.json({
@@ -1036,7 +952,9 @@ exports.cancelController = async (req, res, next) => {
       adminCurrency,
     });
   } catch (err) {
-    await session.abortTransaction();
+    try {
+      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+    } catch {}
     session.endSession();
     return next(err);
   }
@@ -1046,66 +964,57 @@ exports.cancelController = async (req, res, next) => {
 /* REFUND (admin)                                                      */
 /* ------------------------------------------------------------------ */
 
-/**
- * REFUND (admin)
- * - Réservé admin : rembourse une tx confirmed
- * - Débite le destinataire (localAmount)
- * - Crédite l’expéditeur (localAmount) (NB: logique existante conservée)
- */
 exports.refundController = async (req, res, next) => {
-  const session = await mongoose.startSession();
+  const session = await startTxSession();
   try {
-    session.startTransaction();
+    if (CAN_USE_SHARED_SESSION) session.startTransaction();
 
     const { transactionId, reason = 'Remboursement demandé' } = req.body;
 
-    const tx = await Transaction.findById(transactionId).session(session);
-    if (!tx || tx.status !== 'confirmed') {
-      throw createError(400, 'Transaction non remboursable');
-    }
+    const sessOpts = maybeSessionOpts(session);
 
-    if (tx.refundedAt) {
-      throw createError(400, 'Déjà remboursée');
-    }
+    const tx = await Transaction.findById(transactionId).session(sessOpts.session || null);
+    if (!tx || tx.status !== 'confirmed') throw createError(400, 'Transaction non remboursable');
+    if (tx.refundedAt) throw createError(400, 'Déjà remboursée');
 
-    // Montant de remboursement = localAmount (devise destinataire)
     const amt = toFloat(tx.localAmount);
     if (amt <= 0) throw createError(400, 'Montant de remboursement invalide');
 
-    // 1) Débiter destinataire
+    // Débiter destinataire atomiquement (solde >= amt)
     const debited = await Balance.findOneAndUpdate(
-      { user: tx.receiver },
+      { user: tx.receiver, amount: { $gte: amt } },
       { $inc: { amount: -amt } },
-      { new: true, session }
+      { new: true, ...sessOpts }
     );
 
-    if (!debited || toFloat(debited.amount) < 0) {
-      throw createError(400, 'Solde du destinataire insuffisant');
-    }
+    if (!debited) throw createError(400, 'Solde du destinataire insuffisant');
 
-    // 2) Crédite expéditeur
+    // Crédit expéditeur
     await Balance.findOneAndUpdate(
       { user: tx.sender },
       { $inc: { amount: amt } },
-      { new: true, upsert: true, session }
+      { new: true, upsert: true, ...sessOpts }
     );
 
-    // 3) Mettre à jour tx
     tx.status = 'refunded';
     tx.refundedAt = new Date();
     tx.refundReason = reason;
-    await tx.save({ session });
+    await tx.save(sessOpts);
 
     logger.warn(
       `[ALERTE REFUND] Remboursement manuel ! tx=${transactionId}, by=${req.user?.email || req.user?.id}, amount=${amt}`
     );
 
-    await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
     session.endSession();
 
     res.json({ success: true, refunded: amt });
   } catch (err) {
-    await session.abortTransaction();
+    try {
+      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+    } catch {}
     session.endSession();
     next(err);
   }
@@ -1115,24 +1024,17 @@ exports.refundController = async (req, res, next) => {
 /* VALIDATE (admin)                                                    */
 /* ------------------------------------------------------------------ */
 
-/**
- * VALIDATE (admin)
- * - Permet validation admin (confirmed/rejected) d'une tx pending
- * - (comportement existant conservé)
- */
 exports.validateController = async (req, res, next) => {
   try {
     const { transactionId, status, adminNote } = req.body;
 
     const tx = await Transaction.findById(transactionId);
-    if (!tx || tx.status !== 'pending') {
-      throw createError(400, 'Transaction non validable');
-    }
+    if (!tx || tx.status !== 'pending') throw createError(400, 'Transaction non validable');
 
-    if (!['confirmed', 'rejected'].includes(status)) {
-      throw createError(400, 'Statut de validation invalide');
-    }
+    if (!['confirmed', 'rejected'].includes(status)) throw createError(400, 'Statut de validation invalide');
 
+    // ⚠️ Note: cette action ne crédite/débite pas les balances.
+    // Elle est laissée telle quelle (comportement existant conservé).
     tx.status = status;
     tx.validatedAt = new Date();
     tx.adminNote = adminNote || null;
@@ -1148,50 +1050,49 @@ exports.validateController = async (req, res, next) => {
 /* REASSIGN (admin)                                                    */
 /* ------------------------------------------------------------------ */
 
-/**
- * REASSIGN (admin)
- * - Réassigne un destinataire par email
- */
 exports.reassignController = async (req, res, next) => {
-  const session = await mongoose.startSession();
+  const session = await startTxSession();
   try {
-    session.startTransaction();
+    if (CAN_USE_SHARED_SESSION) session.startTransaction();
 
     const { transactionId, newReceiverEmail } = req.body;
 
-    const tx = await Transaction.findById(transactionId).session(session);
-    if (!tx || !['pending', 'confirmed'].includes(tx.status)) {
-      throw createError(400, 'Transaction non réassignable');
-    }
+    const sessOpts = maybeSessionOpts(session);
 
-    const newReceiver = await User.findOne({ email: newReceiverEmail })
+    const tx = await Transaction.findById(transactionId).session(sessOpts.session || null);
+    if (!tx || !['pending', 'confirmed'].includes(tx.status)) throw createError(400, 'Transaction non réassignable');
+
+    const cleanNewEmail = String(newReceiverEmail || '').trim().toLowerCase();
+    if (!isEmailLike(cleanNewEmail)) throw createError(400, 'Email destinataire invalide');
+
+    const newReceiver = await User.findOne({ email: cleanNewEmail })
       .select('_id fullName email')
-      .session(session);
+      .session(sessOpts.session || null);
+
     if (!newReceiver) throw createError(404, 'Nouveau destinataire introuvable');
 
-    if (String(newReceiver._id) === String(tx.receiver)) {
-      throw createError(400, 'Déjà affectée à ce destinataire');
-    }
+    if (String(newReceiver._id) === String(tx.receiver)) throw createError(400, 'Déjà affectée à ce destinataire');
 
     tx.receiver = newReceiver._id;
     tx.nameDestinataire = newReceiver.fullName;
     tx.recipientEmail = newReceiver.email;
     tx.reassignedAt = new Date();
-    await tx.save({ session });
+    await tx.save(sessOpts);
 
     logger.warn(
-      `ALERTE REASSIGN: tx=${transactionId} réassignée par ${req.user?.email || req.user?.id} à ${newReceiverEmail}`
+      `ALERTE REASSIGN: tx=${transactionId} réassignée par ${req.user?.email || req.user?.id} à ${cleanNewEmail}`
     );
 
-    await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
     session.endSession();
 
-    res.json({
-      success: true,
-      newReceiver: { id: newReceiver._id, email: newReceiver.email },
-    });
+    res.json({ success: true, newReceiver: { id: newReceiver._id, email: newReceiver.email } });
   } catch (err) {
-    await session.abortTransaction();
+    try {
+      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+    } catch {}
     session.endSession();
     next(err);
   }
@@ -1201,10 +1102,6 @@ exports.reassignController = async (req, res, next) => {
 /* ARCHIVE (admin)                                                     */
 /* ------------------------------------------------------------------ */
 
-/**
- * ARCHIVE (admin)
- * - Marque une transaction comme archivée
- */
 exports.archiveController = async (req, res, next) => {
   try {
     const { transactionId } = req.body;
@@ -1228,10 +1125,6 @@ exports.archiveController = async (req, res, next) => {
 /* RELAUNCH (admin)                                                    */
 /* ------------------------------------------------------------------ */
 
-/**
- * RELAUNCH (admin)
- * - Permet relancer une tx pending/cancelled
- */
 exports.relaunchController = async (req, res, next) => {
   try {
     const { transactionId } = req.body;
@@ -1240,10 +1133,7 @@ exports.relaunchController = async (req, res, next) => {
     if (!tx) throw createError(404, 'Transaction non trouvée');
 
     if (!['pending', 'cancelled'].includes(tx.status)) {
-      throw createError(
-        400,
-        'Seules les transactions en attente ou annulées peuvent être relancées'
-      );
+      throw createError(400, 'Seules les transactions en attente ou annulées peuvent être relancées');
     }
 
     tx.status = 'relaunch';
