@@ -3,7 +3,7 @@
 const axios = require("axios");
 const pino = require("pino");
 const BaseCache = require("lru-cache");
-const { exchange } = require("../config");
+const config = require("../config");
 
 // Logger pour le module de change
 const logger = pino({ level: process.env.LOG_LEVEL || "info" });
@@ -12,18 +12,22 @@ const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 const LRUCache = BaseCache.LRUCache || BaseCache;
 
 // TTL “fresh” (ms)
-const TTL_MS = Number(exchange?.cacheTTL || 10 * 60 * 1000); // 10min par défaut
-// TTL “stale fallback” (ms) -> si API rate-limit, on peut servir du vieux taux
+const TTL_MS = Number(process.env.FX_CACHE_TTL_MS || config?.exchange?.cacheTTL || 10 * 60 * 1000); // 10min
+// TTL “stale fallback” (ms)
 const STALE_TTL_MS = Number(process.env.FX_CACHE_STALE_TTL_MS || 24 * 60 * 60 * 1000); // 24h
 const HTTP_TIMEOUT_MS = Number(process.env.FX_HTTP_TIMEOUT_MS || 5000);
 
-// Cache fresh (LRU TTL)
-const cache = new LRUCache({ max: 50, ttl: TTL_MS });
-// Cache stale (on garde la dernière version connue)
-const staleStore = new Map(); // base -> { ts, rates }
+// Cache fresh (LRU TTL) : key "FROM->TO" -> rate
+const cache = new LRUCache({ max: 200, ttl: TTL_MS });
+// Cache stale (dernière valeur connue)
+const staleStore = new Map(); // key "FROM->TO" -> { ts, rate }
 
-// Dédup inflight: base -> Promise<rates>
+// Dédup inflight: key -> Promise<{rate, converted}>
 const inflight = new Map();
+
+// URL backend principal (source des taux en DB)
+const PRINCIPAL_URL = String(config?.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
+const INTERNAL_TOKEN = String(process.env.INTERNAL_TOKEN || config?.internalToken || "");
 
 // Alias devises -> ISO
 const CURRENCY_ALIASES = {
@@ -136,113 +140,137 @@ function normalizeCurrencyCode(raw) {
   return k;
 }
 
-function getStale(base) {
-  const item = staleStore.get(base);
+function makeKey(fromISO, toISO) {
+  return `${fromISO}->${toISO}`;
+}
+
+function getStaleRate(key) {
+  const item = staleStore.get(key);
   if (!item) return null;
   const age = now() - item.ts;
-  if (age <= STALE_TTL_MS && item.rates && typeof item.rates === "object") return item.rates;
+  if (age <= STALE_TTL_MS && Number.isFinite(item.rate) && item.rate > 0) return item.rate;
   return null;
 }
 
-function setStale(base, rates) {
-  staleStore.set(base, { ts: now(), rates });
+function setStaleRate(key, rate) {
+  staleStore.set(key, { ts: now(), rate });
 }
 
 /**
- * Fetch depuis l’API externe définie dans config.
- * Supporte v4 ("rates") et v6 ("conversion_rates").
+ * ✅ FX interne via backend principal (DB rates)
+ * GET /api/v1/exchange-rates/rate?from=XOF&to=EUR
+ * Retour attendu: { success:true, rate: <number> } OU { success:true, data:{rate:<number>} }
  */
-async function fetchRatesFromApi(base) {
-  const baseNorm = normalizeCurrencyCode(base);
-  if (!baseNorm) throw new Error(`Invalid currency code: ${base}`);
-
-  const apiUrl = String(exchange?.apiUrl || "").trim();
-  if (!apiUrl) throw new Error("exchange.apiUrl manquant");
-
-  // ex: https://v6.exchangerate-api.com/v6/<key>/latest/XOF
-  const root = apiUrl.replace(/\/latest\/.*$/, "").replace(/\/+$/, "");
-  const url = `${root}/latest/${encodeURIComponent(baseNorm)}`;
-
-  // Pour v4 certaines API passent apiKey en query
-  const params = !/\/v6\//.test(root) && exchange?.apiKey ? { apiKey: exchange.apiKey } : {};
-
-  logger.info({ url, params }, "Appel Exchange API");
-
-  const resp = await axios.get(url, {
-    params,
-    timeout: HTTP_TIMEOUT_MS,
-    validateStatus: (s) => s >= 200 && s < 500, // on gère 429 proprement
-  });
-
-  if (resp.status === 429) {
-    const err = new Error("Exchange API rate-limited (429)");
-    err.code = "FX_RATE_LIMIT";
-    err.status = 429;
+async function fetchRateFromInternal(fromISO, toISO) {
+  if (!PRINCIPAL_URL) {
+    const err = new Error("PRINCIPAL_URL manquant (config.principalUrl ou env PRINCIPAL_URL)");
+    err.code = "FX_INTERNAL_MISSING_PRINCIPAL_URL";
     throw err;
   }
 
+  const url = `${PRINCIPAL_URL}/api/v1/exchange-rates/rate`;
+
+  const resp = await axios.get(url, {
+    params: { from: fromISO, to: toISO },
+    timeout: HTTP_TIMEOUT_MS,
+    headers: {
+      "Content-Type": "application/json",
+      ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
+    },
+    validateStatus: (s) => s >= 200 && s < 500,
+  });
+
   if (resp.status !== 200) {
-    const err = new Error(`Exchange API error: ${resp.status}`);
-    err.code = "FX_HTTP_ERROR";
+    const err = new Error(`Internal FX error: HTTP ${resp.status}`);
+    err.code = "FX_INTERNAL_HTTP";
     err.status = resp.status;
     err.data = resp.data;
     throw err;
   }
 
-  const data = resp.data || {};
-  const rates = data.conversion_rates || data.rates;
-  if (!rates || typeof rates !== "object") {
-    const err = new Error("Exchange API returned unexpected payload");
-    err.code = "FX_BAD_PAYLOAD";
-    err.data = data;
+  const d = resp.data || {};
+  const rate =
+    (Number.isFinite(Number(d.rate)) ? Number(d.rate) : null) ||
+    (Number.isFinite(Number(d?.data?.rate)) ? Number(d.data.rate) : null) ||
+    (Number.isFinite(Number(d?.data?.value)) ? Number(d.data.value) : null);
+
+  if (!Number.isFinite(rate) || rate <= 0) {
+    const err = new Error("Internal FX returned invalid rate");
+    err.code = "FX_INTERNAL_BAD_PAYLOAD";
+    err.data = d;
     throw err;
   }
 
-  return rates;
+  return rate;
 }
 
 /**
- * Récupère les taux (cache + API)
- * - cache TTL
- * - inflight dedup
- * - fallback stale on 429/erreurs
+ * Convertit un montant d'une devise à une autre
+ * @returns {Promise<{rate:number, converted:number}>}
  */
-async function getRates(rawBase) {
-  const base = normalizeCurrencyCode(rawBase);
-  if (!base) throw new Error(`Invalid currency code: ${rawBase}`);
+async function convertAmount(from, to, amount) {
+  const value = Number(amount);
 
-  // fresh cache
-  if (cache.has(base)) {
-    logger.debug({ base }, "Taux depuis cache (fresh)");
-    return cache.get(base);
+  // ✅ 0 autorisé, négatif interdit
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Montant invalide pour conversion");
+  }
+
+  const fromISO = normalizeCurrencyCode(from);
+  const toISO = normalizeCurrencyCode(to);
+
+  if (!fromISO || !toISO) {
+    throw new Error(`Devise invalide: from=${from} to=${to}`);
+  }
+
+  // même devise
+  if (fromISO === toISO) {
+    return { rate: 1, converted: Number(value.toFixed(2)) };
+  }
+
+  // ✅ montant 0 => pas besoin FX
+  if (value === 0) {
+    return { rate: 0, converted: 0 };
+  }
+
+  const key = makeKey(fromISO, toISO);
+
+  // cache fresh
+  if (cache.has(key)) {
+    const r = Number(cache.get(key));
+    return { rate: r, converted: Number((value * r).toFixed(2)) };
   }
 
   // inflight dedup
-  if (inflight.has(base)) {
-    logger.debug({ base }, "Taux inflight (dedup)");
-    return inflight.get(base);
+  if (inflight.has(key)) {
+    return inflight.get(key);
   }
 
   const p = (async () => {
     try {
-      const rates = await fetchRatesFromApi(base);
-      cache.set(base, rates);
-      setStale(base, rates);
-      logger.info({ base, timestamp: now() }, "Taux mis en cache");
-      return rates;
+      const rate = await fetchRateFromInternal(fromISO, toISO);
+
+      cache.set(key, rate);
+      setStaleRate(key, rate);
+
+      logger.info({ from: fromISO, to: toISO, rate }, "FX interne OK (cache)");
+      return { rate, converted: Number((value * rate).toFixed(2)) };
     } catch (e) {
-      const fallback = getStale(base);
-      if (fallback) {
-        logger.warn({ base, err: e?.code || e?.message || e }, "FX API indisponible/429 -> fallback stale rates");
-        return fallback;
+      const staleRate = getStaleRate(key);
+      if (staleRate) {
+        logger.warn(
+          { from: fromISO, to: toISO, rate: staleRate, err: e?.code || e?.message || e },
+          "FX interne KO -> fallback stale"
+        );
+        return { rate: staleRate, converted: Number((value * staleRate).toFixed(2)) };
       }
       throw e;
     } finally {
-      inflight.delete(base);
+      inflight.delete(key);
     }
   })();
 
-  inflight.set(base, p);
+  inflight.set(key, p);
   return p;
 }
 
@@ -253,42 +281,4 @@ function clearCache() {
   logger.info("Cache FX vidé");
 }
 
-/**
- * Convertit un montant d'une devise à une autre
- * @returns {Promise<{rate:number, converted:number}>}
- */
-async function convertAmount(from, to, amount) {
-  const value = Number(amount);
-  // ✅ FIX: 0 autorisé (ne doit pas throw), négatif interdit
-  if (!Number.isFinite(value) || value < 0) {
-    throw new Error("Montant invalide pour conversion");
-  }
-
-  const fromCode = normalizeCurrencyCode(from);
-  const toCode = normalizeCurrencyCode(to);
-
-  if (!fromCode || !toCode) {
-    throw new Error(`Devise invalide: from=${from} to=${to}`);
-  }
-
-  if (fromCode === toCode) {
-    return { rate: 1, converted: Number(value.toFixed(2)) };
-  }
-
-  // ✅ FIX: si montant = 0 => pas besoin de FX
-  if (value === 0) {
-    return { rate: 0, converted: 0 };
-  }
-
-  const rates = await getRates(fromCode);
-  const rate = Number(rates[toCode]);
-
-  if (!Number.isFinite(rate) || rate <= 0) {
-    throw new Error(`Devise non supportée : ${toCode}`);
-  }
-
-  const converted = Number((value * rate).toFixed(2));
-  return { rate, converted };
-}
-
-module.exports = { getRates, clearCache, convertAmount };
+module.exports = { convertAmount, clearCache };
