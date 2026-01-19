@@ -1,17 +1,16 @@
-// File: src/models/Transaction.js
-const mongoose = require('mongoose');
-const crypto = require('crypto');
+const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 const transactionSchema = new mongoose.Schema(
   {
     sender: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
       required: true,
     },
     receiver: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
       required: true,
     },
     reference: {
@@ -26,18 +25,16 @@ const transactionSchema = new mongoose.Schema(
       required: true,
       validate: {
         validator: (v) => parseFloat(v.toString()) >= 0.01,
-        message: (props) =>
-          `Le montant doit être ≥ 0.01, reçu ${props.value}`,
+        message: (props) => `Le montant doit être ≥ 0.01, reçu ${props.value}`,
       },
     },
     transactionFees: {
       type: mongoose.Schema.Types.Decimal128,
       required: true,
-      default: mongoose.Types.Decimal128.fromString('0.00'),
+      default: mongoose.Types.Decimal128.fromString("0.00"),
       validate: {
         validator: (v) => parseFloat(v.toString()) >= 0.0,
-        message: (props) =>
-          `Les frais doivent être ≥ 0.00, reçus ${props.value}`,
+        message: (props) => `Les frais doivent être ≥ 0.00, reçus ${props.value}`,
       },
     },
     netAmount: {
@@ -45,8 +42,7 @@ const transactionSchema = new mongoose.Schema(
       required: true,
       validate: {
         validator: (v) => parseFloat(v.toString()) >= 0.0,
-        message: (props) =>
-          `Le net à créditer doit être ≥ 0.00, reçu ${props.value}`,
+        message: (props) => `Le net à créditer doit être ≥ 0.00, reçu ${props.value}`,
       },
     },
 
@@ -59,6 +55,8 @@ const transactionSchema = new mongoose.Schema(
       maxlength: 100,
       match: /.+@.+\..+/,
     },
+
+    // legacy (mais on force ISO dedans maintenant côté controller)
     senderCurrencySymbol: {
       type: String,
       required: true,
@@ -74,6 +72,8 @@ const transactionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Decimal128,
       required: true,
     },
+
+    // legacy (mais on force ISO dedans maintenant côté controller)
     localCurrencySymbol: {
       type: String,
       required: true,
@@ -121,13 +121,13 @@ const transactionSchema = new mongoose.Schema(
     cancellationFee: { type: Number, default: 0 },
     cancellationFeeType: {
       type: String,
-      enum: ['fixed', 'percent'],
-      default: 'fixed',
+      enum: ["fixed", "percent"],
+      default: "fixed",
     },
     cancellationFeePercent: { type: Number, default: 0 },
     cancellationFeeId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Fee',
+      ref: "Fee",
       default: null,
     },
 
@@ -135,23 +135,23 @@ const transactionSchema = new mongoose.Schema(
     operationKind: {
       type: String,
       enum: [
-        'transfer',
-        'bonus',
-        'cashback',
-        'purchase',
-        'adjustment_credit',
-        'adjustment_debit',
-        'cagnotte_participation',
-        'cagnotte_withdrawal',
-        'generic',
+        "transfer",
+        "bonus",
+        "cashback",
+        "purchase",
+        "adjustment_credit",
+        "adjustment_debit",
+        "cagnotte_participation",
+        "cagnotte_withdrawal",
+        "generic",
         null,
       ],
-      default: 'transfer',
+      default: "transfer",
     },
     initiatedBy: {
       type: String,
-      enum: ['user', 'system', 'admin', 'job', null],
-      default: 'user',
+      enum: ["user", "system", "admin", "job", null],
+      default: "user",
     },
     context: { type: String, default: null },
     contextId: { type: String, default: null },
@@ -159,35 +159,17 @@ const transactionSchema = new mongoose.Schema(
     destination: {
       type: String,
       required: true,
-      enum: [
-        'paynoval',
-        'stripe',
-        'bank',
-        'mobilemoney',
-        'visa_direct',
-        'stripe2momo',
-        'cashin',
-        'cashout',
-      ],
+      enum: ["paynoval", "stripe", "bank", "mobilemoney", "visa_direct", "stripe2momo", "cashin", "cashout"],
     },
     funds: {
       type: String,
       required: true,
-      enum: [
-        'paynoval',
-        'stripe',
-        'bank',
-        'mobilemoney',
-        'visa_direct',
-        'stripe2momo',
-        'cashin',
-        'cashout',
-      ],
+      enum: ["paynoval", "stripe", "bank", "mobilemoney", "visa_direct", "stripe2momo", "cashin", "cashout"],
     },
     status: {
       type: String,
-      enum: ['pending', 'confirmed', 'cancelled', 'refunded', 'relaunch'],
-      default: 'pending',
+      enum: ["pending", "confirmed", "cancelled", "refunded", "relaunch"],
+      default: "pending",
     },
 
     verificationToken: {
@@ -211,9 +193,22 @@ const transactionSchema = new mongoose.Schema(
     feeSnapshot: { type: Object, default: null },
     feeId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Fee',
+      ref: "Fee",
       default: null,
     },
+
+    // ------------------------------------------------------------------
+    // ✅ FORMAT STANDARD UNIQUE (comme gateway)
+    // ------------------------------------------------------------------
+    amountSource: { type: mongoose.Schema.Types.Decimal128, default: null },
+    amountTarget: { type: mongoose.Schema.Types.Decimal128, default: null },
+    feeSource: { type: mongoose.Schema.Types.Decimal128, default: null },
+    fxRateSourceToTarget: { type: mongoose.Schema.Types.Decimal128, default: null },
+    currencySource: { type: String, default: null, trim: true, maxlength: 5 },
+    currencyTarget: { type: String, default: null, trim: true, maxlength: 5 },
+
+    // On stocke un objet simple (compat UI/mobile)
+    money: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   {
     versionKey: false,
@@ -225,15 +220,32 @@ transactionSchema.index({ sender: 1, createdAt: -1 });
 transactionSchema.index({ receiver: 1, status: 1 });
 transactionSchema.index({ verificationToken: 1 });
 
-transactionSchema.set('toJSON', {
+transactionSchema.set("toJSON", {
   transform(doc, ret) {
     ret.id = ret._id;
-    ret.reference = ret.reference;
+
+    // legacy numbers
     ret.amount = parseFloat(ret.amount.toString());
     ret.transactionFees = parseFloat(ret.transactionFees.toString());
     ret.netAmount = parseFloat(ret.netAmount.toString());
     ret.exchangeRate = parseFloat(ret.exchangeRate.toString());
     ret.localAmount = parseFloat(ret.localAmount.toString());
+
+    // ✅ standard numbers
+    if (ret.amountSource != null) ret.amountSource = parseFloat(ret.amountSource.toString());
+    if (ret.amountTarget != null) ret.amountTarget = parseFloat(ret.amountTarget.toString());
+    if (ret.feeSource != null) ret.feeSource = parseFloat(ret.feeSource.toString());
+    if (ret.fxRateSourceToTarget != null) ret.fxRateSourceToTarget = parseFloat(ret.fxRateSourceToTarget.toString());
+
+    // money.* amounts (si présent)
+    if (ret.money && typeof ret.money === "object") {
+      const m = ret.money;
+      if (m.source?.amount != null) m.source.amount = parseFloat(String(m.source.amount));
+      if (m.feeSource?.amount != null) m.feeSource.amount = parseFloat(String(m.feeSource.amount));
+      if (m.target?.amount != null) m.target.amount = parseFloat(String(m.target.amount));
+      ret.money = m;
+    }
+
     delete ret._id;
     delete ret.securityCode;
     delete ret.verificationToken;
@@ -244,12 +256,11 @@ transactionSchema.set('toJSON', {
   },
 });
 
-transactionSchema.pre('validate', function (next) {
+transactionSchema.pre("validate", function (next) {
   if (this.isNew && !this.verificationToken) {
-    this.verificationToken = crypto.randomBytes(32).toString('hex');
+    this.verificationToken = crypto.randomBytes(32).toString("hex");
   }
   next();
 });
 
-module.exports = (conn = mongoose) =>
-  conn.models.Transaction || conn.model('Transaction', transactionSchema);
+module.exports = (conn = mongoose) => conn.models.Transaction || conn.model("Transaction", transactionSchema);

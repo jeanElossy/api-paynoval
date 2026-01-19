@@ -13,6 +13,7 @@ function escapeRegex(str) {
   return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+
 /**
  * Decimal128 safe (2 décimales) - utile car Balance.amount est souvent en Decimal128
  */
