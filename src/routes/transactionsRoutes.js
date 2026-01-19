@@ -1,6 +1,4 @@
 // File: src/routes/transactionsRoutes.js
-"use strict";
-
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const { body } = require("express-validator");
@@ -42,6 +40,64 @@ const limiter = rateLimit({
 router.use(["/initiate", "/confirm", "/cancel"], limiter);
 
 /**
+ * ✅ Middleware de normalisation payload (compat Gateway/Mobile)
+ * - Accepte country OU destinationCountry
+ * - Accepte senderCurrencySymbol OU senderCurrencyCode/currencySource/currencyCode/currency
+ * - Accepte localCurrencySymbol OU localCurrencyCode/currencyTarget
+ */
+function normalizeInitiateBody(req, _res, next) {
+  try {
+    const b = req.body || {};
+
+    // --- country / destinationCountry ---
+    const cRaw =
+      b.country ||
+      b.destinationCountry ||
+      b.countryTarget || // (au cas où)
+      "";
+    const c = String(cRaw || "").trim();
+    if (c) {
+      b.country = c;
+      b.destinationCountry = c; // on garde les 2 pour compat, mais on valide UNE seule
+    }
+
+    // --- senderCurrencySymbol (ISO) ---
+    const sCurRaw =
+      b.senderCurrencySymbol ||
+      b.senderCurrencyCode ||
+      b.currencySource ||
+      b.currencyCode ||
+      b.currency ||
+      "";
+    const sCur = String(sCurRaw || "").trim();
+    if (sCur) {
+      b.senderCurrencySymbol = sCur.toUpperCase(); // ISO: XOF/CAD/EUR/USD
+    }
+
+    // --- localCurrencySymbol (ISO) ---
+    const tCurRaw =
+      b.localCurrencySymbol ||
+      b.localCurrencyCode ||
+      b.currencyTarget ||
+      "";
+    const tCur = String(tCurRaw || "").trim();
+    if (tCur) {
+      b.localCurrencySymbol = tCur.toUpperCase();
+    }
+
+    // --- amount fallback ---
+    if (b.amount === undefined || b.amount === null || String(b.amount).trim() === "") {
+      if (b.amountSource !== undefined && b.amountSource !== null) b.amount = b.amountSource;
+    }
+
+    req.body = b;
+  } catch {
+    // no-op
+  }
+  next();
+}
+
+/**
  * GET /api/v1/transactions/:id
  * Récupère une transaction par ID (mobile/web)
  */
@@ -54,21 +110,6 @@ router.get("/:id", protect, asyncHandler(getTransactionController));
 router.get("/", protect, asyncHandler(listInternal));
 
 /**
- * Helpers compat: NEW + LEGACY
- */
-const pickFirst = (...vals) => {
-  for (const v of vals) {
-    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
-  }
-  return "";
-};
-
-const safeToFloat = (v) => {
-  const n = typeof v === "number" ? v : parseFloat(String(v).replace(/\s/g, "").replace(",", "."));
-  return Number.isFinite(n) ? n : NaN;
-};
-
-/**
  * POST /api/v1/transactions/initiate
  * Crée une transaction interne (débit immédiat expéditeur)
  * → fees dynamiques via Gateway /fees/simulate
@@ -76,113 +117,37 @@ const safeToFloat = (v) => {
 router.post(
   "/initiate",
   protect,
+  normalizeInitiateBody,
   [
-    body("toEmail")
-      .isEmail()
-      .withMessage("Email du destinataire invalide")
-      .normalizeEmail(),
+    body("toEmail").isEmail().withMessage("Email du destinataire invalide").normalizeEmail(),
 
-    // ✅ amount OU amountSource (compat)
-    body(["amount", "amountSource"])
-      .custom((_, { req }) => {
-        const raw = pickFirst(req.body?.amount, req.body?.amountSource);
-        const n = safeToFloat(raw);
-        if (!Number.isFinite(n) || n <= 0) throw new Error("Le montant doit être supérieur à 0");
-        return true;
-      })
-      .customSanitizer((_, { req }) => {
-        // on normalize: on fixe req.body.amount pour le controller legacy
-        const raw = pickFirst(req.body?.amount, req.body?.amountSource);
-        req.body.amount = safeToFloat(raw);
-        return req.body.amount;
-      }),
+    body("amount").isFloat({ gt: 0 }).withMessage("Le montant doit être supérieur à 0").toFloat(),
 
-    body("transactionFees")
-      .optional()
-      .isFloat({ min: 0 })
-      .withMessage("Les frais doivent être un nombre positif")
-      .toFloat(),
+    body("transactionFees").optional().isFloat({ min: 0 }).withMessage("Les frais doivent être un nombre positif").toFloat(),
 
     body("funds").notEmpty().withMessage("Type de fonds requis").trim().escape(),
 
-    body("destination")
-      .notEmpty()
-      .withMessage("Destination requise")
-      .trim()
-      .escape(),
+    body("destination").notEmpty().withMessage("Destination requise").trim().escape(),
 
-    // ✅ local currency: accepte localCurrencySymbol OU currencyTarget/localCurrencyCode
-    body(["localCurrencySymbol", "currencyTarget", "localCurrencyCode"])
-      .custom((_, { req }) => {
-        const v = pickFirst(req.body?.localCurrencySymbol, req.body?.currencyTarget, req.body?.localCurrencyCode);
-        if (!String(v).trim()) throw new Error("Symbole de la devise locale requis");
-        return true;
-      })
-      .customSanitizer((_, { req }) => {
-        const v = pickFirst(req.body?.localCurrencySymbol, req.body?.currencyTarget, req.body?.localCurrencyCode);
-        // on force localCurrencySymbol pour legacy controller
-        req.body.localCurrencySymbol = String(v).trim();
-        return req.body.localCurrencySymbol;
-      }),
+    // ✅ On valide localCurrencySymbol (normalisé depuis localCurrencyCode/currencyTarget)
+    body("localCurrencySymbol").notEmpty().withMessage("Devise cible requise").trim().escape(),
 
-    // ✅ sender currency: accepte senderCurrencySymbol OU currencySource/senderCurrencyCode/currency
-    body(["senderCurrencySymbol", "currencySource", "senderCurrencyCode", "currency"])
-      .custom((_, { req }) => {
-        const v = pickFirst(
-          req.body?.senderCurrencySymbol,
-          req.body?.currencySource,
-          req.body?.senderCurrencyCode,
-          req.body?.currency
-        );
-        if (!String(v).trim()) throw new Error("Symbole de la devise de l’expéditeur requis");
-        return true;
-      })
-      .customSanitizer((_, { req }) => {
-        const v = pickFirst(
-          req.body?.senderCurrencySymbol,
-          req.body?.currencySource,
-          req.body?.senderCurrencyCode,
-          req.body?.currency
-        );
-        // on force senderCurrencySymbol pour legacy controller
-        req.body.senderCurrencySymbol = String(v).trim();
-        return req.body.senderCurrencySymbol;
-      }),
+    // ✅ On valide senderCurrencySymbol (normalisé depuis senderCurrencyCode/currencySource/currency)
+    body("senderCurrencySymbol").notEmpty().withMessage("Devise source requise").trim().escape(),
 
-    // ✅ country: accepte country OU destinationCountry
-    body(["country", "destinationCountry"])
-      .custom((_, { req }) => {
-        const c = pickFirst(req.body?.country, req.body?.destinationCountry);
-        if (!String(c).trim()) throw new Error("Pays de destination requis");
-        return true;
-      })
-      .customSanitizer((_, { req }) => {
-        const c = pickFirst(req.body?.country, req.body?.destinationCountry);
-        req.body.country = String(c).trim();
-        return req.body.country;
-      }),
+    // ✅ IMPORTANT: on ne valide PLUS destinationCountry
+    // On valide uniquement country (normalisé depuis destinationCountry si besoin)
+    body("country").notEmpty().withMessage("Pays de destination requis").trim().escape(),
 
     body("description").optional().trim().escape(),
+
     body("recipientInfo.name").optional().trim().escape(),
 
-    // ✅ recipientInfo.email devient optional (car tu as déjà toEmail)
-    body("recipientInfo.email")
-      .optional()
-      .isEmail()
-      .withMessage("Email du destinataire invalide")
-      .normalizeEmail(),
+    body("recipientInfo.email").isEmail().withMessage("Email du destinataire invalide").normalizeEmail(),
 
-    body("question")
-      .notEmpty()
-      .withMessage("Question de sécurité requise")
-      .trim()
-      .escape(),
+    body("question").notEmpty().withMessage("Question de sécurité requise").trim().escape(),
 
-    body("securityCode")
-      .notEmpty()
-      .withMessage("Code de sécurité requis")
-      .trim()
-      .escape(),
+    body("securityCode").notEmpty().withMessage("Code de sécurité requis").trim().escape(),
   ],
   requestValidator,
   asyncHandler(initiateInternal)
@@ -190,21 +155,17 @@ router.post(
 
 /**
  * POST /api/v1/transactions/confirm
+ * Confirme une transaction "pending" (crédite le destinataire après securityCode)
  */
 router.post(
   "/confirm",
   protect,
   [
     body("transactionId").isMongoId().withMessage("ID de transaction invalide"),
-    body("securityCode")
-      .notEmpty()
-      .withMessage("Code de sécurité requis")
-      .trim()
-      .escape(),
-    body("provider")
-      .optional()
-      .trim()
-      .escape(),
+    body("securityCode").notEmpty().withMessage("Code de sécurité requis").trim().escape(),
+
+    // si ton mobile envoie provider, on garde
+    body("provider").notEmpty().withMessage("Fournisseur requis").trim().escape(),
   ],
   requestValidator,
   asyncHandler(confirmController)
@@ -212,6 +173,7 @@ router.post(
 
 /**
  * POST /api/v1/transactions/cancel
+ * Annule une transaction "pending" (remboursement)
  */
 router.post(
   "/cancel",
@@ -225,19 +187,24 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/refund (admin)
+ * POST /api/v1/transactions/refund
+ * Rembourse une transaction confirmée (admin/superadmin ONLY)
  */
 router.post(
   "/refund",
   protect,
   requireRole(["admin", "superadmin"]),
-  [body("transactionId").isMongoId().withMessage("ID de transaction invalide"), body("reason").optional().trim().escape()],
+  [
+    body("transactionId").isMongoId().withMessage("ID de transaction invalide"),
+    body("reason").optional().trim().escape(),
+  ],
   requestValidator,
   asyncHandler(refundController)
 );
 
 /**
- * POST /api/v1/transactions/validate (admin)
+ * POST /api/v1/transactions/validate
+ * Valide une transaction (admin/superadmin ONLY)
  */
 router.post(
   "/validate",
@@ -253,7 +220,8 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/reassign (admin)
+ * POST /api/v1/transactions/reassign
+ * Réassigne la transaction à un autre destinataire (admin/superadmin ONLY)
  */
 router.post(
   "/reassign",
@@ -268,7 +236,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/archive (admin)
+ * POST /api/v1/transactions/archive
  */
 router.post(
   "/archive",
@@ -280,7 +248,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/relaunch (admin)
+ * POST /api/v1/transactions/relaunch
  */
 router.post(
   "/relaunch",
