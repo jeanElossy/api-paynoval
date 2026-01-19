@@ -2011,21 +2011,40 @@ exports.getTransactionController = async (req, res, next) => {
 //     const body = req.body || {};
 
 //     // currency ISO
-//     const isoSource = String(body.currencySource || body.currencyCode || body.senderCurrencyCode || body.currency || '').trim().toUpperCase();
-//     const isoTarget = String(body.currencyTarget || '').trim().toUpperCase();
+//     const isoSource = String(
+//       body.currencySource ||
+//         body.currencyCode ||
+//         body.senderCurrencyCode ||
+//         body.fromCurrency ||
+//         body.currency ||
+//         ""
+//     )
+//       .trim()
+//       .toUpperCase();
 
-//     // legacy symbols (si ton validator attend encore ça)
-//     // On remplit depuis ISO si manquant.
-//     if (!body.senderCurrencySymbol && isoSource) body.senderCurrencySymbol = isoSource; // ici tu stockes ISO dans senderCurrencySymbol (OK)
+//     const isoTarget = String(
+//       body.currencyTarget ||
+//         body.toCurrency ||
+//         body.localCurrencyCode ||
+//         ""
+//     )
+//       .trim()
+//       .toUpperCase();
+
+//     // legacy symbols (compat)
+//     if (!body.senderCurrencySymbol && isoSource) body.senderCurrencySymbol = isoSource;
 //     if (!body.localCurrencySymbol && isoTarget) body.localCurrencySymbol = isoTarget;
 
-//     // country: priorité payload, sinon transactionData/country de l’utilisateur (fallback)
-//     // ⚠️ ton log montre country manquant parfois côté microservice
+//     // country fallback
 //     if (!body.country) {
-//       body.country = body.countryTarget || body.destinationCountry || req.user?.selectedCountry || req.user?.country || '';
+//       body.country =
+//         body.countryTarget ||
+//         body.destinationCountry ||
+//         req.user?.selectedCountry ||
+//         req.user?.country ||
+//         "";
 //     }
 
-//     // ✅ recopie dans req.body pour la suite
 //     req.body = body;
 
 //     const {
@@ -2063,7 +2082,7 @@ exports.getTransactionController = async (req, res, next) => {
 //       sender: senderId,
 //       receiverEmail: cleanEmail,
 //       amount: amt,
-//       currency: senderCurrencySymbol, // maintenant ISO
+//       currency: senderCurrencySymbol, // ISO maintenant
 //     });
 
 //     const sessOpts = maybeSessionOpts(session);
@@ -2134,13 +2153,22 @@ exports.getTransactionController = async (req, res, next) => {
 //       { $inc: { amount: -amt } },
 //       { new: true, ...sessOpts }
 //     );
-
 //     if (!debited) throw createError(400, "Solde insuffisant");
 
+//     // ✅ Admin fee -> CAD (ne doit pas faire crasher si FX 429)
 //     let adminFeeInCAD = 0;
 //     if (fee > 0) {
-//       const { converted } = await convertAmount(currencySourceISO, "CAD", fee);
-//       adminFeeInCAD = round2(converted);
+//       try {
+//         if (currencySourceISO === "CAD") {
+//           adminFeeInCAD = round2(fee);
+//         } else {
+//           const { converted } = await convertAmount(currencySourceISO, "CAD", fee);
+//           adminFeeInCAD = round2(converted);
+//         }
+//       } catch (e) {
+//         logger?.warn?.("[FX] Conversion fee->CAD impossible, fallback 0", { err: e?.message || e });
+//         adminFeeInCAD = 0;
+//       }
 //     }
 
 //     const adminEmail = "admin@paynoval.com";
@@ -2155,6 +2183,7 @@ exports.getTransactionController = async (req, res, next) => {
 //       );
 //     }
 
+//     // --- Conversion net -> local (réutilise snapshot si présent) ---
 //     let rateUsed = null;
 //     let convertedLocalNet = null;
 
@@ -2164,9 +2193,15 @@ exports.getTransactionController = async (req, res, next) => {
 //     }
 
 //     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
-//       const { rate, converted } = await convertAmount(currencySourceISO, currencyTargetISO, netAmount);
-//       rateUsed = rate;
-//       convertedLocalNet = round2(converted);
+//       // ✅ évite FX si même devise
+//       if (currencySourceISO === currencyTargetISO) {
+//         rateUsed = 1;
+//         convertedLocalNet = round2(netAmount);
+//       } else {
+//         const { rate, converted } = await convertAmount(currencySourceISO, currencyTargetISO, netAmount);
+//         rateUsed = rate;
+//         convertedLocalNet = round2(converted);
+//       }
 //     }
 
 //     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
@@ -2205,7 +2240,7 @@ exports.getTransactionController = async (req, res, next) => {
 //           sender: senderUser._id,
 //           receiver: receiver._id,
 
-//           // legacy (on garde, mais valeurs ISO)
+//           // legacy (valeurs ISO)
 //           amount: decAmt,
 //           transactionFees: decFees,
 //           netAmount: decNet,
@@ -2267,8 +2302,6 @@ exports.getTransactionController = async (req, res, next) => {
 //   }
 // };
 
-
-
 exports.initiateInternal = async (req, res, next) => {
   const session = await startTxSession();
   try {
@@ -2307,8 +2340,10 @@ exports.initiateInternal = async (req, res, next) => {
       body.country =
         body.countryTarget ||
         body.destinationCountry ||
+        body.originCountry ||
         req.user?.selectedCountry ||
         req.user?.country ||
+        req.user?.countryCode ||
         "";
     }
 
@@ -2371,6 +2406,10 @@ exports.initiateInternal = async (req, res, next) => {
     // ✅ Normalize currencies ISO (standard)
     const currencySourceISO = normCur(senderCurrencySymbol, country) || sanitize(senderCurrencySymbol);
     const currencyTargetISO = normCur(localCurrencySymbol, country) || sanitize(localCurrencySymbol);
+
+    // ✅ IMPORTANT: force legacy symbol = ISO pour éviter FCFA / F CFA / etc.
+    req.body.senderCurrencySymbol = currencySourceISO;
+    req.body.localCurrencySymbol = currencyTargetISO;
 
     let gatewayBase = (GATEWAY_URL || process.env.GATEWAY_URL || "https://api-gateway-8cgy.onrender.com").replace(/\/+$/, "");
     if (!gatewayBase.endsWith("/api/v1")) gatewayBase = `${gatewayBase}/api/v1`;
@@ -2460,7 +2499,6 @@ exports.initiateInternal = async (req, res, next) => {
     }
 
     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
-      // ✅ évite FX si même devise
       if (currencySourceISO === currencyTargetISO) {
         rateUsed = 1;
         convertedLocalNet = round2(netAmount);
@@ -2568,7 +2606,6 @@ exports.initiateInternal = async (req, res, next) => {
     return next(err);
   }
 };
-
 
 
 /* ------------------------------------------------------------------ */

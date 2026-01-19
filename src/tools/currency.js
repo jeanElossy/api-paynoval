@@ -27,94 +27,94 @@ const inflight = new Map();
 
 // Alias devises -> ISO
 const CURRENCY_ALIASES = {
-  "FCA": "XOF",
-  "FCFA": "XOF",
+  FCA: "XOF",
+  FCFA: "XOF",
   "F CFA": "XOF",
-  "CFA": "XOF",
+  CFA: "XOF",
 
-  "EURO": "EUR",
+  EURO: "EUR",
   "€": "EUR",
 
-  "USD": "USD",
-  "$": "USD",
-  "$USD": "USD",
+  USD: "USD",
+  $: "USD",
+  $USD: "USD",
   "US DOLLAR": "USD",
 
-  "CAD": "CAD",
-  "$CAD": "CAD",
+  CAD: "CAD",
+  $CAD: "CAD",
   "CA$": "CAD",
 
-  "GBP": "GBP",
+  GBP: "GBP",
   "£": "GBP",
-  "POUND": "GBP",
+  POUND: "GBP",
 
-  "JPY": "JPY",
-  "YEN": "JPY",
+  JPY: "JPY",
+  YEN: "JPY",
   "¥": "JPY",
 
-  "AUD": "AUD",
+  AUD: "AUD",
   "A$": "AUD",
 
-  "CHF": "CHF",
+  CHF: "CHF",
   "SWISS FRANC": "CHF",
 
-  "CNY": "CNY",
-  "RMB": "CNY",
+  CNY: "CNY",
+  RMB: "CNY",
   "CN¥": "CNY",
 
-  "HKD": "HKD",
+  HKD: "HKD",
   "HK$": "HKD",
 
-  "SGD": "SGD",
+  SGD: "SGD",
   "SG$": "SGD",
 
-  "NZD": "NZD",
+  NZD: "NZD",
   "NZ$": "NZD",
 
-  "INR": "INR",
-  "RUPEE": "INR",
+  INR: "INR",
+  RUPEE: "INR",
   "₹": "INR",
 
-  "BRL": "BRL",
-  "REAL": "BRL",
+  BRL: "BRL",
+  REAL: "BRL",
   "R$": "BRL",
 
-  "MXN": "MXN",
+  MXN: "MXN",
   "MX$": "MXN",
 
-  "ZAR": "ZAR",
-  "RAND": "ZAR",
+  ZAR: "ZAR",
+  RAND: "ZAR",
 
-  "SEK": "SEK",
-  "KRONA": "SEK",
+  SEK: "SEK",
+  KRONA: "SEK",
 
-  "NOK": "NOK",
-  "DKK": "DKK",
+  NOK: "NOK",
+  DKK: "DKK",
 
-  "PLN": "PLN",
+  PLN: "PLN",
   "ZŁ": "PLN",
 
-  "THB": "THB",
+  THB: "THB",
   "฿": "THB",
 
-  "TRY": "TRY",
-  "LIRA": "TRY",
+  TRY: "TRY",
+  LIRA: "TRY",
   "₺": "TRY",
 
-  "SAR": "SAR",
-  "AED": "AED",
+  SAR: "SAR",
+  AED: "AED",
 
-  "PHP": "PHP",
+  PHP: "PHP",
   "₱": "PHP",
 
-  "KRW": "KRW",
+  KRW: "KRW",
   "₩": "KRW",
 
-  "IDR": "IDR",
-  "RP": "IDR",
-  "Rp": "IDR",
+  IDR: "IDR",
+  RP: "IDR",
+  Rp: "IDR",
 
-  "VND": "VND",
+  VND: "VND",
   "₫": "VND",
 };
 
@@ -156,11 +156,10 @@ async function fetchRatesFromApi(base) {
   const baseNorm = normalizeCurrencyCode(base);
   if (!baseNorm) throw new Error(`Invalid currency code: ${base}`);
 
-  // Ton config exchange.apiUrl ressemble à ".../v6/<key>/latest/XOF"
-  // On garde ton approche mais on gère mieux 429.
   const apiUrl = String(exchange?.apiUrl || "").trim();
   if (!apiUrl) throw new Error("exchange.apiUrl manquant");
 
+  // ex: https://v6.exchangerate-api.com/v6/<key>/latest/XOF
   const root = apiUrl.replace(/\/latest\/.*$/, "").replace(/\/+$/, "");
   const url = `${root}/latest/${encodeURIComponent(baseNorm)}`;
 
@@ -232,13 +231,9 @@ async function getRates(rawBase) {
       logger.info({ base, timestamp: now() }, "Taux mis en cache");
       return rates;
     } catch (e) {
-      // fallback stale
       const fallback = getStale(base);
       if (fallback) {
-        logger.warn(
-          { base, err: e?.code || e?.message || e },
-          "FX API indisponible/429 -> fallback stale rates"
-        );
+        logger.warn({ base, err: e?.code || e?.message || e }, "FX API indisponible/429 -> fallback stale rates");
         return fallback;
       }
       throw e;
@@ -264,6 +259,7 @@ function clearCache() {
  */
 async function convertAmount(from, to, amount) {
   const value = Number(amount);
+  // ✅ FIX: 0 autorisé (ne doit pas throw), négatif interdit
   if (!Number.isFinite(value) || value < 0) {
     throw new Error("Montant invalide pour conversion");
   }
@@ -275,9 +271,13 @@ async function convertAmount(from, to, amount) {
     throw new Error(`Devise invalide: from=${from} to=${to}`);
   }
 
-  // Même devise => taux 1
   if (fromCode === toCode) {
     return { rate: 1, converted: Number(value.toFixed(2)) };
+  }
+
+  // ✅ FIX: si montant = 0 => pas besoin de FX
+  if (value === 0) {
+    return { rate: 0, converted: 0 };
   }
 
   const rates = await getRates(fromCode);
