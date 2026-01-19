@@ -1,4 +1,6 @@
 // File: src/routes/transactionsRoutes.js
+"use strict";
+
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const { body } = require("express-validator");
@@ -40,55 +42,62 @@ const limiter = rateLimit({
 router.use(["/initiate", "/confirm", "/cancel"], limiter);
 
 /**
- * ✅ Middleware de normalisation payload (compat Gateway/Mobile)
- * - Accepte country OU destinationCountry
- * - Accepte senderCurrencySymbol OU senderCurrencyCode/currencySource/currencyCode/currency
- * - Accepte localCurrencySymbol OU localCurrencyCode/currencyTarget
+ * Helpers compat: NEW + LEGACY
+ */
+const pickFirst = (...vals) => {
+  for (const v of vals) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return "";
+};
+
+const safeToFloat = (v) => {
+  const n =
+    typeof v === "number"
+      ? v
+      : parseFloat(String(v).replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : NaN;
+};
+
+const upISO = (v) => String(v || "").trim().toUpperCase();
+
+/**
+ * ✅ Normalisation payload initiate (évite doubles erreurs)
+ * - country <- country OR destinationCountry
+ * - destinationCountry <- country (alias, optionnel)
+ * - senderCurrencySymbol <- senderCurrencySymbol OR currencySource OR senderCurrencyCode OR currency OR currencyCode
+ * - localCurrencySymbol <- localCurrencySymbol OR currencyTarget OR localCurrencyCode
+ * - amount <- amount OR amountSource
  */
 function normalizeInitiateBody(req, _res, next) {
   try {
     const b = req.body || {};
 
-    // --- country / destinationCountry ---
-    const cRaw =
-      b.country ||
-      b.destinationCountry ||
-      b.countryTarget || // (au cas où)
-      "";
-    const c = String(cRaw || "").trim();
-    if (c) {
-      b.country = c;
-      b.destinationCountry = c; // on garde les 2 pour compat, mais on valide UNE seule
+    // amount
+    const rawAmount = pickFirst(b.amount, b.amountSource);
+    if (rawAmount !== "") b.amount = safeToFloat(rawAmount);
+
+    // country
+    const rawCountry = pickFirst(b.country, b.destinationCountry);
+    if (rawCountry) {
+      b.country = String(rawCountry).trim();
+      // on garde destinationCountry comme alias (utile côté gateway), mais on NE VALIDE PAS ce champ
+      if (!b.destinationCountry) b.destinationCountry = b.country;
     }
 
-    // --- senderCurrencySymbol (ISO) ---
-    const sCurRaw =
-      b.senderCurrencySymbol ||
-      b.senderCurrencyCode ||
-      b.currencySource ||
-      b.currencyCode ||
-      b.currency ||
-      "";
-    const sCur = String(sCurRaw || "").trim();
-    if (sCur) {
-      b.senderCurrencySymbol = sCur.toUpperCase(); // ISO: XOF/CAD/EUR/USD
-    }
+    // sender currency (ISO)
+    const rawSrc = pickFirst(
+      b.senderCurrencySymbol,
+      b.currencySource,
+      b.senderCurrencyCode,
+      b.currencyCode,
+      b.currency
+    );
+    if (rawSrc) b.senderCurrencySymbol = upISO(rawSrc);
 
-    // --- localCurrencySymbol (ISO) ---
-    const tCurRaw =
-      b.localCurrencySymbol ||
-      b.localCurrencyCode ||
-      b.currencyTarget ||
-      "";
-    const tCur = String(tCurRaw || "").trim();
-    if (tCur) {
-      b.localCurrencySymbol = tCur.toUpperCase();
-    }
-
-    // --- amount fallback ---
-    if (b.amount === undefined || b.amount === null || String(b.amount).trim() === "") {
-      if (b.amountSource !== undefined && b.amountSource !== null) b.amount = b.amountSource;
-    }
+    // target currency (ISO)
+    const rawTgt = pickFirst(b.localCurrencySymbol, b.currencyTarget, b.localCurrencyCode);
+    if (rawTgt) b.localCurrencySymbol = upISO(rawTgt);
 
     req.body = b;
   } catch {
@@ -119,35 +128,97 @@ router.post(
   protect,
   normalizeInitiateBody,
   [
-    body("toEmail").isEmail().withMessage("Email du destinataire invalide").normalizeEmail(),
+    body("toEmail")
+      .isEmail()
+      .withMessage("Email du destinataire invalide")
+      .normalizeEmail(),
 
-    body("amount").isFloat({ gt: 0 }).withMessage("Le montant doit être supérieur à 0").toFloat(),
+    // ✅ amount (déjà normalisé depuis amountSource si besoin)
+    body("amount")
+      .custom((v) => {
+        const n = safeToFloat(v);
+        if (!Number.isFinite(n) || n <= 0) throw new Error("Le montant doit être supérieur à 0");
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.amount = safeToFloat(v);
+        return req.body.amount;
+      }),
 
-    body("transactionFees").optional().isFloat({ min: 0 }).withMessage("Les frais doivent être un nombre positif").toFloat(),
+    body("transactionFees")
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage("Les frais doivent être un nombre positif")
+      .toFloat(),
 
-    body("funds").notEmpty().withMessage("Type de fonds requis").trim().escape(),
+    body("funds")
+      .notEmpty()
+      .withMessage("Type de fonds requis")
+      .trim()
+      .escape(),
 
-    body("destination").notEmpty().withMessage("Destination requise").trim().escape(),
+    body("destination")
+      .notEmpty()
+      .withMessage("Destination requise")
+      .trim()
+      .escape(),
 
-    // ✅ On valide localCurrencySymbol (normalisé depuis localCurrencyCode/currencyTarget)
-    body("localCurrencySymbol").notEmpty().withMessage("Devise cible requise").trim().escape(),
+    // ✅ localCurrencySymbol (déjà normalisé depuis currencyTarget/localCurrencyCode)
+    body("localCurrencySymbol")
+      .custom((v) => {
+        if (!String(v || "").trim()) throw new Error("Symbole de la devise locale requis");
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.localCurrencySymbol = upISO(v);
+        return req.body.localCurrencySymbol;
+      }),
 
-    // ✅ On valide senderCurrencySymbol (normalisé depuis senderCurrencyCode/currencySource/currency)
-    body("senderCurrencySymbol").notEmpty().withMessage("Devise source requise").trim().escape(),
+    // ✅ senderCurrencySymbol (déjà normalisé depuis currencySource/senderCurrencyCode/currency)
+    body("senderCurrencySymbol")
+      .custom((v) => {
+        if (!String(v || "").trim()) throw new Error("Symbole de la devise de l’expéditeur requis");
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.senderCurrencySymbol = upISO(v);
+        return req.body.senderCurrencySymbol;
+      }),
 
-    // ✅ IMPORTANT: on ne valide PLUS destinationCountry
-    // On valide uniquement country (normalisé depuis destinationCountry si besoin)
-    body("country").notEmpty().withMessage("Pays de destination requis").trim().escape(),
+    // ✅ country (déjà normalisé depuis destinationCountry)
+    body("country")
+      .custom((v) => {
+        if (!String(v || "").trim()) throw new Error("Pays de destination requis");
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.country = String(v || "").trim();
+        // alias compat
+        if (!req.body.destinationCountry) req.body.destinationCountry = req.body.country;
+        return req.body.country;
+      }),
 
     body("description").optional().trim().escape(),
-
     body("recipientInfo.name").optional().trim().escape(),
 
-    body("recipientInfo.email").isEmail().withMessage("Email du destinataire invalide").normalizeEmail(),
+    // ✅ recipientInfo.email optional (car tu as déjà toEmail)
+    body("recipientInfo.email")
+      .optional()
+      .isEmail()
+      .withMessage("Email du destinataire invalide")
+      .normalizeEmail(),
 
-    body("question").notEmpty().withMessage("Question de sécurité requise").trim().escape(),
+    body("question")
+      .notEmpty()
+      .withMessage("Question de sécurité requise")
+      .trim()
+      .escape(),
 
-    body("securityCode").notEmpty().withMessage("Code de sécurité requis").trim().escape(),
+    body("securityCode")
+      .notEmpty()
+      .withMessage("Code de sécurité requis")
+      .trim()
+      .escape(),
   ],
   requestValidator,
   asyncHandler(initiateInternal)
@@ -155,7 +226,6 @@ router.post(
 
 /**
  * POST /api/v1/transactions/confirm
- * Confirme une transaction "pending" (crédite le destinataire après securityCode)
  */
 router.post(
   "/confirm",
@@ -163,9 +233,7 @@ router.post(
   [
     body("transactionId").isMongoId().withMessage("ID de transaction invalide"),
     body("securityCode").notEmpty().withMessage("Code de sécurité requis").trim().escape(),
-
-    // si ton mobile envoie provider, on garde
-    body("provider").notEmpty().withMessage("Fournisseur requis").trim().escape(),
+    body("provider").optional().trim().escape(),
   ],
   requestValidator,
   asyncHandler(confirmController)
@@ -173,7 +241,6 @@ router.post(
 
 /**
  * POST /api/v1/transactions/cancel
- * Annule une transaction "pending" (remboursement)
  */
 router.post(
   "/cancel",
@@ -187,8 +254,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/refund
- * Rembourse une transaction confirmée (admin/superadmin ONLY)
+ * POST /api/v1/transactions/refund (admin)
  */
 router.post(
   "/refund",
@@ -203,8 +269,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/validate
- * Valide une transaction (admin/superadmin ONLY)
+ * POST /api/v1/transactions/validate (admin)
  */
 router.post(
   "/validate",
@@ -220,8 +285,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/reassign
- * Réassigne la transaction à un autre destinataire (admin/superadmin ONLY)
+ * POST /api/v1/transactions/reassign (admin)
  */
 router.post(
   "/reassign",
@@ -236,7 +300,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/archive
+ * POST /api/v1/transactions/archive (admin)
  */
 router.post(
   "/archive",
@@ -248,7 +312,7 @@ router.post(
 );
 
 /**
- * POST /api/v1/transactions/relaunch
+ * POST /api/v1/transactions/relaunch (admin)
  */
 router.post(
   "/relaunch",

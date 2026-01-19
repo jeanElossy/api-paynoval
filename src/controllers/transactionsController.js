@@ -2002,6 +2002,273 @@ exports.getTransactionController = async (req, res, next) => {
 /* INITIATE (PayNoval -> PayNoval)                                     */
 /* ------------------------------------------------------------------ */
 
+// exports.initiateInternal = async (req, res, next) => {
+//   const session = await startTxSession();
+//   try {
+//     if (CAN_USE_SHARED_SESSION) session.startTransaction();
+
+//     // ✅ PATCH COMPAT: accepte NEW (currencySource/currencyTarget) + LEGACY
+//     const body = req.body || {};
+
+//     // currency ISO
+//     const isoSource = String(body.currencySource || body.currencyCode || body.senderCurrencyCode || body.currency || '').trim().toUpperCase();
+//     const isoTarget = String(body.currencyTarget || '').trim().toUpperCase();
+
+//     // legacy symbols (si ton validator attend encore ça)
+//     // On remplit depuis ISO si manquant.
+//     if (!body.senderCurrencySymbol && isoSource) body.senderCurrencySymbol = isoSource; // ici tu stockes ISO dans senderCurrencySymbol (OK)
+//     if (!body.localCurrencySymbol && isoTarget) body.localCurrencySymbol = isoTarget;
+
+//     // country: priorité payload, sinon transactionData/country de l’utilisateur (fallback)
+//     // ⚠️ ton log montre country manquant parfois côté microservice
+//     if (!body.country) {
+//       body.country = body.countryTarget || body.destinationCountry || req.user?.selectedCountry || req.user?.country || '';
+//     }
+
+//     // ✅ recopie dans req.body pour la suite
+//     req.body = body;
+
+//     const {
+//       toEmail,
+//       amount,
+//       senderCurrencySymbol,
+//       localCurrencySymbol,
+//       recipientInfo = {},
+//       description = "",
+//       question,
+//       securityCode,
+//       destination,
+//       funds,
+//       country,
+//     } = req.body;
+
+//     const cleanEmail = String(toEmail || "").trim().toLowerCase();
+//     if (!cleanEmail || !isEmailLike(cleanEmail)) throw createError(400, "Email du destinataire requis");
+
+//     if (!question || !securityCode) throw createError(400, "Question et code de sécurité requis");
+//     if (!destination || !funds || !country) throw createError(400, "Données de transaction incomplètes");
+//     if (description && description.length > MAX_DESC_LENGTH) throw createError(400, "Description trop longue");
+
+//     const authHeader = req.headers.authorization;
+//     if (!authHeader || !authHeader.startsWith("Bearer ")) throw createError(401, "Token manquant");
+
+//     const senderId = req.user.id;
+
+//     const amt = toFloat(amount ?? req.body.amountSource);
+//     if (!amt || Number.isNaN(amt) || amt <= 0) throw createError(400, "Montant invalide");
+
+//     await validationService.validateTransactionAmount({ amount: amt });
+
+//     await validationService.detectBasicFraud({
+//       sender: senderId,
+//       receiverEmail: cleanEmail,
+//       amount: amt,
+//       currency: senderCurrencySymbol, // maintenant ISO
+//     });
+
+//     const sessOpts = maybeSessionOpts(session);
+
+//     const senderUser = await User.findById(senderId)
+//       .select("fullName email")
+//       .lean()
+//       .session(sessOpts.session || null);
+//     if (!senderUser) throw createError(403, "Utilisateur invalide");
+
+//     const receiver = await User.findOne({ email: cleanEmail })
+//       .select("_id fullName email")
+//       .lean()
+//       .session(sessOpts.session || null);
+//     if (!receiver) throw createError(404, "Destinataire introuvable");
+
+//     if (receiver._id.toString() === senderId) throw createError(400, "Auto-transfert impossible");
+
+//     // ✅ Normalize currencies ISO (standard)
+//     const currencySourceISO = normCur(senderCurrencySymbol, country) || sanitize(senderCurrencySymbol);
+//     const currencyTargetISO = normCur(localCurrencySymbol, country) || sanitize(localCurrencySymbol);
+
+//     let gatewayBase = (GATEWAY_URL || process.env.GATEWAY_URL || "https://api-gateway-8cgy.onrender.com").replace(/\/+$/, "");
+//     if (!gatewayBase.endsWith("/api/v1")) gatewayBase = `${gatewayBase}/api/v1`;
+
+//     const feeUrl = `${gatewayBase}/fees/simulate`;
+//     const simulateParams = {
+//       provider: "paynoval",
+//       amount: amt,
+//       fromCurrency: currencySourceISO,
+//       toCurrency: currencyTargetISO,
+//       country,
+//     };
+
+//     let feeData;
+//     try {
+//       const feeRes = await axios.get(feeUrl, {
+//         params: simulateParams,
+//         headers: {
+//           Authorization: authHeader,
+//           ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
+//         },
+//         timeout: 10000,
+//       });
+
+//       const raw = feeRes.data?.data ?? feeRes.data;
+//       if (!raw || feeRes.data?.success === false) {
+//         throw createError(502, "Erreur calcul frais (gateway)");
+//       }
+//       feeData = raw;
+//     } catch (e) {
+//       logger.error("[fees/simulate] échec appel Gateway", {
+//         url: feeUrl,
+//         params: simulateParams,
+//         status: e.response?.status,
+//         responseData: e.response?.data,
+//       });
+//       throw createError(502, "Service de calcul des frais indisponible");
+//     }
+
+//     const fee = round2(toFloat(feeData.fees));
+//     const netAmount = round2(toFloat(feeData.netAfterFees));
+//     const feeId = feeData.feeId || null;
+//     const feeSnapshot = feeData;
+
+//     const debited = await Balance.findOneAndUpdate(
+//       { user: senderId, amount: { $gte: amt } },
+//       { $inc: { amount: -amt } },
+//       { new: true, ...sessOpts }
+//     );
+
+//     if (!debited) throw createError(400, "Solde insuffisant");
+
+//     let adminFeeInCAD = 0;
+//     if (fee > 0) {
+//       const { converted } = await convertAmount(currencySourceISO, "CAD", fee);
+//       adminFeeInCAD = round2(converted);
+//     }
+
+//     const adminEmail = "admin@paynoval.com";
+//     const adminUser = await User.findOne({ email: adminEmail }).select("_id").session(sessOpts.session || null);
+//     if (!adminUser) throw createError(500, "Compte administrateur introuvable");
+
+//     if (adminFeeInCAD > 0) {
+//       await Balance.findOneAndUpdate(
+//         { user: adminUser._id },
+//         { $inc: { amount: adminFeeInCAD } },
+//         { new: true, upsert: true, ...sessOpts }
+//       );
+//     }
+
+//     let rateUsed = null;
+//     let convertedLocalNet = null;
+
+//     if (feeSnapshot && feeSnapshot.convertedNetAfterFees !== undefined && feeSnapshot.convertedNetAfterFees !== null) {
+//       rateUsed = toFloat(feeSnapshot.exchangeRate, null);
+//       convertedLocalNet = round2(toFloat(feeSnapshot.convertedNetAfterFees));
+//     }
+
+//     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
+//       const { rate, converted } = await convertAmount(currencySourceISO, currencyTargetISO, netAmount);
+//       rateUsed = rate;
+//       convertedLocalNet = round2(converted);
+//     }
+
+//     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
+//       throw createError(500, "Conversion devise échouée (montant local invalide)");
+//     }
+
+//     const fxRate = Number.isFinite(toFloat(rateUsed, null)) ? toFloat(rateUsed) : 1;
+
+//     // ✅ STANDARD fields
+//     const amountSourceStd = round2(amt);
+//     const feeSourceStd = round2(fee);
+//     const amountTargetStd = round2(convertedLocalNet);
+
+//     const money = {
+//       source: { amount: amountSourceStd, currency: currencySourceISO },
+//       feeSource: { amount: feeSourceStd, currency: currencySourceISO },
+//       target: { amount: amountTargetStd, currency: currencyTargetISO },
+//       fxRateSourceToTarget: fxRate,
+//     };
+
+//     const decAmt = dec2(amountSourceStd);
+//     const decFees = dec2(feeSourceStd);
+//     const decNet = dec2(netAmount);
+//     const decLocal = dec2(amountTargetStd);
+//     const decExchange = mongoose.Types.Decimal128.fromString(String(fxRate));
+
+//     const nameDest = recipientInfo.name && sanitize(recipientInfo.name) ? sanitize(recipientInfo.name) : receiver.fullName;
+
+//     const reference = await generateTransactionRef();
+//     const storedSecurityCode = sha256Hex(String(securityCode).replace(/[<>\\/{};]/g, "").trim());
+
+//     const [tx] = await Transaction.create(
+//       [
+//         {
+//           reference,
+//           sender: senderUser._id,
+//           receiver: receiver._id,
+
+//           // legacy (on garde, mais valeurs ISO)
+//           amount: decAmt,
+//           transactionFees: decFees,
+//           netAmount: decNet,
+//           senderCurrencySymbol: currencySourceISO,
+//           exchangeRate: decExchange,
+//           localAmount: decLocal,
+//           localCurrencySymbol: currencyTargetISO,
+
+//           // standard
+//           amountSource: dec2(amountSourceStd),
+//           amountTarget: dec2(amountTargetStd),
+//           feeSource: dec2(feeSourceStd),
+//           fxRateSourceToTarget: mongoose.Types.Decimal128.fromString(String(fxRate)),
+//           currencySource: currencySourceISO,
+//           currencyTarget: currencyTargetISO,
+//           money,
+
+//           feeSnapshot,
+//           feeId,
+
+//           senderName: senderUser.fullName,
+//           senderEmail: senderUser.email,
+//           nameDestinataire: nameDest,
+//           recipientEmail: cleanEmail,
+
+//           country: sanitize(country),
+//           description: sanitize(description),
+//           securityQuestion: sanitize(question),
+//           securityCode: storedSecurityCode,
+
+//           destination: sanitize(destination),
+//           funds: sanitize(funds),
+
+//           status: "pending",
+//           attemptCount: 0,
+//           lockedUntil: null,
+//         },
+//       ],
+//       sessOpts
+//     );
+
+//     await notifyParties(tx, "initiated", session, currencySourceISO);
+
+//     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+//     session.endSession();
+
+//     return res.status(201).json({
+//       success: true,
+//       transactionId: tx._id.toString(),
+//       reference: tx.reference,
+//       adminFeeInCAD,
+//     });
+//   } catch (err) {
+//     try {
+//       if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+//     } catch {}
+//     session.endSession();
+//     return next(err);
+//   }
+// };
+
+
+
 exports.initiateInternal = async (req, res, next) => {
   const session = await startTxSession();
   try {
@@ -2011,21 +2278,40 @@ exports.initiateInternal = async (req, res, next) => {
     const body = req.body || {};
 
     // currency ISO
-    const isoSource = String(body.currencySource || body.currencyCode || body.senderCurrencyCode || body.currency || '').trim().toUpperCase();
-    const isoTarget = String(body.currencyTarget || '').trim().toUpperCase();
+    const isoSource = String(
+      body.currencySource ||
+        body.currencyCode ||
+        body.senderCurrencyCode ||
+        body.fromCurrency ||
+        body.currency ||
+        ""
+    )
+      .trim()
+      .toUpperCase();
 
-    // legacy symbols (si ton validator attend encore ça)
-    // On remplit depuis ISO si manquant.
-    if (!body.senderCurrencySymbol && isoSource) body.senderCurrencySymbol = isoSource; // ici tu stockes ISO dans senderCurrencySymbol (OK)
+    const isoTarget = String(
+      body.currencyTarget ||
+        body.toCurrency ||
+        body.localCurrencyCode ||
+        ""
+    )
+      .trim()
+      .toUpperCase();
+
+    // legacy symbols (compat)
+    if (!body.senderCurrencySymbol && isoSource) body.senderCurrencySymbol = isoSource;
     if (!body.localCurrencySymbol && isoTarget) body.localCurrencySymbol = isoTarget;
 
-    // country: priorité payload, sinon transactionData/country de l’utilisateur (fallback)
-    // ⚠️ ton log montre country manquant parfois côté microservice
+    // country fallback
     if (!body.country) {
-      body.country = body.countryTarget || body.destinationCountry || req.user?.selectedCountry || req.user?.country || '';
+      body.country =
+        body.countryTarget ||
+        body.destinationCountry ||
+        req.user?.selectedCountry ||
+        req.user?.country ||
+        "";
     }
 
-    // ✅ recopie dans req.body pour la suite
     req.body = body;
 
     const {
@@ -2063,7 +2349,7 @@ exports.initiateInternal = async (req, res, next) => {
       sender: senderId,
       receiverEmail: cleanEmail,
       amount: amt,
-      currency: senderCurrencySymbol, // maintenant ISO
+      currency: senderCurrencySymbol, // ISO maintenant
     });
 
     const sessOpts = maybeSessionOpts(session);
@@ -2134,13 +2420,22 @@ exports.initiateInternal = async (req, res, next) => {
       { $inc: { amount: -amt } },
       { new: true, ...sessOpts }
     );
-
     if (!debited) throw createError(400, "Solde insuffisant");
 
+    // ✅ Admin fee -> CAD (ne doit pas faire crasher si FX 429)
     let adminFeeInCAD = 0;
     if (fee > 0) {
-      const { converted } = await convertAmount(currencySourceISO, "CAD", fee);
-      adminFeeInCAD = round2(converted);
+      try {
+        if (currencySourceISO === "CAD") {
+          adminFeeInCAD = round2(fee);
+        } else {
+          const { converted } = await convertAmount(currencySourceISO, "CAD", fee);
+          adminFeeInCAD = round2(converted);
+        }
+      } catch (e) {
+        logger?.warn?.("[FX] Conversion fee->CAD impossible, fallback 0", { err: e?.message || e });
+        adminFeeInCAD = 0;
+      }
     }
 
     const adminEmail = "admin@paynoval.com";
@@ -2155,6 +2450,7 @@ exports.initiateInternal = async (req, res, next) => {
       );
     }
 
+    // --- Conversion net -> local (réutilise snapshot si présent) ---
     let rateUsed = null;
     let convertedLocalNet = null;
 
@@ -2164,9 +2460,15 @@ exports.initiateInternal = async (req, res, next) => {
     }
 
     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
-      const { rate, converted } = await convertAmount(currencySourceISO, currencyTargetISO, netAmount);
-      rateUsed = rate;
-      convertedLocalNet = round2(converted);
+      // ✅ évite FX si même devise
+      if (currencySourceISO === currencyTargetISO) {
+        rateUsed = 1;
+        convertedLocalNet = round2(netAmount);
+      } else {
+        const { rate, converted } = await convertAmount(currencySourceISO, currencyTargetISO, netAmount);
+        rateUsed = rate;
+        convertedLocalNet = round2(converted);
+      }
     }
 
     if (!Number.isFinite(convertedLocalNet) || convertedLocalNet <= 0) {
@@ -2205,7 +2507,7 @@ exports.initiateInternal = async (req, res, next) => {
           sender: senderUser._id,
           receiver: receiver._id,
 
-          // legacy (on garde, mais valeurs ISO)
+          // legacy (valeurs ISO)
           amount: decAmt,
           transactionFees: decFees,
           netAmount: decNet,
@@ -2266,7 +2568,6 @@ exports.initiateInternal = async (req, res, next) => {
     return next(err);
   }
 };
-
 
 
 
