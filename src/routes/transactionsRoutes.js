@@ -20,12 +20,15 @@ const {
 } = require("../controllers/transactionsController");
 
 const { protect } = require("../middleware/authMiddleware");
+const amlMiddleware = require("../middleware/aml"); 
 const requireRole = require("../middleware/requireRole");
 const requestValidator = require("../middleware/requestValidator");
 
 const router = express.Router();
 
-// 🛡 Limiteur pour les routes critiques (anti brute-force)
+/* ---------------------------------------------------------- */
+/* Rate limit (anti brute force)                              */
+/* ---------------------------------------------------------- */
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 10,
@@ -37,13 +40,11 @@ const limiter = rateLimit({
     message: "Trop de requêtes, veuillez réessayer plus tard.",
   },
 });
-
-// On applique le limiter uniquement sur les actions sensibles
 router.use(["/initiate", "/confirm", "/cancel"], limiter);
 
-/**
- * Helpers compat: NEW + LEGACY
- */
+/* ---------------------------------------------------------- */
+/* Helpers                                                    */
+/* ---------------------------------------------------------- */
 const pickFirst = (...vals) => {
   for (const v of vals) {
     if (v !== undefined && v !== null && String(v).trim() !== "") return v;
@@ -61,17 +62,78 @@ const safeToFloat = (v) => {
 
 const upISO = (v) => String(v || "").trim().toUpperCase();
 
+const MOBILEMONEY_PROVIDERS = ["wave", "orange", "mtn", "moov", "flutterwave"];
+
+// ce que ton model Transaction accepte (enum)
+const FUNDS_ALLOWED = [
+  "paynoval",
+  "stripe",
+  "bank",
+  "mobilemoney",
+  "visa_direct",
+  "stripe2momo",
+  "cashin",
+  "cashout",
+];
+
+const DEST_ALLOWED = [
+  "paynoval",
+  "stripe",
+  "bank",
+  "mobilemoney",
+  "visa_direct",
+  "stripe2momo",
+  "cashin",
+  "cashout",
+];
+
 /**
- * ✅ Normalisation payload initiate (évite doubles erreurs)
- * - country <- country OR destinationCountry
- * - destinationCountry <- country (alias, optionnel)
- * - senderCurrencySymbol <- senderCurrencySymbol OR currencySource OR senderCurrencyCode OR currency OR currencyCode
- * - localCurrencySymbol <- localCurrencySymbol OR currencyTarget OR localCurrencyCode
- * - amount <- amount OR amountSource
+ * Normalise funds/destination:
+ * - si on reçoit funds="wave|orange|mtn|moov|flutterwave" => funds="mobilemoney" + metadata.provider
+ * - idem pour destination
+ * - accepte aussi provider au top-level, et le pousse dans metadata.provider
+ */
+function normalizeProviderRails(b) {
+  if (!b || typeof b !== "object") return b;
+
+  // assure metadata objet
+  if (!b.metadata || typeof b.metadata !== "object") b.metadata = {};
+
+  // provider explicite (top-level ou metadata)
+  const pRaw = pickFirst(b.provider, b.metadata.provider);
+  const p = String(pRaw || "").trim().toLowerCase();
+  if (p) b.metadata.provider = p;
+
+  // normalize funds
+  const fRaw = String(b.funds || "").trim().toLowerCase();
+  if (MOBILEMONEY_PROVIDERS.includes(fRaw)) {
+    b.funds = "mobilemoney";
+    b.metadata.provider = b.metadata.provider || fRaw;
+  }
+
+  // normalize destination
+  const dRaw = String(b.destination || "").trim().toLowerCase();
+  if (MOBILEMONEY_PROVIDERS.includes(dRaw)) {
+    b.destination = "mobilemoney";
+    b.metadata.provider = b.metadata.provider || dRaw;
+  }
+
+  // ✅ AJOUT : expose aussi provider au top-level
+  // (utile car certains middlewares/services lisent body.provider)
+  if (!b.provider && b.metadata.provider) b.provider = b.metadata.provider;
+
+  return b;
+}
+
+/**
+ * ✅ Normalisation payload initiate (NEW + LEGACY)
  */
 function normalizeInitiateBody(req, _res, next) {
   try {
     const b = req.body || {};
+
+    // provider rails normalization FIRST (avant validations)
+    normalizeProviderRails(b);
 
     // amount
     const rawAmount = pickFirst(b.amount, b.amountSource);
@@ -81,8 +143,7 @@ function normalizeInitiateBody(req, _res, next) {
     const rawCountry = pickFirst(b.country, b.destinationCountry);
     if (rawCountry) {
       b.country = String(rawCountry).trim();
-      // on garde destinationCountry comme alias (utile côté gateway), mais on NE VALIDE PAS ce champ
-      if (!b.destinationCountry) b.destinationCountry = b.country;
+      if (!b.destinationCountry) b.destinationCountry = b.country; // alias compat
     }
 
     // sender currency (ISO)
@@ -96,8 +157,16 @@ function normalizeInitiateBody(req, _res, next) {
     if (rawSrc) b.senderCurrencySymbol = upISO(rawSrc);
 
     // target currency (ISO)
-    const rawTgt = pickFirst(b.localCurrencySymbol, b.currencyTarget, b.localCurrencyCode);
+    const rawTgt = pickFirst(
+      b.localCurrencySymbol,
+      b.currencyTarget,
+      b.localCurrencyCode
+    );
     if (rawTgt) b.localCurrencySymbol = upISO(rawTgt);
+
+    // security (NEW canonical)
+    if (!b.securityQuestion) b.securityQuestion = pickFirst(b.securityQuestion, b.question);
+    if (!b.securityAnswer) b.securityAnswer = pickFirst(b.securityAnswer, b.securityCode);
 
     req.body = b;
   } catch {
@@ -107,21 +176,40 @@ function normalizeInitiateBody(req, _res, next) {
 }
 
 /**
+ * ✅ Normalisation payload confirm (NEW + LEGACY)
+ */
+function normalizeConfirmBody(req, _res, next) {
+  try {
+    const b = req.body || {};
+
+    normalizeProviderRails(b);
+
+    if (!b.securityAnswer) b.securityAnswer = pickFirst(b.securityAnswer, b.securityCode);
+
+    req.body = b;
+  } catch {
+    // no-op
+  }
+  next();
+}
+
+/* ---------------------------------------------------------- */
+/* Routes                                                     */
+/* ---------------------------------------------------------- */
+
+/**
  * GET /api/v1/transactions/:id
- * Récupère une transaction par ID (mobile/web)
  */
 router.get("/:id", protect, asyncHandler(getTransactionController));
 
 /**
  * GET /api/v1/transactions
- * Liste toutes les transactions liées à l'utilisateur connecté
  */
 router.get("/", protect, asyncHandler(listInternal));
 
 /**
  * POST /api/v1/transactions/initiate
- * Crée une transaction interne (débit immédiat expéditeur)
- * → fees dynamiques via Gateway /fees/simulate
+ * ✅ AML branché ici (après validations)
  */
 router.post(
   "/initiate",
@@ -133,7 +221,6 @@ router.post(
       .withMessage("Email du destinataire invalide")
       .normalizeEmail(),
 
-    // ✅ amount (déjà normalisé depuis amountSource si besoin)
     body("amount")
       .custom((v) => {
         const n = safeToFloat(v);
@@ -145,28 +232,35 @@ router.post(
         return req.body.amount;
       }),
 
-    body("transactionFees")
-      .optional()
-      .isFloat({ min: 0 })
-      .withMessage("Les frais doivent être un nombre positif")
-      .toFloat(),
-
     body("funds")
       .notEmpty()
       .withMessage("Type de fonds requis")
-      .trim()
-      .escape(),
+      .custom((v) => {
+        const vv = String(v || "").trim().toLowerCase();
+        if (!FUNDS_ALLOWED.includes(vv)) throw new Error(`funds invalide (${v})`);
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.funds = String(v || "").trim().toLowerCase();
+        return req.body.funds;
+      }),
 
     body("destination")
       .notEmpty()
       .withMessage("Destination requise")
-      .trim()
-      .escape(),
+      .custom((v) => {
+        const vv = String(v || "").trim().toLowerCase();
+        if (!DEST_ALLOWED.includes(vv)) throw new Error(`destination invalide (${v})`);
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.destination = String(v || "").trim().toLowerCase();
+        return req.body.destination;
+      }),
 
-    // ✅ localCurrencySymbol (déjà normalisé depuis currencyTarget/localCurrencyCode)
     body("localCurrencySymbol")
       .custom((v) => {
-        if (!String(v || "").trim()) throw new Error("Symbole de la devise locale requis");
+        if (!String(v || "").trim()) throw new Error("Devise locale requise");
         return true;
       })
       .customSanitizer((v, { req }) => {
@@ -174,10 +268,9 @@ router.post(
         return req.body.localCurrencySymbol;
       }),
 
-    // ✅ senderCurrencySymbol (déjà normalisé depuis currencySource/senderCurrencyCode/currency)
     body("senderCurrencySymbol")
       .custom((v) => {
-        if (!String(v || "").trim()) throw new Error("Symbole de la devise de l’expéditeur requis");
+        if (!String(v || "").trim()) throw new Error("Devise expéditeur requise");
         return true;
       })
       .customSanitizer((v, { req }) => {
@@ -185,7 +278,6 @@ router.post(
         return req.body.senderCurrencySymbol;
       }),
 
-    // ✅ country (déjà normalisé depuis destinationCountry)
     body("country")
       .custom((v) => {
         if (!String(v || "").trim()) throw new Error("Pays de destination requis");
@@ -193,7 +285,6 @@ router.post(
       })
       .customSanitizer((v, { req }) => {
         req.body.country = String(v || "").trim();
-        // alias compat
         if (!req.body.destinationCountry) req.body.destinationCountry = req.body.country;
         return req.body.country;
       }),
@@ -201,39 +292,86 @@ router.post(
     body("description").optional().trim().escape(),
     body("recipientInfo.name").optional().trim().escape(),
 
-    // ✅ recipientInfo.email optional (car tu as déjà toEmail)
     body("recipientInfo.email")
       .optional()
       .isEmail()
-      .withMessage("Email du destinataire invalide")
+      .withMessage("Email destinataire invalide")
       .normalizeEmail(),
 
-    body("question")
-      .notEmpty()
-      .withMessage("Question de sécurité requise")
+    body("securityQuestion")
+      .custom((v) => {
+        if (!String(v || "").trim()) throw new Error("securityQuestion requis");
+        return true;
+      })
       .trim()
       .escape(),
 
-    body("securityCode")
-      .notEmpty()
-      .withMessage("Code de sécurité requis")
+    body("securityAnswer")
+      .custom((v) => {
+        if (!String(v || "").trim()) throw new Error("securityAnswer requis");
+        return true;
+      })
       .trim()
       .escape(),
+
+    body("metadata.provider")
+      .optional()
+      .custom((v) => {
+        const vv = String(v || "").trim().toLowerCase();
+        if (!vv) return true;
+        if (!MOBILEMONEY_PROVIDERS.includes(vv)) {
+          throw new Error("metadata.provider doit être wave|orange|mtn|moov|flutterwave");
+        }
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        if (!req.body.metadata || typeof req.body.metadata !== "object") req.body.metadata = {};
+        req.body.metadata.provider = String(v || "").trim().toLowerCase();
+        // ✅ optionnel: refléter aussi au top-level
+        if (!req.body.provider) req.body.provider = req.body.metadata.provider;
+        return req.body.metadata.provider;
+      }),
   ],
   requestValidator,
+  amlMiddleware, // ✅ AJOUT AML ICI (après validations)
   asyncHandler(initiateInternal)
 );
 
 /**
  * POST /api/v1/transactions/confirm
+ * (pas besoin d’AML ici, ton controller log déjà AML sur confirm)
  */
 router.post(
   "/confirm",
   protect,
+  normalizeConfirmBody,
   [
     body("transactionId").isMongoId().withMessage("ID de transaction invalide"),
-    body("securityCode").notEmpty().withMessage("Code de sécurité requis").trim().escape(),
-    body("provider").optional().trim().escape(),
+
+    body("securityAnswer")
+      .custom((v) => {
+        if (!String(v || "").trim()) throw new Error("securityAnswer requis");
+        return true;
+      })
+      .trim()
+      .escape(),
+
+    body("metadata.provider")
+      .optional()
+      .custom((v) => {
+        const vv = String(v || "").trim().toLowerCase();
+        if (!vv) return true;
+        if (!MOBILEMONEY_PROVIDERS.includes(vv)) {
+          throw new Error("metadata.provider doit être wave|orange|mtn|moov|flutterwave");
+        }
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        if (!req.body.metadata || typeof req.body.metadata !== "object") req.body.metadata = {};
+        req.body.metadata.provider = String(v || "").trim().toLowerCase();
+        if (!req.body.provider) req.body.provider = req.body.metadata.provider;
+        return req.body.metadata.provider;
+      }),
   ],
   requestValidator,
   asyncHandler(confirmController)
@@ -241,6 +379,7 @@ router.post(
 
 /**
  * POST /api/v1/transactions/cancel
+ * (pas besoin d’AML ici non plus, ton controller log AML sur cancel)
  */
 router.post(
   "/cancel",
@@ -293,7 +432,10 @@ router.post(
   requireRole(["admin", "superadmin"]),
   [
     body("transactionId").isMongoId().withMessage("ID de transaction invalide"),
-    body("newReceiverEmail").isEmail().withMessage("Email du nouveau destinataire invalide").normalizeEmail(),
+    body("newReceiverEmail")
+      .isEmail()
+      .withMessage("Email du nouveau destinataire invalide")
+      .normalizeEmail(),
   ],
   requestValidator,
   asyncHandler(reassignController)
