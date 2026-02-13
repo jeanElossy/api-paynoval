@@ -43,14 +43,50 @@ const tryRequire = (name) => {
   }
 };
 
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a || ""));
-  const bb = Buffer.from(String(b || ""));
+function timingSafeEqualStr(a, b) {
+  const aa = Buffer.from(String(a || "").trim(), "utf8");
+  const bb = Buffer.from(String(b || "").trim(), "utf8");
   if (aa.length !== bb.length) return false;
   return crypto.timingSafeEqual(aa, bb);
 }
 
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
+// ✅ Tokens internes (legacy + gateway + principal)
+function getInternalTokens() {
+  const legacy = String(process.env.INTERNAL_TOKEN || config.internalToken || "").trim();
+
+  const gateway = String(
+    process.env.GATEWAY_INTERNAL_TOKEN || config?.internalTokens?.gateway || legacy
+  ).trim();
+
+  const principal = String(
+    process.env.PRINCIPAL_INTERNAL_TOKEN ||
+      process.env.INTERNAL_REFERRAL_TOKEN ||
+      config?.internalTokens?.principal ||
+      legacy
+  ).trim();
+
+  return { legacy, gateway, principal };
+}
+
+function getHeaderInternalToken(req) {
+  const raw =
+    req.headers["x-internal-token"] ||
+    req.headers["X-Internal-Token"] ||
+    req.headers["x-internal-token".toUpperCase()] ||
+    "";
+  return Array.isArray(raw) ? raw[0] : raw;
+}
+
+const isTrustedInternalCall = (req) => {
+  const got = String(getHeaderInternalToken(req) || "").trim();
+  if (!got) return false;
+
+  const { gateway, principal, legacy } = getInternalTokens();
+  const expected = [gateway, principal, legacy].map((x) => String(x || "").trim()).filter(Boolean);
+  if (!expected.length) return false;
+
+  return expected.some((exp) => timingSafeEqualStr(got, exp));
+};
 
 // Sentry
 let sentry = null;
@@ -173,6 +209,7 @@ const docsGuards = [];
 if (config.env === "production") {
   docsGuards.push(protect, requireRole(["admin", "developer", "superadmin"]));
 }
+
 const { contentSecurityPolicy } = require("helmet");
 
 app.use(
@@ -208,7 +245,7 @@ app.get("/openapi.yaml", (_req, res) => {
   try {
     res.setHeader("Content-Type", "text/yaml; charset=utf-8");
     res.send(fs.readFileSync(OPENAPI_PATH, "utf8"));
-  } catch (e) {
+  } catch (_e) {
     res.status(500).json({ success: false, error: "Spec YAML introuvable" });
   }
 });
@@ -224,12 +261,6 @@ try {
 } catch (_) {
   /* modules absents */
 }
-
-const isTrustedInternalCall = (req) => {
-  const headerToken = req.headers["x-internal-token"];
-  if (!headerToken || !INTERNAL_TOKEN) return false;
-  return safeEqual(headerToken, INTERNAL_TOKEN);
-};
 
 if (process.env.REDIS_URL && RedisStore && Redis) {
   redisClient = new Redis(process.env.REDIS_URL, { tls: {} });
@@ -251,7 +282,10 @@ if (process.env.REDIS_URL && RedisStore && Redis) {
         req.path === "/health" ||
         req.path === "/api/v1/health"
       ) return true;
+
+      // ✅ skip si appel interne (gateway/principal)
       if (isTrustedInternalCall(req)) return true;
+
       return false;
     },
   });
@@ -271,7 +305,10 @@ if (process.env.REDIS_URL && RedisStore && Redis) {
         req.path === "/health" ||
         req.path === "/api/v1/health"
       ) return true;
+
+      // ✅ skip si appel interne (gateway/principal)
       if (isTrustedInternalCall(req)) return true;
+
       return false;
     },
   });
@@ -326,7 +363,14 @@ let server;
       requireRole(["admin", "superadmin"]),
       adminTransactionRoutes
     );
-    app.use("/api/v1/transactions", protect, transactionRoutes);
+
+    /**
+     * ✅ IMPORTANT:
+     * - On laisse le protect AU NIVEAU DES ROUTES (dans transactionsRoutes.js),
+     *   donc on ne le remet pas ici en double.
+     * - Ça évite des surprises si tu ajoutes un bypass interne dans protect.
+     */
+    app.use("/api/v1/transactions", transactionRoutes);
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);
 

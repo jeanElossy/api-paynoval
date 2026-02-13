@@ -20,7 +20,7 @@ const {
 } = require("../controllers/transactionsController");
 
 const { protect } = require("../middleware/authMiddleware");
-const amlMiddleware = require("../middleware/aml"); 
+const amlMiddleware = require("../middleware/aml");
 const requireRole = require("../middleware/requireRole");
 const requestValidator = require("../middleware/requestValidator");
 
@@ -29,6 +29,13 @@ const router = express.Router();
 /* ---------------------------------------------------------- */
 /* Rate limit (anti brute force)                              */
 /* ---------------------------------------------------------- */
+/**
+ * ✅ IMPORTANT:
+ * - On SKIP le rate-limit si l’appel vient du Gateway (x-internal-token)
+ * - Parce que le Gateway peut rafraîchir /transactions souvent (home screen)
+ *
+ * Ton middleware protect gère déjà l’auth interne (si tu as appliqué la version corrigée).
+ */
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 10,
@@ -39,7 +46,18 @@ const limiter = rateLimit({
     status: 429,
     message: "Trop de requêtes, veuillez réessayer plus tard.",
   },
+  skip: (req) => {
+    // ✅ Skip si appel interne (Gateway / Principal)
+    const t =
+      req.headers["x-internal-token"] ||
+      req.headers["X-Internal-Token"] ||
+      req.headers["x-internal-token".toUpperCase()] ||
+      "";
+    return !!String(t || "").trim();
+  },
 });
+
+// limiter seulement sur les endpoints sensibles
 router.use(["/initiate", "/confirm", "/cancel"], limiter);
 
 /* ---------------------------------------------------------- */
@@ -118,8 +136,7 @@ function normalizeProviderRails(b) {
     b.metadata.provider = b.metadata.provider || dRaw;
   }
 
-  // ✅ AJOUT : expose aussi provider au top-level
-  // (utile car certains middlewares/services lisent body.provider)
+  // ✅ expose aussi provider au top-level (compat)
   if (!b.provider && b.metadata.provider) b.provider = b.metadata.provider;
 
   return b;
@@ -327,19 +344,17 @@ router.post(
       .customSanitizer((v, { req }) => {
         if (!req.body.metadata || typeof req.body.metadata !== "object") req.body.metadata = {};
         req.body.metadata.provider = String(v || "").trim().toLowerCase();
-        // ✅ optionnel: refléter aussi au top-level
         if (!req.body.provider) req.body.provider = req.body.metadata.provider;
         return req.body.metadata.provider;
       }),
   ],
   requestValidator,
-  amlMiddleware, // ✅ AJOUT AML ICI (après validations)
+  amlMiddleware,
   asyncHandler(initiateInternal)
 );
 
 /**
  * POST /api/v1/transactions/confirm
- * (pas besoin d’AML ici, ton controller log déjà AML sur confirm)
  */
 router.post(
   "/confirm",
@@ -379,7 +394,6 @@ router.post(
 
 /**
  * POST /api/v1/transactions/cancel
- * (pas besoin d’AML ici non plus, ton controller log AML sur cancel)
  */
 router.post(
   "/cancel",

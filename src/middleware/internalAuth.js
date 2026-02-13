@@ -15,6 +15,7 @@
  * - requireInternalAuth('principal') => accepte UNIQUEMENT le token principal
  */
 
+
 const crypto = require('crypto');
 const config = require('../config');
 

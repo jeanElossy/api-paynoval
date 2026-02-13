@@ -39,6 +39,8 @@ const { convertAmount } = require("../tools/currency");
 const { normCur } = require("../utils/currency");
 const generateTransactionRef = require("../utils/generateRef");
 
+
+
 const PRINCIPAL_URL = config.principalUrl;
 const GATEWAY_URL = config.gatewayUrl;
 
@@ -314,50 +316,121 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
   }
 }
 
+// /* ------------------------------------------------------------------ */
+// /* LIST                                                                */
+// /* ------------------------------------------------------------------ */
+
+// exports.listInternal = async (req, res, next) => {
+//   try {
+//     const userId = req.user.id;
+//     const skip = parseInt(req.query.skip, 10) || 0;
+//     const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+
+//     const query = { $or: [{ sender: userId }, { receiver: userId }] };
+
+//     const [txs, total] = await Promise.all([
+//       Transaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+//       Transaction.countDocuments(query),
+//     ]);
+
+//     res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
+//   } catch (err) {
+//     next(err);
+//   }
+// };
+
+// /* ------------------------------------------------------------------ */
+// /* GET BY ID                                                           */
+// /* ------------------------------------------------------------------ */
+
+// exports.getTransactionController = async (req, res, next) => {
+//   try {
+//     const { id } = req.params;
+//     const userId = req.user.id;
+
+//     const tx = await Transaction.findById(id).lean();
+//     if (!tx) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
+
+//     const isSender = tx.sender?.toString() === userId;
+//     const isReceiver = tx.receiver?.toString() === userId;
+//     if (!isSender && !isReceiver) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
+
+//     return res.status(200).json({ success: true, data: tx });
+//   } catch (err) {
+//     next(err);
+//   }
+// };
+
+
+
+
+function getAuthedUserId(req) {
+  return (
+    req.user?.id ||
+    req.user?._id ||
+    req.user?.userId ||
+    null
+  )?.toString?.() || null;
+}
+
 /* ------------------------------------------------------------------ */
 /* LIST                                                                */
 /* ------------------------------------------------------------------ */
-
 exports.listInternal = async (req, res, next) => {
   try {
-    const userId = req.user.id;
+    const userId = getAuthedUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Non autorisé" });
+    }
+
     const skip = parseInt(req.query.skip, 10) || 0;
     const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
 
     const query = { $or: [{ sender: userId }, { receiver: userId }] };
 
     const [txs, total] = await Promise.all([
-      Transaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      Transaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       Transaction.countDocuments(query),
     ]);
 
-    res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
+    return res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /* ------------------------------------------------------------------ */
 /* GET BY ID                                                           */
 /* ------------------------------------------------------------------ */
-
 exports.getTransactionController = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const userId = req.user.id;
+    const userId = getAuthedUserId(req);
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "ID invalide" });
+    }
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Non autorisé" });
+    }
 
     const tx = await Transaction.findById(id).lean();
     if (!tx) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
 
-    const isSender = tx.sender?.toString() === userId;
-    const isReceiver = tx.receiver?.toString() === userId;
-    if (!isSender && !isReceiver) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
+    const isSender = tx.sender?.toString?.() === userId;
+    const isReceiver = tx.receiver?.toString?.() === userId;
+    if (!isSender && !isReceiver) {
+      return res.status(404).json({ success: false, message: "Transaction non trouvée" });
+    }
 
     return res.status(200).json({ success: true, data: tx });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
+
+
+
 
 /* ------------------------------------------------------------------ */
 /* INITIATE (PayNoval -> PayNoval)                                     */
