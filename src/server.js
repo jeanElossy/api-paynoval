@@ -356,6 +356,7 @@ let server;
     const payRoutes = require("./routes/pay");
     const adminTransactionRoutes = require("./routes/admin/transactions.admin.routes");
     const internalPaymentsRoutes = require("./routes/internalPaymentsRoutes");
+    const internalTxRoutes = require("./routes/internalTransactions.routes");
 
     app.use(
       "/api/v1/admin/transactions",
@@ -373,6 +374,8 @@ let server;
     app.use("/api/v1/transactions", transactionRoutes);
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);
+
+    app.use("/api/v1/internal", internalTxRoutes);
 
     // Appels internes (Gateway, jobs, microservices)
     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
