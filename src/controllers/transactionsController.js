@@ -376,6 +376,7 @@ function getAuthedUserId(req) {
 /* ------------------------------------------------------------------ */
 /* LIST                                                                */
 /* ------------------------------------------------------------------ */
+
 exports.listInternal = async (req, res, next) => {
   try {
     const userId = getAuthedUserId(req);
@@ -388,16 +389,23 @@ exports.listInternal = async (req, res, next) => {
 
     const query = { $or: [{ sender: userId }, { receiver: userId }] };
 
-    const [txs, total] = await Promise.all([
-      Transaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    const [txDocs, total] = await Promise.all([
+      Transaction.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit), // ✅ PAS DE .lean()
       Transaction.countDocuments(query),
     ]);
+
+    // ✅ force toJSON (applique ton transform Decimal -> Number)
+    const txs = txDocs.map((t) => t.toJSON());
 
     return res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
   } catch (err) {
     return next(err);
   }
 };
+
 
 /* ------------------------------------------------------------------ */
 /* GET BY ID                                                           */
@@ -414,8 +422,10 @@ exports.getTransactionController = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Non autorisé" });
     }
 
-    const tx = await Transaction.findById(id).lean();
-    if (!tx) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
+    const txDoc = await Transaction.findById(id); // ✅ PAS DE .lean()
+    if (!txDoc) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
+
+    const tx = txDoc.toJSON();
 
     const isSender = tx.sender?.toString?.() === userId;
     const isReceiver = tx.receiver?.toString?.() === userId;
@@ -428,6 +438,7 @@ exports.getTransactionController = async (req, res, next) => {
     return next(err);
   }
 };
+
 
 
 
