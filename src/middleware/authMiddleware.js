@@ -1,24 +1,11 @@
 /**
  * src/middleware/authMiddleware.js
  *
- * Middleware 'protect' pour vérifier JWT (HS256 ou RS256 via JWKS).
+ * - protect: JWT (HS256 ou RS256 via JWKS)
+ * - internalProtect: token interne (x-internal-token) pour routes /internal/*
  *
- * ✅ FIX CRITIQUE (MongoDB projection):
- * - On NE mélange PLUS inclusion + exclusion dans .select()
- *   (sinon: "Cannot do exclusion on field password in inclusion projection")
- *
- * ✅ Features conservées:
- * - Multi-audience: JWT_AUDIENCES="paynoval-api,paynoval-app,paynoval-mobile"
- * - Tolérance si token sans "aud" via JWT_ALLOW_MISSING_AUD=true
- * - RS256 via JWKS_URI (jwks-rsa) OU HS256 via JWT_SECRET
- *
- * ✅ Bonus (TX-core + Gateway):
- * - Support appels internes Gateway => x-internal-token + x-user-id
- *   (utile pour /api/v1/transactions list qui dépend de req.user.id)
- *
- * ✅ Attache req.user._id et req.user.id (compat).
- * - Ajoute les champs nécessaires à AML (kycLevel, isBusiness, securityQuestions, country, etc.)
- * - Logs debug sans fuite de token complet.
+ * ✅ FIX CRITIQUE: projection Mongo => pas de mix inclusion/exclusion
+ * ✅ Bonus: support appels internes (gateway/tx-core/principal) via x-internal-token + x-user-id
  */
 
 "use strict";
@@ -109,9 +96,7 @@ if (hasJWKS) {
         "Module 'jwks-rsa' manquant ou JWKS_URI invalide. Installez la dépendance ou retirez JWKS_URI."
       );
     } else {
-      console.warn(
-        "[auth] jwks-rsa non installé / JWKS_URI unusable — fallback HS256 en DEV"
-      );
+      console.warn("[auth] jwks-rsa non installé / JWKS_URI unusable — fallback HS256 en DEV");
       jwksGetKey = null;
     }
   }
@@ -165,7 +150,7 @@ function buildVerifyOpts({ withAudience = true } = {}) {
   };
   if (JWT_ISSUER) opts.issuer = JWT_ISSUER;
   if (withAudience && JWT_AUDIENCES.length) {
-    opts.audience = JWT_AUDIENCES; // array accepté
+    opts.audience = JWT_AUDIENCES;
   }
   return opts;
 }
@@ -200,11 +185,12 @@ async function verifyWithFallback(token) {
 }
 
 /* ------------------------------------------------------------------ */
-/* ✅ INTERNAL (Gateway) helpers                                        */
+/* ✅ INTERNAL helpers                                                  */
 /* ------------------------------------------------------------------ */
 function timingSafeEqualStr(a, b) {
   const aa = Buffer.from(String(a || "").trim(), "utf8");
   const bb = Buffer.from(String(b || "").trim(), "utf8");
+  if (!aa.length || !bb.length) return false;
   if (aa.length !== bb.length) return false;
   return crypto.timingSafeEqual(aa, bb);
 }
@@ -227,22 +213,48 @@ function getUserIdHeader(req) {
   return Array.isArray(raw) ? raw[0] : raw;
 }
 
-function getExpectedInternalToken() {
-  // ordre : token gateway dédié > config.internalTokens.gateway > INTERNAL_TOKEN legacy
-  const legacy = String(process.env.INTERNAL_TOKEN || config.internalToken || "").trim();
-  const gw = String(
-    process.env.GATEWAY_INTERNAL_TOKEN || config?.internalTokens?.gateway || legacy
-  ).trim();
-  return gw;
+/**
+ * ✅ IMPORTANT: accepter plusieurs tokens internes
+ * Tu peux mettre:
+ * INTERNAL_TOKEN="token1,token2"
+ */
+function parseInternalTokens(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
- * ✅ PROJECTION SAFE
- * MongoDB interdit de mélanger inclusion + exclusion.
- *
- * Donc:
- * - On inclut tout par défaut, et on EXCLUT les secrets.
- * - Si tu veux limiter, fais un "inclusion only" sans "-password".
+ * Détermine les tokens acceptés.
+ * On inclut plusieurs variables pour compat (principal/gateway/tx-core).
+ */
+function getExpectedInternalTokens() {
+  const candidates = [
+    process.env.TX_CORE_INTERNAL_TOKEN,
+    process.env.PRINCIPAL_INTERNAL_TOKEN,
+    process.env.GATEWAY_INTERNAL_TOKEN,
+    process.env.INTERNAL_TOKEN,
+    config?.internalTokens?.txcore,
+    config?.internalTokens?.principal,
+    config?.internalTokens?.gateway,
+    config?.internalToken,
+  ].filter(Boolean);
+
+  const merged = [];
+  for (const c of candidates) merged.push(...parseInternalTokens(c));
+  // unique
+  return Array.from(new Set(merged));
+}
+
+function isValidInternalToken(got) {
+  const expectedList = getExpectedInternalTokens();
+  if (!got || !expectedList.length) return false;
+  return expectedList.some((exp) => timingSafeEqualStr(got, exp));
+}
+
+/**
+ * ✅ PROJECTION SAFE: exclusion-only
  */
 const USER_SAFE_EXCLUDE = [
   "-password",
@@ -254,29 +266,73 @@ const USER_SAFE_EXCLUDE = [
   "-__v",
 ].join(" ");
 
-// protect middleware
-exports.protect = asyncHandler(async (req, _res, next) => {
-  // 0) ✅ Autoriser les appels internes du Gateway
+/**
+ * ✅ internalProtect
+ * - Vérifie x-internal-token
+ * - Optionnel: charge user si x-user-id fourni
+ */
+exports.internalProtect = asyncHandler(async (req, _res, next) => {
   const gotInternal = String(getInternalHeaderToken(req) || "").trim();
-  const expectedInternal = getExpectedInternalToken();
 
-  if (gotInternal && expectedInternal && timingSafeEqualStr(gotInternal, expectedInternal)) {
+  if (!isValidInternalToken(gotInternal)) {
+    return next(createError(401, "Non autorisé : internal token invalide"));
+  }
+
+  const uid = String(getUserIdHeader(req) || "").trim();
+
+  // si pas de user fourni, on autorise quand même
+  if (!uid) {
+    req.user = { _id: null, id: null, role: "internal" };
+    req.auth = { internal: true, scope: "internal", tokenPreview: `${gotInternal.slice(0, 6)}...` };
+    return next();
+  }
+
+  const user = await User.findById(uid).select(USER_SAFE_EXCLUDE).lean();
+  if (!user) {
+    return next(createError(401, "Utilisateur non trouvé"));
+  }
+
+  req.user = {
+    _id: String(user._id),
+    id: String(user._id),
+    email: user.email,
+    role: user.role,
+    fullName: user.fullName,
+
+    // AML fields
+    kycLevel: user.kycLevel,
+    type: user.type,
+    isBusiness: user.isBusiness,
+    kybStatus: user.kybStatus,
+    businessId: user.businessId,
+    securityQuestions: Array.isArray(user.securityQuestions) ? user.securityQuestions : [],
+    country: user.country,
+    countryCode: user.countryCode,
+    selectedCountry: user.selectedCountry,
+  };
+
+  req.auth = { internal: true, scope: "internal", usedFallback: false };
+  return next();
+});
+
+/**
+ * ✅ protect (JWT) + support appels internes gateway (x-internal-token + x-user-id)
+ */
+exports.protect = asyncHandler(async (req, _res, next) => {
+  // 0) ✅ Autoriser les appels internes du Gateway / services internes
+  const gotInternal = String(getInternalHeaderToken(req) || "").trim();
+
+  if (gotInternal && isValidInternalToken(gotInternal)) {
     const uid = String(getUserIdHeader(req) || "").trim();
 
     if (!uid) {
-      // Gateway call sans user => autorisé mais pas de userId
       req.user = { _id: null, id: null, role: "gateway" };
       req.auth = { internal: true, scope: "gateway", tokenPreview: `${gotInternal.slice(0, 6)}...` };
       return next();
     }
 
-    const user = await User.findById(uid)
-      .select(USER_SAFE_EXCLUDE) // ✅ exclusion-only => pas d'erreur
-      .lean();
-
-    if (!user) {
-      return next(createError(401, "Utilisateur non trouvé"));
-    }
+    const user = await User.findById(uid).select(USER_SAFE_EXCLUDE).lean();
+    if (!user) return next(createError(401, "Utilisateur non trouvé"));
 
     req.user = {
       _id: String(user._id),
@@ -286,7 +342,7 @@ exports.protect = asyncHandler(async (req, _res, next) => {
       role: user.role,
       fullName: user.fullName,
 
-      // ✅ AML fields
+      // AML fields
       kycLevel: user.kycLevel,
       type: user.type,
       isBusiness: user.isBusiness,
@@ -309,16 +365,10 @@ exports.protect = asyncHandler(async (req, _res, next) => {
   const token = extractBearerToken(hdrAuth);
 
   if (!token) {
-    console.debug("[auth][protect] missing token header", {
-      hasAuthorizationHeader: !!hdrAuth,
-    });
     return next(createError(401, "Non autorisé : token manquant"));
   }
 
   if (!looksLikeJwt(token)) {
-    console.warn("[auth][protect] token does not look like JWT (malformed)", {
-      preview: token.slice(0, 12),
-    });
     return next(createError(401, "Non autorisé : format de token invalide"));
   }
 
@@ -329,41 +379,17 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     const r = await verifyWithFallback(token);
     decoded = r.payload;
     usedFallback = !!r.usedFallback;
-  } catch (err) {
-    console.error("[auth][protect] jwt.verify failed", {
-      name: err?.name,
-      message: err?.message,
-      tokenHeader: base64UrlDecodeToJson(token.split(".")[0]),
-      issuerExpected: JWT_ISSUER || null,
-      audiencesExpected: JWT_AUDIENCES.length ? JWT_AUDIENCES : null,
-      allowMissingAud: JWT_ALLOW_MISSING_AUD,
-      usingJWKS: !!jwksGetKey,
-    });
+  } catch (_err) {
     return next(createError(401, "Non autorisé : token invalide ou expiré"));
   }
 
   const userId = decoded?.sub || decoded?.id || decoded?.userId || decoded?._id || null;
   if (!userId) {
-    console.warn("[auth][protect] token missing user identifier (sub/id)", {
-      decodedKeys: Object.keys(decoded || {}),
-    });
     return next(createError(401, "Non autorisé : jeton sans identifiant utilisateur"));
   }
 
-  /**
-   * ✅ IMPORTANT: NE PAS faire .select(["-password", "email", ...])
-   * car c'est un mix exclusion + inclusion => ERREUR Mongo.
-   *
-   * On fait plutôt:
-   * - exclusion-only des secrets, et on récupère aussi les champs AML
-   * (c'est ok, car on ne limite pas les champs; on exclut seulement les secrets).
-   */
-  const user = await User.findById(userId)
-    .select(USER_SAFE_EXCLUDE) // ✅ FIX CRITIQUE
-    .lean();
-
+  const user = await User.findById(userId).select(USER_SAFE_EXCLUDE).lean();
   if (!user) {
-    console.warn("[auth][protect] user not found for id from token", { userId: String(userId) });
     return next(createError(401, "Utilisateur non trouvé"));
   }
 
@@ -375,7 +401,7 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     role: user.role,
     fullName: user.fullName,
 
-    // ✅ AML fields
+    // AML fields
     kycLevel: user.kycLevel,
     type: user.type,
     isBusiness: user.isBusiness,
@@ -396,5 +422,5 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     internal: false,
   };
 
-  next();
+  return next();
 });
