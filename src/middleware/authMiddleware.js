@@ -6,6 +6,7 @@
  *
  * ✅ FIX CRITIQUE: projection Mongo => pas de mix inclusion/exclusion
  * ✅ Bonus: support appels internes (gateway/tx-core/principal) via x-internal-token + x-user-id
+ * ✅ Robustesse: User model lazy (évite crash si Users DB pas prête au require)
  */
 
 "use strict";
@@ -15,6 +16,7 @@ if (process.env.NODE_ENV !== "production") {
   try {
     require("dotenv-safe").config({ allowEmptyValues: true });
   } catch (e) {
+    // Pas bloquant
     console.warn("[dotenv-safe] skipped in authMiddleware:", e.message);
   }
 }
@@ -26,7 +28,6 @@ const crypto = require("crypto");
 
 const { getUsersConn } = require("../config/db");
 const config = require("../config");
-const User = require("../models/User")(getUsersConn());
 
 const isProd = process.env.NODE_ENV === "production";
 const hasJWKS = !!process.env.JWKS_URI;
@@ -63,7 +64,9 @@ if (isProd && !hasJWKS && !JWT_SECRET) {
   throw new Error("[auth] JWT_SECRET manquant en production (HS256).");
 }
 
+// ─────────────────────────────────────────────────────────────
 // JWKS setup (optional)
+// ─────────────────────────────────────────────────────────────
 let jwksGetKey = null;
 if (hasJWKS) {
   try {
@@ -100,6 +103,25 @@ if (hasJWKS) {
       jwksGetKey = null;
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Lazy User Model (évite crash si DB pas prête au require)
+// ─────────────────────────────────────────────────────────────
+let _UserModel = null;
+function getUserModel() {
+  if (_UserModel) return _UserModel;
+
+  const conn = getUsersConn?.();
+  if (!conn) {
+    // On laisse remonter une erreur claire au runtime
+    throw createError(500, "Users DB connection indisponible");
+  }
+
+  // IMPORTANT: le modèle est une factory dans ton projet
+  // eslint-disable-next-line global-require
+  _UserModel = require("../models/User")(conn);
+  return _UserModel;
 }
 
 // ---------- util helpers ----------
@@ -157,6 +179,9 @@ function buildVerifyOpts({ withAudience = true } = {}) {
 
 async function verifyWithFallback(token) {
   const tokenHeader = base64UrlDecodeToJson(token.split(".")[0]) || null;
+
+  // Si JWKS est configuré, on s’attend à RS256.
+  // Sinon HS256.
   const algos = jwksGetKey ? ["RS256"] : ["HS256"];
 
   try {
@@ -172,8 +197,7 @@ async function verifyWithFallback(token) {
     const hasAudClaim = !!decodedUnsafe?.aud;
 
     const canFallback =
-      JWT_AUDIENCES.length &&
-      (!isProd || (JWT_ALLOW_MISSING_AUD && !hasAudClaim));
+      JWT_AUDIENCES.length && (!isProd || (JWT_ALLOW_MISSING_AUD && !hasAudClaim));
 
     if (isAudError && canFallback) {
       const payload = await verifyJwt(token, buildVerifyOpts({ withAudience: false }), algos);
@@ -196,10 +220,12 @@ function timingSafeEqualStr(a, b) {
 }
 
 function getInternalHeaderToken(req) {
+  // Node lower-case les headers, mais on accepte plusieurs alias
   const raw =
     req.headers["x-internal-token"] ||
     req.headers["x_internal_token"] ||
     req.headers["x-internal"] ||
+    req.headers["x_internal"] ||
     "";
   return Array.isArray(raw) ? raw[0] : raw;
 }
@@ -215,8 +241,7 @@ function getUserIdHeader(req) {
 
 /**
  * ✅ IMPORTANT: accepter plusieurs tokens internes
- * Tu peux mettre:
- * INTERNAL_TOKEN="token1,token2"
+ * Tu peux mettre: INTERNAL_TOKEN="token1,token2"
  */
 function parseInternalTokens(raw) {
   return String(raw || "")
@@ -235,6 +260,8 @@ function getExpectedInternalTokens() {
     process.env.PRINCIPAL_INTERNAL_TOKEN,
     process.env.GATEWAY_INTERNAL_TOKEN,
     process.env.INTERNAL_TOKEN,
+
+    // config fallback
     config?.internalTokens?.txcore,
     config?.internalTokens?.principal,
     config?.internalTokens?.gateway,
@@ -243,6 +270,7 @@ function getExpectedInternalTokens() {
 
   const merged = [];
   for (const c of candidates) merged.push(...parseInternalTokens(c));
+
   // unique
   return Array.from(new Set(merged));
 }
@@ -255,6 +283,7 @@ function isValidInternalToken(got) {
 
 /**
  * ✅ PROJECTION SAFE: exclusion-only
+ * (pas de mix inclusion/exclusion)
  */
 const USER_SAFE_EXCLUDE = [
   "-password",
@@ -265,6 +294,33 @@ const USER_SAFE_EXCLUDE = [
   "-securityCode",
   "-__v",
 ].join(" ");
+
+/**
+ * Map User -> req.user (format stable)
+ */
+function mapUserToReqUser(userDoc) {
+  return {
+    _id: String(userDoc._id),
+    id: String(userDoc._id),
+
+    email: userDoc.email,
+    role: userDoc.role,
+    fullName: userDoc.fullName,
+
+    // AML fields
+    kycLevel: userDoc.kycLevel,
+    type: userDoc.type,
+    isBusiness: userDoc.isBusiness,
+    kybStatus: userDoc.kybStatus,
+    businessId: userDoc.businessId,
+
+    securityQuestions: Array.isArray(userDoc.securityQuestions) ? userDoc.securityQuestions : [],
+
+    country: userDoc.country,
+    countryCode: userDoc.countryCode,
+    selectedCountry: userDoc.selectedCountry,
+  };
+}
 
 /**
  * ✅ internalProtect
@@ -280,38 +336,34 @@ exports.internalProtect = asyncHandler(async (req, _res, next) => {
 
   const uid = String(getUserIdHeader(req) || "").trim();
 
-  // si pas de user fourni, on autorise quand même
+  // Si pas de user fourni, on autorise quand même (appel service->service)
   if (!uid) {
     req.user = { _id: null, id: null, role: "internal" };
-    req.auth = { internal: true, scope: "internal", tokenPreview: `${gotInternal.slice(0, 6)}...` };
+    req.auth = {
+      internal: true,
+      scope: "internal",
+      tokenPreview: `${gotInternal.slice(0, 6)}...`,
+      usedFallback: false,
+    };
+    req.isInternal = true;
     return next();
   }
 
+  const User = getUserModel();
   const user = await User.findById(uid).select(USER_SAFE_EXCLUDE).lean();
+
   if (!user) {
     return next(createError(401, "Utilisateur non trouvé"));
   }
 
-  req.user = {
-    _id: String(user._id),
-    id: String(user._id),
-    email: user.email,
-    role: user.role,
-    fullName: user.fullName,
-
-    // AML fields
-    kycLevel: user.kycLevel,
-    type: user.type,
-    isBusiness: user.isBusiness,
-    kybStatus: user.kybStatus,
-    businessId: user.businessId,
-    securityQuestions: Array.isArray(user.securityQuestions) ? user.securityQuestions : [],
-    country: user.country,
-    countryCode: user.countryCode,
-    selectedCountry: user.selectedCountry,
+  req.user = mapUserToReqUser(user);
+  req.auth = {
+    internal: true,
+    scope: "internal",
+    tokenPreview: `${gotInternal.slice(0, 6)}...`,
+    usedFallback: false,
   };
-
-  req.auth = { internal: true, scope: "internal", usedFallback: false };
+  req.isInternal = true;
   return next();
 });
 
@@ -327,36 +379,28 @@ exports.protect = asyncHandler(async (req, _res, next) => {
 
     if (!uid) {
       req.user = { _id: null, id: null, role: "gateway" };
-      req.auth = { internal: true, scope: "gateway", tokenPreview: `${gotInternal.slice(0, 6)}...` };
+      req.auth = {
+        internal: true,
+        scope: "gateway",
+        tokenPreview: `${gotInternal.slice(0, 6)}...`,
+        usedFallback: false,
+      };
+      req.isInternal = true;
       return next();
     }
 
+    const User = getUserModel();
     const user = await User.findById(uid).select(USER_SAFE_EXCLUDE).lean();
     if (!user) return next(createError(401, "Utilisateur non trouvé"));
 
-    req.user = {
-      _id: String(user._id),
-      id: String(user._id),
-
-      email: user.email,
-      role: user.role,
-      fullName: user.fullName,
-
-      // AML fields
-      kycLevel: user.kycLevel,
-      type: user.type,
-      isBusiness: user.isBusiness,
-      kybStatus: user.kybStatus,
-      businessId: user.businessId,
-
-      securityQuestions: Array.isArray(user.securityQuestions) ? user.securityQuestions : [],
-
-      country: user.country,
-      countryCode: user.countryCode,
-      selectedCountry: user.selectedCountry,
+    req.user = mapUserToReqUser(user);
+    req.auth = {
+      internal: true,
+      scope: "gateway",
+      tokenPreview: `${gotInternal.slice(0, 6)}...`,
+      usedFallback: false,
     };
-
-    req.auth = { internal: true, scope: "gateway", usedFallback: false };
+    req.isInternal = true;
     return next();
   }
 
@@ -388,32 +432,14 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     return next(createError(401, "Non autorisé : jeton sans identifiant utilisateur"));
   }
 
+  const User = getUserModel();
   const user = await User.findById(userId).select(USER_SAFE_EXCLUDE).lean();
+
   if (!user) {
     return next(createError(401, "Utilisateur non trouvé"));
   }
 
-  req.user = {
-    _id: String(user._id),
-    id: String(user._id),
-
-    email: user.email,
-    role: user.role,
-    fullName: user.fullName,
-
-    // AML fields
-    kycLevel: user.kycLevel,
-    type: user.type,
-    isBusiness: user.isBusiness,
-    kybStatus: user.kybStatus,
-    businessId: user.businessId,
-
-    securityQuestions: Array.isArray(user.securityQuestions) ? user.securityQuestions : [],
-
-    country: user.country,
-    countryCode: user.countryCode,
-    selectedCountry: user.selectedCountry,
-  };
+  req.user = mapUserToReqUser(user);
 
   req.auth = {
     tokenPreview: `${token.slice(0, 10)}...`,
@@ -422,5 +448,6 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     internal: false,
   };
 
+  req.isInternal = false;
   return next();
 });

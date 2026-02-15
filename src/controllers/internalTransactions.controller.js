@@ -9,11 +9,21 @@ function toStr(v) {
   return v == null ? "" : String(v);
 }
 
-function normCurrency(v) {
-  const s = toStr(v).trim().toUpperCase();
-  if (!s) return undefined;
-  if (s.length < 3 || s.length > 4) return undefined;
-  return s;
+function normCurrency(raw) {
+  const s0 = toStr(raw).trim().toUpperCase();
+  if (!s0) return undefined;
+
+  // enlève tout sauf lettres
+  const cleaned = s0.replace(/[^A-Z]/g, "");
+  if (!cleaned) return undefined;
+
+  // mappings utiles (évite que "CFA" casse)
+  if (cleaned === "CFA" || cleaned === "FCFA" || cleaned === "XCFA") return "XOF";
+
+  // prend 3 lettres (standard ISO)
+  if (cleaned.length >= 3) return cleaned.slice(0, 3);
+
+  return undefined;
 }
 
 function isPlainObject(v) {
@@ -61,7 +71,7 @@ exports.importTransaction = asyncHandler(async (req, res) => {
 
   const country = toStr(body.country).trim() || undefined;
 
-  // 👇 Mets ce fallback si tu veux voir ça clairement dans les listes TX
+  // pour faciliter l’affichage (cagnotte/fees/etc.)
   const operator = toStr(body.operator).trim() || "cagnotte";
 
   const meta = isPlainObject(body.meta) ? body.meta : {};
@@ -85,9 +95,7 @@ exports.importTransaction = asyncHandler(async (req, res) => {
         meta,
         createdAt,
       },
-      $set: {
-        updatedAt: now,
-      },
+      $set: { updatedAt: now },
     },
     { upsert: true, new: true }
   );
