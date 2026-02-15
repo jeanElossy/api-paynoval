@@ -316,53 +316,6 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
   }
 }
 
-// /* ------------------------------------------------------------------ */
-// /* LIST                                                                */
-// /* ------------------------------------------------------------------ */
-
-// exports.listInternal = async (req, res, next) => {
-//   try {
-//     const userId = req.user.id;
-//     const skip = parseInt(req.query.skip, 10) || 0;
-//     const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
-
-//     const query = { $or: [{ sender: userId }, { receiver: userId }] };
-
-//     const [txs, total] = await Promise.all([
-//       Transaction.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
-//       Transaction.countDocuments(query),
-//     ]);
-
-//     res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
-//   } catch (err) {
-//     next(err);
-//   }
-// };
-
-// /* ------------------------------------------------------------------ */
-// /* GET BY ID                                                           */
-// /* ------------------------------------------------------------------ */
-
-// exports.getTransactionController = async (req, res, next) => {
-//   try {
-//     const { id } = req.params;
-//     const userId = req.user.id;
-
-//     const tx = await Transaction.findById(id).lean();
-//     if (!tx) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
-
-//     const isSender = tx.sender?.toString() === userId;
-//     const isReceiver = tx.receiver?.toString() === userId;
-//     if (!isSender && !isReceiver) return res.status(404).json({ success: false, message: "Transaction non trouvée" });
-
-//     return res.status(200).json({ success: true, data: tx });
-//   } catch (err) {
-//     next(err);
-//   }
-// };
-
-
-
 
 function getAuthedUserId(req) {
   return (
@@ -384,10 +337,20 @@ exports.listInternal = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Non autorisé" });
     }
 
-    const skip = parseInt(req.query.skip, 10) || 0;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
 
-    const query = { $or: [{ sender: userId }, { receiver: userId }] };
+    // ✅ Plus robuste : couvre différents schémas
+    const query = {
+      $or: [
+        { sender: userId },
+        { receiver: userId },
+        { receiverUserId: userId },
+        { createdBy: userId },
+        { ownerUserId: userId },
+        { userId: userId },
+      ],
+    };
 
     const [txDocs, total] = await Promise.all([
       Transaction.find(query)
@@ -397,7 +360,7 @@ exports.listInternal = async (req, res, next) => {
       Transaction.countDocuments(query),
     ]);
 
-    // ✅ force toJSON (applique ton transform Decimal -> Number)
+    // ✅ force toJSON (Decimal->Number etc.)
     const txs = txDocs.map((t) => t.toJSON());
 
     return res.json({ success: true, count: txs.length, total, data: txs, skip, limit });
@@ -405,7 +368,6 @@ exports.listInternal = async (req, res, next) => {
     return next(err);
   }
 };
-
 
 /* ------------------------------------------------------------------ */
 /* GET BY ID                                                           */
@@ -427,8 +389,14 @@ exports.getTransactionController = async (req, res, next) => {
 
     const tx = txDoc.toJSON();
 
-    const isSender = tx.sender?.toString?.() === userId;
-    const isReceiver = tx.receiver?.toString?.() === userId;
+    const isSender = String(tx.sender || "") === userId;
+    const isReceiver =
+      String(tx.receiver || "") === userId ||
+      String(tx.receiverUserId || "") === userId ||
+      String(tx.createdBy || "") === userId ||
+      String(tx.ownerUserId || "") === userId ||
+      String(tx.userId || "") === userId;
+
     if (!isSender && !isReceiver) {
       return res.status(404).json({ success: false, message: "Transaction non trouvée" });
     }
@@ -438,8 +406,6 @@ exports.getTransactionController = async (req, res, next) => {
     return next(err);
   }
 };
-
-
 
 
 

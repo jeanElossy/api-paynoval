@@ -27,40 +27,6 @@ const requestValidator = require("../middleware/requestValidator");
 const router = express.Router();
 
 /* ---------------------------------------------------------- */
-/* Rate limit (anti brute force)                              */
-/* ---------------------------------------------------------- */
-/**
- * ✅ IMPORTANT:
- * - On SKIP le rate-limit si l’appel vient du Gateway (x-internal-token)
- * - Parce que le Gateway peut rafraîchir /transactions souvent (home screen)
- *
- * Ton middleware protect gère déjà l’auth interne (si tu as appliqué la version corrigée).
- */
-const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    status: 429,
-    message: "Trop de requêtes, veuillez réessayer plus tard.",
-  },
-  skip: (req) => {
-    // ✅ Skip si appel interne (Gateway / Principal)
-    const t =
-      req.headers["x-internal-token"] ||
-      req.headers["X-Internal-Token"] ||
-      req.headers["x-internal-token".toUpperCase()] ||
-      "";
-    return !!String(t || "").trim();
-  },
-});
-
-// limiter seulement sur les endpoints sensibles
-router.use(["/initiate", "/confirm", "/cancel"], limiter);
-
-/* ---------------------------------------------------------- */
 /* Helpers                                                    */
 /* ---------------------------------------------------------- */
 const pickFirst = (...vals) => {
@@ -81,6 +47,8 @@ const safeToFloat = (v) => {
 const upISO = (v) => String(v || "").trim().toUpperCase();
 
 const MOBILEMONEY_PROVIDERS = ["wave", "orange", "mtn", "moov", "flutterwave"];
+const isMMProvider = (v) =>
+  MOBILEMONEY_PROVIDERS.includes(String(v || "").trim().toLowerCase());
 
 // ce que ton model Transaction accepte (enum)
 const FUNDS_ALLOWED = [
@@ -105,11 +73,41 @@ const DEST_ALLOWED = [
   "cashout",
 ];
 
+/* ---------------------------------------------------------- */
+/* Rate limit (anti brute force)                              */
+/* ---------------------------------------------------------- */
+/**
+ * ✅ IMPORTANT:
+ * - On SKIP le rate-limit si l’appel vient d’un appel interne (Gateway/Principal)
+ * - Node lower-case automatiquement les headers => req.get() est case-insensitive
+ */
+const limiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    status: 429,
+    message: "Trop de requêtes, veuillez réessayer plus tard.",
+  },
+  skip: (req) => {
+    const t = req.get("x-internal-token");
+    return !!String(t || "").trim();
+  },
+});
+
+// limiter seulement sur les endpoints sensibles
+router.use(["/initiate", "/confirm", "/cancel"], limiter);
+
+/* ---------------------------------------------------------- */
+/* Normalisation provider rails                               */
+/* ---------------------------------------------------------- */
 /**
  * Normalise funds/destination:
  * - si on reçoit funds="wave|orange|mtn|moov|flutterwave" => funds="mobilemoney" + metadata.provider
  * - idem pour destination
- * - accepte aussi provider au top-level, et le pousse dans metadata.provider
+ * - accepte provider au top-level, et le pousse dans metadata.provider
  */
 function normalizeProviderRails(b) {
   if (!b || typeof b !== "object") return b;
@@ -118,20 +116,20 @@ function normalizeProviderRails(b) {
   if (!b.metadata || typeof b.metadata !== "object") b.metadata = {};
 
   // provider explicite (top-level ou metadata)
-  const pRaw = pickFirst(b.provider, b.metadata.provider);
+  const pRaw = pickFirst(b.provider, b.metadata.provider, b.mmProvider, b.operator, b.providerSelected);
   const p = String(pRaw || "").trim().toLowerCase();
   if (p) b.metadata.provider = p;
 
   // normalize funds
   const fRaw = String(b.funds || "").trim().toLowerCase();
-  if (MOBILEMONEY_PROVIDERS.includes(fRaw)) {
+  if (isMMProvider(fRaw)) {
     b.funds = "mobilemoney";
     b.metadata.provider = b.metadata.provider || fRaw;
   }
 
   // normalize destination
   const dRaw = String(b.destination || "").trim().toLowerCase();
-  if (MOBILEMONEY_PROVIDERS.includes(dRaw)) {
+  if (isMMProvider(dRaw)) {
     b.destination = "mobilemoney";
     b.metadata.provider = b.metadata.provider || dRaw;
   }
@@ -153,7 +151,7 @@ function normalizeInitiateBody(req, _res, next) {
     normalizeProviderRails(b);
 
     // amount
-    const rawAmount = pickFirst(b.amount, b.amountSource);
+    const rawAmount = pickFirst(b.amount, b.amountSource, b.fundsAmount, b.value);
     if (rawAmount !== "") b.amount = safeToFloat(rawAmount);
 
     // country
@@ -181,9 +179,9 @@ function normalizeInitiateBody(req, _res, next) {
     );
     if (rawTgt) b.localCurrencySymbol = upISO(rawTgt);
 
-    // security (NEW canonical)
-    if (!b.securityQuestion) b.securityQuestion = pickFirst(b.securityQuestion, b.question);
-    if (!b.securityAnswer) b.securityAnswer = pickFirst(b.securityAnswer, b.securityCode);
+    // security (NEW canonical) + legacy aliases
+    b.securityQuestion = pickFirst(b.securityQuestion, b.question, b.validationQuestion);
+    b.securityAnswer = pickFirst(b.securityAnswer, b.securityCode, b.validationCode);
 
     req.body = b;
   } catch {
@@ -201,7 +199,7 @@ function normalizeConfirmBody(req, _res, next) {
 
     normalizeProviderRails(b);
 
-    if (!b.securityAnswer) b.securityAnswer = pickFirst(b.securityAnswer, b.securityCode);
+    b.securityAnswer = pickFirst(b.securityAnswer, b.securityCode, b.validationCode);
 
     req.body = b;
   } catch {
@@ -239,9 +237,11 @@ router.post(
       .normalizeEmail(),
 
     body("amount")
-      .custom((v) => {
-        const n = safeToFloat(v);
-        if (!Number.isFinite(n) || n <= 0) throw new Error("Le montant doit être supérieur à 0");
+      .custom((v, { req }) => {
+        const n = safeToFloat(v ?? req.body?.amount);
+        if (!Number.isFinite(n) || n <= 0) {
+          throw new Error("Le montant doit être supérieur à 0");
+        }
         return true;
       })
       .customSanitizer((v, { req }) => {
@@ -273,6 +273,32 @@ router.post(
       .customSanitizer((v, { req }) => {
         req.body.destination = String(v || "").trim().toLowerCase();
         return req.body.destination;
+      }),
+
+    // ✅ provider obligatoire SI mobilemoney est impliqué
+    body("metadata.provider")
+      .custom((v, { req }) => {
+        const funds = String(req.body?.funds || "").toLowerCase();
+        const dest = String(req.body?.destination || "").toLowerCase();
+        const needs = funds === "mobilemoney" || dest === "mobilemoney";
+
+        const vv = String(v || req.body?.provider || "").trim().toLowerCase();
+
+        if (!needs) return true;
+        if (!vv) {
+          throw new Error("metadata.provider requis pour mobilemoney (wave|orange|mtn|moov|flutterwave)");
+        }
+        if (!isMMProvider(vv)) {
+          throw new Error("metadata.provider doit être wave|orange|mtn|moov|flutterwave");
+        }
+        return true;
+      })
+      .customSanitizer((v, { req }) => {
+        if (!req.body.metadata || typeof req.body.metadata !== "object") req.body.metadata = {};
+        const vv = String(v || req.body?.provider || "").trim().toLowerCase();
+        if (vv) req.body.metadata.provider = vv;
+        if (!req.body.provider && req.body.metadata.provider) req.body.provider = req.body.metadata.provider;
+        return req.body.metadata.provider;
       }),
 
     body("localCurrencySymbol")
@@ -316,37 +342,30 @@ router.post(
       .normalizeEmail(),
 
     body("securityQuestion")
-      .custom((v) => {
-        if (!String(v || "").trim()) throw new Error("securityQuestion requis");
+      .custom((v, { req }) => {
+        const vv = pickFirst(v, req.body?.question, req.body?.validationQuestion);
+        if (!String(vv || "").trim()) throw new Error("securityQuestion requis");
         return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.securityQuestion = pickFirst(v, req.body?.question, req.body?.validationQuestion).trim();
+        return req.body.securityQuestion;
       })
       .trim()
       .escape(),
 
     body("securityAnswer")
-      .custom((v) => {
-        if (!String(v || "").trim()) throw new Error("securityAnswer requis");
-        return true;
-      })
-      .trim()
-      .escape(),
-
-    body("metadata.provider")
-      .optional()
-      .custom((v) => {
-        const vv = String(v || "").trim().toLowerCase();
-        if (!vv) return true;
-        if (!MOBILEMONEY_PROVIDERS.includes(vv)) {
-          throw new Error("metadata.provider doit être wave|orange|mtn|moov|flutterwave");
-        }
+      .custom((v, { req }) => {
+        const vv = pickFirst(v, req.body?.securityCode, req.body?.validationCode);
+        if (!String(vv || "").trim()) throw new Error("securityAnswer requis");
         return true;
       })
       .customSanitizer((v, { req }) => {
-        if (!req.body.metadata || typeof req.body.metadata !== "object") req.body.metadata = {};
-        req.body.metadata.provider = String(v || "").trim().toLowerCase();
-        if (!req.body.provider) req.body.provider = req.body.metadata.provider;
-        return req.body.metadata.provider;
-      }),
+        req.body.securityAnswer = pickFirst(v, req.body?.securityCode, req.body?.validationCode).trim();
+        return req.body.securityAnswer;
+      })
+      .trim()
+      .escape(),
   ],
   requestValidator,
   amlMiddleware,
@@ -364,27 +383,41 @@ router.post(
     body("transactionId").isMongoId().withMessage("ID de transaction invalide"),
 
     body("securityAnswer")
-      .custom((v) => {
-        if (!String(v || "").trim()) throw new Error("securityAnswer requis");
+      .custom((v, { req }) => {
+        const vv = pickFirst(v, req.body?.securityCode, req.body?.validationCode);
+        if (!String(vv || "").trim()) throw new Error("securityAnswer requis");
         return true;
+      })
+      .customSanitizer((v, { req }) => {
+        req.body.securityAnswer = pickFirst(v, req.body?.securityCode, req.body?.validationCode).trim();
+        return req.body.securityAnswer;
       })
       .trim()
       .escape(),
 
+    // ✅ provider obligatoire SI mobilemoney est impliqué (confirm aussi)
     body("metadata.provider")
-      .optional()
-      .custom((v) => {
-        const vv = String(v || "").trim().toLowerCase();
-        if (!vv) return true;
-        if (!MOBILEMONEY_PROVIDERS.includes(vv)) {
+      .custom((v, { req }) => {
+        const funds = String(req.body?.funds || "").toLowerCase();
+        const dest = String(req.body?.destination || "").toLowerCase();
+        const needs = funds === "mobilemoney" || dest === "mobilemoney";
+
+        const vv = String(v || req.body?.provider || "").trim().toLowerCase();
+
+        if (!needs) return true;
+        if (!vv) {
+          throw new Error("metadata.provider requis pour mobilemoney (wave|orange|mtn|moov|flutterwave)");
+        }
+        if (!isMMProvider(vv)) {
           throw new Error("metadata.provider doit être wave|orange|mtn|moov|flutterwave");
         }
         return true;
       })
       .customSanitizer((v, { req }) => {
         if (!req.body.metadata || typeof req.body.metadata !== "object") req.body.metadata = {};
-        req.body.metadata.provider = String(v || "").trim().toLowerCase();
-        if (!req.body.provider) req.body.provider = req.body.metadata.provider;
+        const vv = String(v || req.body?.provider || "").trim().toLowerCase();
+        if (vv) req.body.metadata.provider = vv;
+        if (!req.body.provider && req.body.metadata.provider) req.body.provider = req.body.metadata.provider;
         return req.body.metadata.provider;
       }),
   ],
