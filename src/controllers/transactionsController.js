@@ -1430,6 +1430,30 @@ function pickBodyPricingInput(reqBody = {}) {
   };
 }
 
+// async function fetchPricingQuoteFromGateway({ authHeader, pricingInput }) {
+//   const gatewayBase = getGatewayBase();
+//   const url = `${gatewayBase}/pricing/quote`;
+
+//   const headers = {
+//     "Content-Type": "application/json",
+//     ...(authHeader ? { Authorization: authHeader } : {}),
+//     ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
+//   };
+
+//   const response = await axios.post(url, pricingInput, {
+//     headers,
+//     timeout: 12000,
+//   });
+
+//   const payload = response?.data || {};
+//   if (payload.ok === false) {
+//     throw createError(502, payload.error || "Erreur pricing gateway");
+//   }
+
+//   return payload;
+// }
+
+
 async function fetchPricingQuoteFromGateway({ authHeader, pricingInput }) {
   const gatewayBase = getGatewayBase();
   const url = `${gatewayBase}/pricing/quote`;
@@ -1440,18 +1464,33 @@ async function fetchPricingQuoteFromGateway({ authHeader, pricingInput }) {
     ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
   };
 
+  logger.info("[TX-CORE][PRICING_CALL]", {
+    url,
+    hasAuthHeader: !!authHeader,
+    hasInternalToken: !!INTERNAL_TOKEN,
+    pricingInput,
+  });
+
   const response = await axios.post(url, pricingInput, {
     headers,
     timeout: 12000,
   });
 
+  logger.info("[TX-CORE][PRICING_RESPONSE]", {
+    status: response?.status,
+    data: response?.data,
+  });
+
   const payload = response?.data || {};
-  if (payload.ok === false) {
-    throw createError(502, payload.error || "Erreur pricing gateway");
+  if (payload.ok === false || payload.success === false) {
+    throw createError(502, payload.error || payload.message || "Erreur pricing gateway");
   }
 
   return payload;
 }
+
+
+
 
 /**
  * ✅ Extrait proprement le snapshot pricing verrouillé
@@ -1951,12 +1990,14 @@ exports.initiateInternal = async (req, res, next) => {
         authHeader,
         pricingInput,
       });
-    } catch (e) {
+      } catch (e) {
       logger.error("[pricing/quote] échec appel Gateway", {
+        gatewayBase: getGatewayBase(),
         pricingInput,
         status: e.response?.status,
         responseData: e.response?.data,
         message: e.message,
+        code: e.code,
       });
       throw createError(502, "Service pricing indisponible");
     }
