@@ -18,8 +18,8 @@
 
 const mongoose = require("mongoose");
 const axios = require("axios");
-const config = require("../../config");
-const { getUsersConn, getTxConn } = require("../../config/db");
+const config = require("../../../config");
+const { getUsersConn, getTxConn } = require("../../../config/db");
 
 /* -------------------------------------------------------------------------- */
 /* Connexions                                                                 */
@@ -32,30 +32,30 @@ const txConn = getTxConn();
 /* Modèles                                                                    */
 /* -------------------------------------------------------------------------- */
 
-const User = require("../../models/User")(usersConn);
-const Notification = require("../../models/Notification")(usersConn);
-const Outbox = require("../../models/Outbox")(usersConn);
-const Transaction = require("../../models/Transaction")(txConn);
+const User = require("../../../models/User")(usersConn);
+const Notification = require("../../../models/Notification")(usersConn);
+const Outbox = require("../../../models/Outbox")(usersConn);
+const Transaction = require("../../../models/Transaction")(txConn);
 
 /**
  * Source de vérité opérationnelle des soldes :
  * - Balance sur usersConn
  * - LedgerEntry sur txConn
  */
-const Balance = require("../../models/Balance")(usersConn);
-const LedgerEntry = require("../../models/LedgerEntry")(txConn);
+const Balance = require("../../../models/Balance")(usersConn);
+const LedgerEntry = require("../../../models/LedgerEntry")(txConn);
 
 /* -------------------------------------------------------------------------- */
 /* Services                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const validationService = require("../../services/validationService");
-const { logTransaction } = require("../../services/aml");
-const logger = require("../../utils/logger");
-const { notifyTransactionViaGateway } = require("../../services/notifyGateway");
-const { convertAmount } = require("../../tools/currency");
-const { normCur } = require("../../utils/currency");
-const generateTransactionRef = require("../../utils/generateRef");
+const validationService = require("../../../services/validationService");
+const { logTransaction } = require("../../../services/aml");
+const logger = require("../../../logger");
+const { notifyTransactionViaGateway } = require("../../../services/notifyGateway");
+const { convertAmount } = require("../../../tools/currency");
+const { normCur } = require("../../../utils/currency");
+const generateTransactionRef = require("../../../utils/generateRef");
 
 const {
   reserveSenderFunds,
@@ -67,15 +67,15 @@ const {
   creditAdminRevenue,
   chargeCancellationFee,
   createLedgerEntry,
-} = require("../../services/ledgerService");
+} = require("../../../services/ledgerService");
 
 const {
   normalizePricingSnapshot,
   buildAdminRevenueBreakdown,
   roundMoney,
-} = require("../../services/pricingSnapshotNormalizer");
+} = require("../../../services/pricingSnapshotNormalizer");
 
-const { assertTransition } = require("../../services/transactionStateMachine");
+const { assertTransition } = require("../../../services/transactionStateMachine");
 
 /* -------------------------------------------------------------------------- */
 /* Config runtime                                                             */
