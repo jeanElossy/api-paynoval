@@ -1,6 +1,6 @@
 // services/balance.js
 
-const Balance = require('../models/Balance');
+const Balance = require('../models/TxWalletBalance');
 
 // Récupérer le solde
 async function getUserBalance(userId) {

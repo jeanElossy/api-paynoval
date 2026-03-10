@@ -87,7 +87,7 @@ function getTransactionModel() {
 
 function getBalanceModel() {
   if (_Balance) return _Balance;
-  _Balance = require("../../../models/Balance")(getUsersConnectionSafe());
+  _Balance = require("../../../models/TxWalletBalance")(getUsersConnectionSafe());
   return _Balance;
 }
 

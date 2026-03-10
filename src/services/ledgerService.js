@@ -17,15 +17,13 @@
  * --------------------------------------------------------------------------
  */
 
+"use strict";
+
 const mongoose = require("mongoose");
 const {
   roundMoney,
   buildAdminRevenueBreakdown,
 } = require("./pricingSnapshotNormalizer");
-
-/* -------------------------------------------------------------------------- */
-/* Connexions                                                                 */
-/* -------------------------------------------------------------------------- */
 
 const getTxConnSafe = () => {
   try {
@@ -36,33 +34,11 @@ const getTxConnSafe = () => {
   }
 };
 
-const getUsersConnSafe = () => {
-  try {
-    const { getUsersConn } = require("../config/db");
-    return getUsersConn();
-  } catch {
-    return mongoose;
-  }
-};
-
 const txConn = getTxConnSafe();
-const usersConn = getUsersConnSafe();
-
-/* -------------------------------------------------------------------------- */
-/* Modèles                                                                    */
-/* -------------------------------------------------------------------------- */
 
 const LedgerEntry = require("../models/LedgerEntry")(txConn);
+const TxWalletBalance = require("../models/TxWalletBalance")(txConn);
 
-/**
- * IMPORTANT:
- * Ce modèle doit pointer vers la collection dédiée TX Core
- * (ex: collection "tx_wallet_balances"), pas vers la balance legacy du backend principal.
- *
- * Si tu as laissé le fichier sous ../models/Balance mais que tu as changé
- * le nom du modèle exporté en TxWalletBalance + collection dédiée, ceci marche.
- */
-const TxWalletBalance = require("../models/Balance")(usersConn);
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
