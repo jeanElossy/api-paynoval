@@ -1,7 +1,7 @@
 "use strict";
 
 const createError = require("http-errors");
-const logger = require("../utils/logger");
+const logger = require("../logger");
 
 const { getProviderAdapter } = require("../providers/providerSelector");
 const {
@@ -230,7 +230,7 @@ async function providerWebhookController(req, res, next) {
     let adapter;
     try {
       adapter = getProviderAdapter({ rail, provider });
-    } catch (err) {
+    } catch (_err) {
       throw createError(
         400,
         `Adapter webhook introuvable pour rail=${rail} provider=${provider}`
@@ -278,7 +278,7 @@ async function providerWebhookController(req, res, next) {
 
     return settleExternalTransactionWebhook(req, res, next);
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 

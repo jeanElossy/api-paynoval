@@ -2,52 +2,19 @@
 
 /**
  * --------------------------------------------------------------------------
- * Runtime partagé transactions
+ * Runtime partagé transactions (LAZY / SAFE)
  * --------------------------------------------------------------------------
- * Rôle :
- * - centraliser les imports cross-module
- * - isoler la logique de connexions Mongo multi-DB
- * - exposer des helpers communs sûrs aux controllers transactionnels
- *
  * Objectif :
- * - éviter les require dupliqués partout
- * - fiabiliser l’usage des sessions Mongo
- * - préparer la séparation correcte TX Core / Users DB
+ * - ne jamais exiger les connexions Mongo au chargement du module
+ * - éviter le crash Render si les controllers sont importés avant bootstrap DB
+ * - exposer des accès lazy/cachés aux connexions, modèles et services
  * --------------------------------------------------------------------------
  */
 
 const mongoose = require("mongoose");
 const axios = require("axios");
 const config = require("../../../config");
-const { getUsersConn, getTxConn } = require("../../../config/db");
-
-/* -------------------------------------------------------------------------- */
-/* Connexions                                                                 */
-/* -------------------------------------------------------------------------- */
-
-const usersConn = getUsersConn();
-const txConn = getTxConn();
-
-/* -------------------------------------------------------------------------- */
-/* Modèles                                                                    */
-/* -------------------------------------------------------------------------- */
-
-const User = require("../../../models/User")(usersConn);
-const Notification = require("../../../models/Notification")(usersConn);
-const Outbox = require("../../../models/Outbox")(usersConn);
-const Transaction = require("../../../models/Transaction")(txConn);
-
-/**
- * Source de vérité opérationnelle des soldes :
- * - Balance sur usersConn
- * - LedgerEntry sur txConn
- */
-const Balance = require("../../../models/Balance")(usersConn);
-const LedgerEntry = require("../../../models/LedgerEntry")(txConn);
-
-/* -------------------------------------------------------------------------- */
-/* Services                                                                   */
-/* -------------------------------------------------------------------------- */
+const db = require("../../../config/db");
 
 const validationService = require("../../../services/validationService");
 const { logTransaction } = require("../../../services/aml");
@@ -77,22 +44,68 @@ const {
 
 const { assertTransition } = require("../../../services/transactionStateMachine");
 
-/* -------------------------------------------------------------------------- */
-/* Config runtime                                                             */
-/* -------------------------------------------------------------------------- */
+let _usersConn = null;
+let _txConn = null;
+
+let _User = null;
+let _Notification = null;
+let _Outbox = null;
+let _Transaction = null;
+let _Balance = null;
+let _LedgerEntry = null;
+
+function getUsersConnectionSafe() {
+  if (_usersConn) return _usersConn;
+  _usersConn = db.getUsersConn();
+  return _usersConn;
+}
+
+function getTxConnectionSafe() {
+  if (_txConn) return _txConn;
+  _txConn = db.getTxConn();
+  return _txConn;
+}
+
+function getUserModel() {
+  if (_User) return _User;
+  _User = require("../../../models/User")(getUsersConnectionSafe());
+  return _User;
+}
+
+function getNotificationModel() {
+  if (_Notification) return _Notification;
+  _Notification = require("../../../models/Notification")(getUsersConnectionSafe());
+  return _Notification;
+}
+
+function getOutboxModel() {
+  if (_Outbox) return _Outbox;
+  _Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
+  return _Outbox;
+}
+
+function getTransactionModel() {
+  if (_Transaction) return _Transaction;
+  _Transaction = require("../../../models/Transaction")(getTxConnectionSafe());
+  return _Transaction;
+}
+
+function getBalanceModel() {
+  if (_Balance) return _Balance;
+  _Balance = require("../../../models/Balance")(getUsersConnectionSafe());
+  return _Balance;
+}
+
+function getLedgerEntryModel() {
+  if (_LedgerEntry) return _LedgerEntry;
+  _LedgerEntry = require("../../../models/LedgerEntry")(getTxConnectionSafe());
+  return _LedgerEntry;
+}
 
 const PRINCIPAL_URL = config.principalUrl;
 const GATEWAY_URL = config.gatewayUrl;
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
 
-/* -------------------------------------------------------------------------- */
-/* Sessions Mongo                                                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Vérifie si les deux connexions pointent vers le même MongoClient.
- * Si oui, on peut partager une transaction/session entre les deux.
- */
 function sameMongoClient(connA, connB) {
   try {
     const a = connA?.getClient?.();
@@ -103,30 +116,26 @@ function sameMongoClient(connA, connB) {
   }
 }
 
-const CAN_USE_SHARED_SESSION = sameMongoClient(usersConn, txConn);
+function canUseSharedSession() {
+  try {
+    return sameMongoClient(getUsersConnectionSafe(), getTxConnectionSafe());
+  } catch {
+    return false;
+  }
+}
 
-/**
- * Ouvre une session sur la connexion TX.
- * Fallback mongoose si nécessaire.
- */
 async function startTxSession() {
+  const txConn = getTxConnectionSafe();
   if (typeof txConn?.startSession === "function") {
     return txConn.startSession();
   }
   return mongoose.startSession();
 }
 
-/**
- * Retourne les options de session seulement si elles sont supportées
- * par les deux connexions partagées.
- */
 function maybeSessionOpts(session) {
-  return CAN_USE_SHARED_SESSION && session ? { session } : {};
+  return canUseSharedSession() && session ? { session } : {};
 }
 
-/**
- * Utilitaire défensif pour fermer une session sans casser le flux.
- */
 function safeEndSession(session) {
   try {
     session?.endSession?.();
@@ -135,19 +144,13 @@ function safeEndSession(session) {
   }
 }
 
-/**
- * Commit défensif.
- */
 async function safeCommit(session) {
-  if (!CAN_USE_SHARED_SESSION || !session) return;
+  if (!canUseSharedSession() || !session) return;
   await session.commitTransaction();
 }
 
-/**
- * Abort défensif.
- */
 async function safeAbort(session) {
-  if (!CAN_USE_SHARED_SESSION || !session) return;
+  if (!canUseSharedSession() || !session) return;
   try {
     await session.abortTransaction();
   } catch {
@@ -155,24 +158,63 @@ async function safeAbort(session) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Exports                                                                    */
-/* -------------------------------------------------------------------------- */
+function getRuntime() {
+  return {
+    mongoose,
+    axios,
+    config,
+
+    usersConn: getUsersConnectionSafe(),
+    txConn: getTxConnectionSafe(),
+
+    User: getUserModel(),
+    Notification: getNotificationModel(),
+    Outbox: getOutboxModel(),
+    Transaction: getTransactionModel(),
+    Balance: getBalanceModel(),
+    LedgerEntry: getLedgerEntryModel(),
+
+    validationService,
+    logTransaction,
+    logger,
+    notifyTransactionViaGateway,
+    convertAmount,
+    normCur,
+    generateTransactionRef,
+
+    reserveSenderFunds,
+    captureSenderReserve,
+    releaseSenderReserve,
+    creditReceiverFunds,
+    debitReceiverFunds,
+    refundSenderFunds,
+    creditAdminRevenue,
+    chargeCancellationFee,
+    createLedgerEntry,
+
+    normalizePricingSnapshot,
+    buildAdminRevenueBreakdown,
+    roundMoney,
+
+    assertTransition,
+
+    PRINCIPAL_URL,
+    GATEWAY_URL,
+    INTERNAL_TOKEN,
+
+    canUseSharedSession,
+    startTxSession,
+    maybeSessionOpts,
+    safeCommit,
+    safeAbort,
+    safeEndSession,
+  };
+}
 
 module.exports = {
   mongoose,
   axios,
   config,
-
-  usersConn,
-  txConn,
-
-  User,
-  Notification,
-  Outbox,
-  Transaction,
-  Balance,
-  LedgerEntry,
 
   validationService,
   logTransaction,
@@ -202,10 +244,22 @@ module.exports = {
   GATEWAY_URL,
   INTERNAL_TOKEN,
 
-  CAN_USE_SHARED_SESSION,
+  getUsersConnectionSafe,
+  getTxConnectionSafe,
+
+  getUserModel,
+  getNotificationModel,
+  getOutboxModel,
+  getTransactionModel,
+  getBalanceModel,
+  getLedgerEntryModel,
+
+  canUseSharedSession,
   startTxSession,
   maybeSessionOpts,
   safeCommit,
   safeAbort,
   safeEndSession,
+
+  getRuntime,
 };

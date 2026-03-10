@@ -8,19 +8,7 @@
  */
 
 const createError = require("http-errors");
-
-const {
-  Transaction,
-  User,
-  captureSenderReserve,
-  releaseSenderReserve,
-  refundSenderFunds,
-  creditReceiverFunds,
-  creditAdminRevenue,
-  startTxSession,
-  maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
-} = require("../services/transactions/shared/runtime");
+const runtime = require("../services/transactions/shared/runtime");
 
 const { notifyParties } = require("../services/transactions/shared/notifications");
 const { round2, toFloat } = require("../services/transactions/shared/helpers");
@@ -105,7 +93,7 @@ function appendWebhookHistory(tx, payload = {}) {
   tx.webhookHistory = list.slice(-50);
 }
 
-async function findTransactionFromWebhook(payload = {}, session = null) {
+async function findTransactionFromWebhook(Transaction, payload = {}, session = null) {
   const providerReference =
     payload.providerReference ||
     payload.reference ||
@@ -151,24 +139,50 @@ async function findTransactionFromWebhook(payload = {}, session = null) {
 }
 
 async function settleExternalTransactionWebhook(req, res, next) {
-  const session = await startTxSession();
+  let session = null;
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    const {
+      Transaction,
+      User,
+      captureSenderReserve,
+      releaseSenderReserve,
+      refundSenderFunds,
+      creditReceiverFunds,
+      creditAdminRevenue,
+      startTxSession,
+      maybeSessionOpts,
+      canUseSharedSession,
+      safeCommit,
+      safeAbort,
+      safeEndSession,
+    } = runtime.getRuntime();
+
+    const useSharedSession = Boolean(canUseSharedSession());
+
+    session = await startTxSession();
+
+    if (useSharedSession && typeof session?.startTransaction === "function") {
+      session.startTransaction();
+    }
 
     const sessOpts = maybeSessionOpts(session);
     const payload = req.body || {};
     const mapped = mapProviderState(payload);
 
-    const tx = await findTransactionFromWebhook(payload, sessOpts.session || null);
+    const tx = await findTransactionFromWebhook(
+      Transaction,
+      payload,
+      sessOpts.session || null
+    );
+
     if (!tx) {
       throw createError(404, "Transaction webhook introuvable");
     }
 
-    // Anti-duplication via eventId
     if (hasWebhookEventBeenSeen(tx, payload)) {
-      if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
-      session.endSession();
+      await safeCommit(session);
+      safeEndSession(session);
 
       return res.status(200).json({
         success: true,
@@ -197,8 +211,8 @@ async function settleExternalTransactionWebhook(req, res, next) {
 
       await tx.save(sessOpts);
 
-      if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
-      session.endSession();
+      await safeCommit(session);
+      safeEndSession(session);
 
       return res.status(202).json({
         success: true,
@@ -261,8 +275,8 @@ async function settleExternalTransactionWebhook(req, res, next) {
         await tx.save(sessOpts);
         await notifyParties(tx, "confirmed", session, sourceCurrency);
 
-        if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
-        session.endSession();
+        await safeCommit(session);
+        safeEndSession(session);
 
         return res.json({
           success: true,
@@ -321,8 +335,8 @@ async function settleExternalTransactionWebhook(req, res, next) {
         await tx.save(sessOpts);
         await notifyParties(tx, "confirmed", session, targetCurrency);
 
-        if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
-        session.endSession();
+        await safeCommit(session);
+        safeEndSession(session);
 
         return res.json({
           success: true,
@@ -336,7 +350,6 @@ async function settleExternalTransactionWebhook(req, res, next) {
       throw createError(400, `Flow externe non supporté en SUCCESS: ${tx.flow}`);
     }
 
-    // FAILED
     if (payload.providerReference || payload.reference) {
       tx.providerReference = payload.providerReference || payload.reference;
     }
@@ -377,8 +390,8 @@ async function settleExternalTransactionWebhook(req, res, next) {
     await tx.save(sessOpts);
     await notifyParties(tx, "failed", session, sourceCurrency || targetCurrency);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
-    session.endSession();
+    await safeCommit(session);
+    safeEndSession(session);
 
     return res.json({
       success: true,
@@ -389,10 +402,15 @@ async function settleExternalTransactionWebhook(req, res, next) {
     });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
-    } catch {}
-    session.endSession();
-    next(err);
+      if (session) {
+        const { safeAbort, safeEndSession } = runtime;
+        await safeAbort(session);
+        safeEndSession(session);
+      }
+    } catch (_) {
+      // no-op
+    }
+    return next(err);
   }
 }
 
