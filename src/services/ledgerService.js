@@ -10,7 +10,7 @@
  * - rester strict sur les validations d'entrée
  *
  * Notes importantes :
- * - Le wallet est la source de vérité opérationnelle pour les soldes.
+ * - Le wallet TX Core est la source de vérité opérationnelle pour les soldes.
  * - Le ledger sert d’audit trail explicite.
  * - Ce service ne doit pas "deviner" les flows métier : il exécute des
  *   primitives financières appelées par les controllers/services métier.
@@ -48,8 +48,21 @@ const getUsersConnSafe = () => {
 const txConn = getTxConnSafe();
 const usersConn = getUsersConnSafe();
 
+/* -------------------------------------------------------------------------- */
+/* Modèles                                                                    */
+/* -------------------------------------------------------------------------- */
+
 const LedgerEntry = require("../models/LedgerEntry")(txConn);
-const Balance = require("../models/Balance")(usersConn);
+
+/**
+ * IMPORTANT:
+ * Ce modèle doit pointer vers la collection dédiée TX Core
+ * (ex: collection "tx_wallet_balances"), pas vers la balance legacy du backend principal.
+ *
+ * Si tu as laissé le fichier sous ../models/Balance mais que tu as changé
+ * le nom du modèle exporté en TxWalletBalance + collection dédiée, ceci marche.
+ */
+const TxWalletBalance = require("../models/Balance")(usersConn);
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -101,6 +114,26 @@ function userWalletAccountId(userId, currency) {
 
 function adminRevenueAccountId(currency = "CAD") {
   return `admin_revenue:${normalizeCurrency(currency)}`;
+}
+
+function assertWalletModel() {
+  if (!TxWalletBalance) {
+    throw new Error("TxWalletBalance indisponible");
+  }
+
+  const requiredMethods = [
+    "reserve",
+    "captureReserve",
+    "releaseReserve",
+    "credit",
+    "debit",
+  ];
+
+  for (const method of requiredMethods) {
+    if (typeof TxWalletBalance[method] !== "function") {
+      throw new Error(`TxWalletBalance.${method} indisponible`);
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -188,12 +221,18 @@ async function reserveSenderFunds({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await Balance.reserve(sender, cur, amt, maybeSessionOpts(session));
+  const wallet = await TxWalletBalance.reserve(
+    sender,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
 
   await createLedgerEntry({
     transactionId: transaction._id,
@@ -223,12 +262,18 @@ async function captureSenderReserve({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await Balance.captureReserve(sender, cur, amt, maybeSessionOpts(session));
+  const wallet = await TxWalletBalance.captureReserve(
+    sender,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
 
   await createLedgerEntry({
     transactionId: transaction._id,
@@ -258,12 +303,18 @@ async function releaseSenderReserve({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await Balance.releaseReserve(sender, cur, amt, maybeSessionOpts(session));
+  const wallet = await TxWalletBalance.releaseReserve(
+    sender,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
 
   await createLedgerEntry({
     transactionId: transaction._id,
@@ -297,12 +348,18 @@ async function creditReceiverFunds({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const receiver = normalizeObjectIdLike(receiverId, "receiverId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await Balance.credit(receiver, cur, amt, maybeSessionOpts(session));
+  const wallet = await TxWalletBalance.credit(
+    receiver,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
 
   await createLedgerEntry({
     transactionId: transaction._id,
@@ -332,12 +389,18 @@ async function debitReceiverFunds({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const receiver = normalizeObjectIdLike(receiverId, "receiverId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await Balance.debit(receiver, cur, amt, maybeSessionOpts(session));
+  const wallet = await TxWalletBalance.debit(
+    receiver,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
 
   await createLedgerEntry({
     transactionId: transaction._id,
@@ -367,12 +430,18 @@ async function refundSenderFunds({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await Balance.credit(sender, cur, amt, maybeSessionOpts(session));
+  const wallet = await TxWalletBalance.credit(
+    sender,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
 
   await createLedgerEntry({
     transactionId: transaction._id,
@@ -405,6 +474,7 @@ async function creditAdminRevenue({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const adminId = normalizeObjectIdLike(adminUserId, "adminUserId");
   const adminRevenue = buildAdminRevenueBreakdown(pricingSnapshot || {});
@@ -419,7 +489,7 @@ async function creditAdminRevenue({
   });
 
   if (feeCAD > 0) {
-    await Balance.credit(adminId, "CAD", feeCAD, maybeSessionOpts(session));
+    await TxWalletBalance.credit(adminId, "CAD", feeCAD, maybeSessionOpts(session));
 
     credits.push(
       await createLedgerEntry({
@@ -443,7 +513,7 @@ async function creditAdminRevenue({
   }
 
   if (fxCAD > 0) {
-    await Balance.credit(adminId, "CAD", fxCAD, maybeSessionOpts(session));
+    await TxWalletBalance.credit(adminId, "CAD", fxCAD, maybeSessionOpts(session));
 
     credits.push(
       await createLedgerEntry({
@@ -480,12 +550,6 @@ async function creditAdminRevenue({
 /* Cancellation fee                                                           */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Frais d'annulation :
- * - débit wallet user dans la devise source
- * - crédit admin en CAD
- * - écritures ledger sender + admin
- */
 async function chargeCancellationFee({
   transaction,
   senderId,
@@ -500,6 +564,7 @@ async function chargeCancellationFee({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  assertWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const adminId = normalizeObjectIdLike(adminUserId, "adminUserId");
@@ -523,7 +588,12 @@ async function chargeCancellationFee({
   };
 
   if (out.feeSourceAmount > 0) {
-    await Balance.debit(sender, out.feeSourceCurrency, out.feeSourceAmount, maybeSessionOpts(session));
+    await TxWalletBalance.debit(
+      sender,
+      out.feeSourceCurrency,
+      out.feeSourceAmount,
+      maybeSessionOpts(session)
+    );
 
     await createLedgerEntry({
       transactionId: transaction._id,
@@ -550,7 +620,7 @@ async function chargeCancellationFee({
   }
 
   if (out.adminFeeCAD > 0) {
-    await Balance.credit(adminId, "CAD", out.adminFeeCAD, maybeSessionOpts(session));
+    await TxWalletBalance.credit(adminId, "CAD", out.adminFeeCAD, maybeSessionOpts(session));
 
     await createLedgerEntry({
       transactionId: transaction._id,
