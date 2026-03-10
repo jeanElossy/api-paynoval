@@ -16,10 +16,20 @@ const {
 async function initiateByFlow(req, res, next) {
   try {
     const body = req.body || {};
+
     const funds = String(body.funds || "").trim().toLowerCase();
     const destination = String(body.destination || "").trim().toLowerCase();
+    const provider = String(body.provider || "").trim().toLowerCase();
+    const method = String(body.method || "").trim().toLowerCase();
 
-    if (funds === "paynoval" && destination === "paynoval") {
+    const isInternalPaynoval =
+      funds === "paynoval" &&
+      destination === "paynoval" &&
+      (!provider || provider === "paynoval") &&
+      (!method || method === "paynoval");
+
+    if (isInternalPaynoval) {
+      console.log("[TX FLOW] Internal PayNoval -> PayNoval detected");
       return initiateInternal(req, res, next);
     }
 
