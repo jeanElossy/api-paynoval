@@ -48,10 +48,7 @@ function isPlainObject(v) {
 }
 
 function buildSafeMeta(...parts) {
-  return Object.assign(
-    {},
-    ...parts.map((p) => (isPlainObject(p) ? p : {}))
-  );
+  return Object.assign({}, ...parts.map((p) => (isPlainObject(p) ? p : {})));
 }
 
 function safeLog(level, message, meta = {}) {
@@ -88,6 +85,83 @@ async function endQuietly(session) {
   } catch {}
 }
 
+function maskSecret(v) {
+  return v ? "***" : undefined;
+}
+
+function normalizeCountryLoose(v) {
+  return String(v || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
+}
+
+function resolveCountryForSource(body = {}) {
+  return (
+    body.fromCountry ||
+    body.sourceCountry ||
+    body.country ||
+    ""
+  );
+}
+
+function resolveCountryForTarget(body = {}) {
+  return (
+    body.toCountry ||
+    body.destinationCountry ||
+    body.targetCountry ||
+    body.country ||
+    ""
+  );
+}
+
+function getEffectivePricingId(body = {}) {
+  return String(
+    body.effectivePricingId ||
+      body.pricingId ||
+      body.quoteId ||
+      body.meta?.effectivePricingId ||
+      body.meta?.pricingId ||
+      body.meta?.quoteId ||
+      ""
+  ).trim();
+}
+
+function buildDebugBody(body = {}) {
+  return {
+    toEmail: body?.toEmail,
+    amount: body?.amount,
+    amountSource: body?.amountSource,
+    amountTarget: body?.amountTarget,
+    feeSource: body?.feeSource,
+    exchangeRate: body?.exchangeRate,
+    fxRateSourceToTarget: body?.fxRateSourceToTarget,
+    destination: body?.destination,
+    funds: body?.funds,
+    provider: body?.provider,
+    method: body?.method,
+    txType: body?.txType,
+    country: body?.country,
+    fromCountry: body?.fromCountry,
+    toCountry: body?.toCountry,
+    sourceCountry: body?.sourceCountry,
+    destinationCountry: body?.destinationCountry,
+    currency: body?.currency,
+    currencySource: body?.currencySource,
+    currencyTarget: body?.currencyTarget,
+    senderCurrencyCode: body?.senderCurrencyCode,
+    localCurrencyCode: body?.localCurrencyCode,
+    pricingId: body?.pricingId,
+    quoteId: body?.quoteId,
+    effectivePricingId: body?.effectivePricingId,
+    securityQuestion: body?.securityQuestion || body?.question,
+    securityAnswer: maskSecret(body?.securityAnswer || body?.securityCode),
+    recipientInfo: body?.recipientInfo,
+    meta: body?.meta,
+    metadata: body?.metadata,
+  };
+}
+
 async function initiateInternal(req, res, next) {
   const session = await startTxSession();
 
@@ -97,6 +171,12 @@ async function initiateInternal(req, res, next) {
     }
 
     const body = isPlainObject(req.body) ? req.body : {};
+
+    safeLog("info", "[TX INTERNAL] raw-body", {
+      body: buildDebugBody(body),
+      userId: req.user?.id || req.user?._id || null,
+      ip: req.ip || null,
+    });
 
     const {
       toEmail,
@@ -137,12 +217,15 @@ async function initiateInternal(req, res, next) {
       throw createError(401, "Token manquant");
     }
 
-    const senderId = String(req.user?.id || "").trim();
+    const senderId = String(req.user?.id || req.user?._id || "").trim();
     if (!senderId) {
       throw createError(401, "Utilisateur non authentifié");
     }
 
-    const cleanEmail = String(toEmail || "").trim().toLowerCase();
+    const cleanEmail = String(toEmail || recipientInfo?.email || "")
+      .trim()
+      .toLowerCase();
+
     if (!cleanEmail || !isEmailLike(cleanEmail)) {
       throw createError(400, "Email du destinataire requis");
     }
@@ -157,7 +240,11 @@ async function initiateInternal(req, res, next) {
       throw createError(400, "Description trop longue");
     }
 
-    if (!country || !String(country).trim()) {
+    const sourceCountryRaw = resolveCountryForSource(body);
+    const targetCountryRaw = resolveCountryForTarget(body);
+    const effectiveCountry = targetCountryRaw || sourceCountryRaw || country || "";
+
+    if (!effectiveCountry || !String(effectiveCountry).trim()) {
       throw createError(400, "country requis");
     }
 
@@ -211,7 +298,7 @@ async function initiateInternal(req, res, next) {
           body.fromCurrency ||
           body.senderCurrencySymbol ||
           body.currency,
-        country
+        sourceCountryRaw || effectiveCountry
       ) ||
       upperSanitized(
         body.senderCurrencyCode ||
@@ -227,7 +314,7 @@ async function initiateInternal(req, res, next) {
           body.currencyTarget ||
           body.toCurrency ||
           body.localCurrencySymbol,
-        country
+        targetCountryRaw || effectiveCountry
       ) ||
       upperSanitized(
         body.localCurrencyCode ||
@@ -251,6 +338,9 @@ async function initiateInternal(req, res, next) {
     req.body.funds = "paynoval";
     req.body.destination = "paynoval";
     req.body.provider = "paynoval";
+    req.body.method = "INTERNAL";
+
+    const effectivePricingId = getEffectivePricingId(body);
 
     const pricingInput = pickBodyPricingInput({
       ...body,
@@ -258,12 +348,15 @@ async function initiateInternal(req, res, next) {
       funds: "paynoval",
       destination: "paynoval",
       provider: "paynoval",
-      method: methodNorm || "internal",
+      method: "INTERNAL",
       txType: body.txType || "TRANSFER",
       fromCurrency: currencySourceISO,
       toCurrency: currencyTargetISO,
-      fromCountry: body.fromCountry || country,
-      toCountry: body.toCountry || body.destinationCountry || country,
+      fromCountry: sourceCountryRaw || effectiveCountry,
+      toCountry: targetCountryRaw || effectiveCountry,
+      pricingId: body.pricingId || undefined,
+      quoteId: body.quoteId || undefined,
+      effectivePricingId: effectivePricingId || undefined,
     });
 
     safeLog("info", "[TX INTERNAL] initiate:start", {
@@ -275,7 +368,12 @@ async function initiateInternal(req, res, next) {
       funds: "paynoval",
       destination: "paynoval",
       provider: "paynoval",
-      method: pricingInput.method || "internal",
+      method: "INTERNAL",
+      sourceCountry: normalizeCountryLoose(sourceCountryRaw || effectiveCountry),
+      targetCountry: normalizeCountryLoose(targetCountryRaw || effectiveCountry),
+      pricingId: body?.pricingId || null,
+      quoteId: body?.quoteId || null,
+      effectivePricingId: effectivePricingId || null,
     });
 
     let pricingPayload;
@@ -283,6 +381,14 @@ async function initiateInternal(req, res, next) {
       pricingPayload = await fetchPricingQuoteFromGateway({
         authHeader,
         pricingInput,
+      });
+
+      safeLog("info", "[TX INTERNAL] pricing quote gateway success", {
+        senderId,
+        toEmail: cleanEmail,
+        pricingId: body?.pricingId || null,
+        quoteId: body?.quoteId || null,
+        effectivePricingId: effectivePricingId || null,
       });
     } catch (e) {
       safeLog("error", "[TX INTERNAL] pricing quote gateway error", {
@@ -343,7 +449,15 @@ async function initiateInternal(req, res, next) {
     const amlSnapshot = req.aml || null;
 
     const safeRecipientInfo = isPlainObject(recipientInfo) ? recipientInfo : {};
-    const recipientName = sanitize(safeRecipientInfo.name || "") || receiver.fullName;
+    const recipientName =
+      sanitize(
+        safeRecipientInfo.name ||
+          safeRecipientInfo.accountHolderName ||
+          safeRecipientInfo.holder ||
+          ""
+      ) ||
+      receiver.fullName ||
+      cleanEmail;
 
     const txMeta = buildSafeMeta(meta, metadata, {
       entry: "transfer.pending",
@@ -351,6 +465,9 @@ async function initiateInternal(req, res, next) {
       receiverUserId: receiver._id,
       requestOrigin: "tx-core",
       flowIsolation: "internal_only",
+      pricingId: body?.pricingId || null,
+      quoteId: body?.quoteId || null,
+      effectivePricingId: effectivePricingId || null,
     });
 
     const txDoc = {
@@ -378,7 +495,7 @@ async function initiateInternal(req, res, next) {
       funds: "paynoval",
       provider: "paynoval",
       operator: body.operator || null,
-      country: sanitize(country),
+      country: sanitize(effectiveCountry),
 
       amount: dec2(amountSourceStd),
       transactionFees: dec2(feeSourceStd),
@@ -433,7 +550,7 @@ async function initiateInternal(req, res, next) {
 
       metadata: {
         provider: "paynoval",
-        method: methodNorm || "internal",
+        method: "INTERNAL",
         txType: body.txType || "TRANSFER",
         rail: "internal",
       },
@@ -468,6 +585,8 @@ async function initiateInternal(req, res, next) {
       providerStatus: tx.providerStatus,
       senderId,
       receiverId: String(receiver._id),
+      quoteId: body?.quoteId || null,
+      effectivePricingId: effectivePricingId || null,
     });
 
     await reserveSenderFunds({
@@ -547,6 +666,15 @@ async function initiateInternal(req, res, next) {
       adminCreditedAtInitiate: false,
     });
   } catch (err) {
+    safeLog("error", "[TX INTERNAL] failed", {
+      message: err?.message,
+      status: err?.status || err?.statusCode || 500,
+      stack: err?.stack,
+      body: buildDebugBody(req.body || {}),
+      userId: req.user?.id || req.user?._id || null,
+      ip: req.ip || null,
+    });
+
     await abortQuietly(session);
     await endQuietly(session);
     next(err);

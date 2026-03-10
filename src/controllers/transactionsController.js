@@ -1522,21 +1522,72 @@ const {
   settleExternalTransactionWebhook,
 } = require("../services/transactions/handlers/providerWebhookTransactions");
 
-exports.listInternal = listInternal;
-exports.getTransactionController = getTransactionController;
+function safeLog(level, message, meta = {}) {
+  try {
+    const line = `${message} ${JSON.stringify(meta || {})}`;
+    if (level === "error") return console.error(line);
+    if (level === "warn") return console.warn(line);
+    console.log(line);
+  } catch {
+    console.log(message);
+  }
+}
 
-exports.initiateInternal = initiateInternal;
-exports.initiateByFlow = initiateByFlow;
-exports.initiateOutboundExternal = initiateOutboundExternal;
-exports.initiateInboundExternal = initiateInboundExternal;
+function wrapController(name, handler) {
+  return async (req, res, next) => {
+    try {
+      safeLog("info", `[TX Controller] ${name} called`, {
+        params: req?.params || {},
+        query: req?.query || {},
+        body: req?.body || {},
+        userId: req?.user?.id || req?.user?._id || null,
+        ip: req?.ip || null,
+      });
 
-exports.confirmController = confirmController;
-exports.cancelController = cancelController;
+      return await handler(req, res, next);
+    } catch (err) {
+      safeLog("error", `[TX Controller] ${name} failed`, {
+        message: err?.message,
+        status: err?.status || err?.statusCode || err?.response?.status || 500,
+        stack: err?.stack,
+        params: req?.params || {},
+        query: req?.query || {},
+        body: req?.body || {},
+        userId: req?.user?.id || req?.user?._id || null,
+        ip: req?.ip || null,
+      });
+      return next(err);
+    }
+  };
+}
 
-exports.refundController = refundController;
-exports.validateController = validateController;
-exports.reassignController = reassignController;
-exports.archiveController = archiveController;
-exports.relaunchController = relaunchController;
+exports.listInternal = wrapController("listInternal", listInternal);
+exports.getTransactionController = wrapController(
+  "getTransactionController",
+  getTransactionController
+);
 
-exports.settleExternalTransactionWebhook = settleExternalTransactionWebhook;
+exports.initiateInternal = wrapController("initiateInternal", initiateInternal);
+exports.initiateByFlow = wrapController("initiateByFlow", initiateByFlow);
+exports.initiateOutboundExternal = wrapController(
+  "initiateOutboundExternal",
+  initiateOutboundExternal
+);
+exports.initiateInboundExternal = wrapController(
+  "initiateInboundExternal",
+  initiateInboundExternal
+);
+
+exports.confirmController = wrapController("confirmController", confirmController);
+exports.cancelController = wrapController("cancelController", cancelController);
+
+exports.refundController = wrapController("refundController", refundController);
+exports.validateController = wrapController("validateController", validateController);
+exports.reassignController = wrapController("reassignController", reassignController);
+exports.archiveController = wrapController("archiveController", archiveController);
+exports.relaunchController = wrapController("relaunchController", relaunchController);
+
+exports.settleExternalTransactionWebhook = wrapController(
+  "settleExternalTransactionWebhook",
+  settleExternalTransactionWebhook
+);

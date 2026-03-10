@@ -37,6 +37,44 @@ function safeLog(logger, level, message, meta = {}) {
   }
 }
 
+function isInternalMethod(method) {
+  const m = norm(method);
+  return !m || m === "paynoval" || m === "internal";
+}
+
+function isInternalProvider(provider) {
+  const p = norm(provider);
+  return !p || p === "paynoval";
+}
+
+function buildDebugBody(body = {}) {
+  return {
+    funds: body?.funds,
+    destination: body?.destination,
+    provider: body?.provider,
+    method: body?.method,
+    txType: body?.txType,
+    pricingId: body?.pricingId,
+    quoteId: body?.quoteId,
+    effectivePricingId: body?.effectivePricingId,
+    country: body?.country,
+    fromCountry: body?.fromCountry,
+    toCountry: body?.toCountry,
+    sourceCountry: body?.sourceCountry,
+    destinationCountry: body?.destinationCountry,
+    toEmail: body?.toEmail,
+    securityQuestion: body?.securityQuestion,
+    securityAnswer: body?.securityAnswer ? "***" : undefined,
+    amount: body?.amount,
+    amountSource: body?.amountSource,
+    amountTarget: body?.amountTarget,
+    currency: body?.currency,
+    currencySource: body?.currencySource,
+    currencyTarget: body?.currencyTarget,
+    meta: body?.meta,
+  };
+}
+
 async function initiateByFlow(req, res, next) {
   try {
     const body = isTruthyObject(req.body) ? req.body : {};
@@ -49,14 +87,29 @@ async function initiateByFlow(req, res, next) {
 
     const reqLogger = req.logger || req.log || null;
 
+    safeLog(reqLogger, "info", "[TX FLOW] initiateByFlow received", {
+      body: buildDebugBody(body),
+      userId: req.user?.id || req.user?._id || null,
+      ip: req.ip || null,
+    });
+
     const hasInternalRails = funds === "paynoval" && destination === "paynoval";
-    const hasInternalProvider = !provider || provider === "paynoval";
-    const hasInternalMethod =
-      !method || method === "paynoval" || method === "internal";
+    const hasInternalProvider = isInternalProvider(provider);
+    const hasInternalMethod = isInternalMethod(method);
+
     const isInternalPaynoval =
       hasInternalRails && hasInternalProvider && hasInternalMethod;
 
     if (hasInternalRails && (!hasInternalProvider || !hasInternalMethod)) {
+      safeLog(reqLogger, "warn", "[TX FLOW] ambiguous internal payload", {
+        funds,
+        destination,
+        provider,
+        method,
+        txType,
+        body: buildDebugBody(body),
+      });
+
       throw createError(
         400,
         "Payload ambigu: flow PayNoval interne avec provider/method incompatibles"
@@ -70,7 +123,11 @@ async function initiateByFlow(req, res, next) {
         provider: provider || "paynoval",
         method: method || "internal",
         txType: txType || "transfer",
-        userId: req.user?.id || null,
+        quoteId: body?.quoteId || null,
+        pricingId: body?.pricingId || null,
+        effectivePricingId:
+          body?.effectivePricingId || body?.pricingId || body?.quoteId || null,
+        userId: req.user?.id || req.user?._id || null,
         ip: req.ip || null,
       });
 
@@ -80,18 +137,36 @@ async function initiateByFlow(req, res, next) {
     const flow = resolveExternalFlow(body);
 
     if (!flow || typeof flow !== "string") {
-      throw createError(400, "Flow transaction non supporté");
-    }
-
-    if (flow === "PAYNOVAL_TO_PAYNOVAL" || flow === "PAYNOVAL_INTERNAL_TRANSFER") {
-      safeLog(reqLogger, "warn", "[TX FLOW] internal flow resolved as external candidate", {
-        flow,
+      safeLog(reqLogger, "warn", "[TX FLOW] unresolved flow", {
         funds,
         destination,
         provider,
         method,
-        userId: req.user?.id || null,
+        txType,
+        body: buildDebugBody(body),
       });
+
+      throw createError(400, "Flow transaction non supporté");
+    }
+
+    if (
+      flow === "PAYNOVAL_TO_PAYNOVAL" ||
+      flow === "PAYNOVAL_INTERNAL_TRANSFER"
+    ) {
+      safeLog(
+        reqLogger,
+        "warn",
+        "[TX FLOW] internal flow resolved as external candidate",
+        {
+          flow,
+          funds,
+          destination,
+          provider,
+          method,
+          userId: req.user?.id || req.user?._id || null,
+          body: buildDebugBody(body),
+        }
+      );
 
       throw createError(
         400,
@@ -107,7 +182,7 @@ async function initiateByFlow(req, res, next) {
         provider,
         method,
         txType,
-        userId: req.user?.id || null,
+        userId: req.user?.id || req.user?._id || null,
         ip: req.ip || null,
       });
 
@@ -122,7 +197,7 @@ async function initiateByFlow(req, res, next) {
         provider,
         method,
         txType,
-        userId: req.user?.id || null,
+        userId: req.user?.id || req.user?._id || null,
         ip: req.ip || null,
       });
 
@@ -136,11 +211,23 @@ async function initiateByFlow(req, res, next) {
       provider,
       method,
       txType,
-      userId: req.user?.id || null,
+      userId: req.user?.id || req.user?._id || null,
+      body: buildDebugBody(body),
     });
 
     throw createError(400, "Flow transaction non supporté");
   } catch (err) {
+    const reqLogger = req.logger || req.log || null;
+
+    safeLog(reqLogger, "error", "[TX FLOW] initiateByFlow failed", {
+      message: err?.message,
+      status: err?.status || err?.statusCode || 500,
+      stack: err?.stack,
+      body: buildDebugBody(req.body || {}),
+      userId: req.user?.id || req.user?._id || null,
+      ip: req.ip || null,
+    });
+
     next(err);
   }
 }
