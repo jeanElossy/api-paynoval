@@ -1,4 +1,3 @@
-// // File: src/server.js
 // "use strict";
 
 // if (process.env.NODE_ENV !== "production") {
@@ -43,6 +42,9 @@
 //   }
 // };
 
+// // ─────────────────────────────────────────────────────────────
+// // ✅ INTERNAL TOKEN TRUST (pour skip rate-limit)
+// // ─────────────────────────────────────────────────────────────
 // function timingSafeEqualStr(a, b) {
 //   const aa = Buffer.from(String(a || "").trim(), "utf8");
 //   const bb = Buffer.from(String(b || "").trim(), "utf8");
@@ -50,7 +52,6 @@
 //   return crypto.timingSafeEqual(aa, bb);
 // }
 
-// // ✅ Tokens internes (legacy + gateway + principal)
 // function getInternalTokens() {
 //   const legacy = String(process.env.INTERNAL_TOKEN || config.internalToken || "").trim();
 
@@ -82,13 +83,18 @@
 //   if (!got) return false;
 
 //   const { gateway, principal, legacy } = getInternalTokens();
-//   const expected = [gateway, principal, legacy].map((x) => String(x || "").trim()).filter(Boolean);
+//   const expected = [gateway, principal, legacy]
+//     .map((x) => String(x || "").trim())
+//     .filter(Boolean);
+
 //   if (!expected.length) return false;
 
 //   return expected.some((exp) => timingSafeEqualStr(got, exp));
 // };
 
+// // ─────────────────────────────────────────────────────────────
 // // Sentry
+// // ─────────────────────────────────────────────────────────────
 // let sentry = null;
 // if (process.env.SENTRY_DSN) {
 //   const Sentry = tryRequire("@sentry/node");
@@ -103,7 +109,9 @@
 // const app = express();
 // app.set("trust proxy", 1);
 
+// // ─────────────────────────────────────────────────────────────
 // // OpenAPI
+// // ─────────────────────────────────────────────────────────────
 // const OPENAPI_PATH =
 //   process.env.OPENAPI_SPEC_PATH || path.join(__dirname, "../docs/openapi.yaml");
 
@@ -119,7 +127,9 @@
 //   };
 // }
 
+// // ─────────────────────────────────────────────────────────────
 // // Security
+// // ─────────────────────────────────────────────────────────────
 // app.use(helmet({ contentSecurityPolicy: false }));
 // app.use(helmet.hsts({ maxAge: 31536000 }));
 
@@ -132,7 +142,9 @@
 //   }
 // }
 
+// // ─────────────────────────────────────────────────────────────
 // // CORS
+// // ─────────────────────────────────────────────────────────────
 // const mergeToList = (value) => {
 //   if (!value) return [];
 //   if (Array.isArray(value)) return value.filter(Boolean);
@@ -177,7 +189,9 @@
 //   })
 // );
 
+// // ─────────────────────────────────────────────────────────────
 // // Parsers & sanitizers
+// // ─────────────────────────────────────────────────────────────
 // app.use(express.json({ limit: "10kb" }));
 // app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 // app.use(cookieParser());
@@ -251,7 +265,10 @@
 // });
 // app.get("/openapi.json", (_req, res) => res.json(openapiSpec));
 
-// // Rate limit global
+// // ─────────────────────────────────────────────────────────────
+// // Rate limit global (avec Redis si dispo)
+// // IMPORTANT: skip si appel interne valide
+// // ─────────────────────────────────────────────────────────────
 // let globalRateLimiter;
 // let RedisStore, Redis, redisClient;
 
@@ -262,61 +279,47 @@
 //   /* modules absents */
 // }
 
+// const baseRateLimitConfig = {
+//   windowMs: 15 * 60 * 1000,
+//   max: 100,
+//   standardHeaders: true,
+//   legacyHeaders: false,
+//   message: { success: false, error: "Trop de requêtes, veuillez réessayer plus tard." },
+//   skip: (req) => {
+//     if (
+//       req.path.startsWith("/docs") ||
+//       req.path.startsWith("/openapi") ||
+//       req.path === "/health" ||
+//       req.path === "/api/v1/health"
+//     ) return true;
+
+//     // ✅ skip si appel interne (gateway/principal)
+//     if (isTrustedInternalCall(req)) return true;
+
+//     return false;
+//   },
+// };
+
 // if (process.env.REDIS_URL && RedisStore && Redis) {
 //   redisClient = new Redis(process.env.REDIS_URL, { tls: {} });
 
 //   // @ts-ignore
 //   globalRateLimiter = rateLimit({
-//     windowMs: 15 * 60 * 1000,
-//     max: 100,
-//     standardHeaders: true,
-//     legacyHeaders: false,
+//     ...baseRateLimitConfig,
 //     store: new RedisStore({
 //       sendCommand: (...args) => redisClient.call(...args),
 //     }),
-//     message: { success: false, error: "Trop de requêtes, veuillez réessayer plus tard." },
-//     skip: (req) => {
-//       if (
-//         req.path.startsWith("/docs") ||
-//         req.path.startsWith("/openapi") ||
-//         req.path === "/health" ||
-//         req.path === "/api/v1/health"
-//       ) return true;
-
-//       // ✅ skip si appel interne (gateway/principal)
-//       if (isTrustedInternalCall(req)) return true;
-
-//       return false;
-//     },
 //   });
 
 //   logger.info("[rate-limit] Redis store activé");
 // } else {
-//   globalRateLimiter = rateLimit({
-//     windowMs: 15 * 60 * 1000,
-//     max: 100,
-//     standardHeaders: true,
-//     legacyHeaders: false,
-//     message: { success: false, error: "Trop de requêtes, veuillez réessayer plus tard." },
-//     skip: (req) => {
-//       if (
-//         req.path.startsWith("/docs") ||
-//         req.path.startsWith("/openapi") ||
-//         req.path === "/health" ||
-//         req.path === "/api/v1/health"
-//       ) return true;
-
-//       // ✅ skip si appel interne (gateway/principal)
-//       if (isTrustedInternalCall(req)) return true;
-
-//       return false;
-//     },
-//   });
+//   globalRateLimiter = rateLimit(baseRateLimitConfig);
 
 //   if (process.env.REDIS_URL) {
 //     logger.warn("[rate-limit] REDIS_URL défini mais modules absents — fallback mémoire activé");
 //   }
 // }
+
 // app.use(globalRateLimiter);
 
 // // Slow-down sur auth / confirmations sensibles
@@ -345,8 +348,11 @@
 //   authLimiter
 // );
 
+// // ─────────────────────────────────────────────────────────────
 // // Routes
+// // ─────────────────────────────────────────────────────────────
 // let server;
+
 // (async () => {
 //   try {
 //     await connectTransactionsDB();
@@ -358,6 +364,7 @@
 //     const internalPaymentsRoutes = require("./routes/internalPaymentsRoutes");
 //     const internalTxRoutes = require("./routes/internalTransactions.routes");
 
+//     // Admin
 //     app.use(
 //       "/api/v1/admin/transactions",
 //       protect,
@@ -365,19 +372,13 @@
 //       adminTransactionRoutes
 //     );
 
-//     /**
-//      * ✅ IMPORTANT:
-//      * - On laisse le protect AU NIVEAU DES ROUTES (dans transactionsRoutes.js),
-//      *   donc on ne le remet pas ici en double.
-//      * - Ça évite des surprises si tu ajoutes un bypass interne dans protect.
-//      */
+//     // Public/user routes
 //     app.use("/api/v1/transactions", transactionRoutes);
 //     app.use("/api/v1/notifications", protect, notificationRoutes);
 //     app.use("/api/v1/pay", protect, payRoutes);
 
+//     // ✅ Internal routes (principal/gateway/jobs)
 //     app.use("/api/v1/internal", internalTxRoutes);
-
-//     // Appels internes (Gateway, jobs, microservices)
 //     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
 
 //     app.get("/api/v1/health", (_req, res) => res.status(200).json({ status: "ok" }));
@@ -415,6 +416,9 @@
 //       await new Promise((resolve) => server.close(resolve));
 //       logger.info("HTTP server fermé");
 //     }
+//     try {
+//       if (redisClient) await redisClient.quit();
+//     } catch (_) {}
 //     process.exit(0);
 //   } catch (e) {
 //     logger.error("Erreur shutdown:", e);
@@ -423,6 +427,8 @@
 // };
 // process.on("SIGTERM", () => graceful("SIGTERM"));
 // process.on("SIGINT", () => graceful("SIGINT"));
+
+
 
 
 
@@ -500,11 +506,7 @@ function getInternalTokens() {
 }
 
 function getHeaderInternalToken(req) {
-  const raw =
-    req.headers["x-internal-token"] ||
-    req.headers["X-Internal-Token"] ||
-    req.headers["x-internal-token".toUpperCase()] ||
-    "";
+  const raw = req.headers["x-internal-token"] || "";
   return Array.isArray(raw) ? raw[0] : raw;
 }
 
@@ -558,10 +560,15 @@ try {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Security
+// Security headers
 // ─────────────────────────────────────────────────────────────
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(helmet.hsts({ maxAge: 31536000 }));
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
+app.use(helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: true }));
 
 if (config.env === "production") {
   const sslify = tryRequire("express-sslify");
@@ -614,22 +621,32 @@ app.use(
       "x-user-id",
       "x-device-id",
       "x-session-id",
+      "x-provider",
+      "x-rail",
+      "x-signature",
+      "x-timestamp",
+      "x-wave-signature",
+      "x-wave-timestamp",
+      "x-orange-signature",
+      "x-orange-timestamp",
+      "x-mtn-signature",
+      "x-mtn-timestamp",
+      "x-moov-signature",
+      "x-moov-timestamp",
+      "x-bank-signature",
+      "x-bank-timestamp",
+      "stripe-signature",
+      "x-stripe-signature",
+      "x-visa-signature",
+      "x-visa-timestamp",
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   })
 );
 
 // ─────────────────────────────────────────────────────────────
-// Parsers & sanitizers
-// ─────────────────────────────────────────────────────────────
-app.use(express.json({ limit: "10kb" }));
-app.use(express.urlencoded({ extended: true, limit: "10kb" }));
-app.use(cookieParser());
-app.use(mongoSanitize());
-app.use(xssClean());
-app.use(hpp());
-
 // Compression & logs
+// ─────────────────────────────────────────────────────────────
 app.use(compression());
 app.use(
   morgan("combined", {
@@ -637,10 +654,32 @@ app.use(
   })
 );
 
-// Sentry (request)
-if (sentry) app.use(sentry.Handlers.requestHandler());
+// Sentry (request) - idéalement tôt dans la chaîne
+if (sentry && sentry.Handlers?.requestHandler) {
+  app.use(sentry.Handlers.requestHandler());
+}
 
-// Health
+// ─────────────────────────────────────────────────────────────
+// Body parsers
+// IMPORTANT:
+// - rawBody requis pour validation HMAC webhook
+// - webhooks montés AVANT sanitizers
+// ─────────────────────────────────────────────────────────────
+app.use(
+  express.json({
+    limit: "256kb",
+    verify: (req, _res, buf) => {
+      req.rawBody = buf.toString("utf8");
+    },
+  })
+);
+
+app.use(express.urlencoded({ extended: true, limit: "50kb" }));
+app.use(cookieParser());
+
+// ─────────────────────────────────────────────────────────────
+// Health / Root
+// ─────────────────────────────────────────────────────────────
 app.get("/health", (_req, res) =>
   res.json({ status: "UP", timestamp: new Date().toISOString() })
 );
@@ -648,7 +687,9 @@ app.get("/", (_req, res) =>
   res.send("🚀 API PayNoval Transactions Service is running")
 );
 
+// ─────────────────────────────────────────────────────────────
 // Swagger UI
+// ─────────────────────────────────────────────────────────────
 const docsGuards = [];
 if (config.env === "production") {
   docsGuards.push(protect, requireRole(["admin", "developer", "superadmin"]));
@@ -693,11 +734,30 @@ app.get("/openapi.yaml", (_req, res) => {
     res.status(500).json({ success: false, error: "Spec YAML introuvable" });
   }
 });
+
 app.get("/openapi.json", (_req, res) => res.json(openapiSpec));
 
 // ─────────────────────────────────────────────────────────────
+// Routes webhook provider
+// IMPORTANT:
+// - AVANT mongoSanitize/xssClean/hpp
+// - pour ne pas muter req.body et casser les signatures
+// ─────────────────────────────────────────────────────────────
+const providerWebhookRoutes = require("./routes/providerWebhookRoutes");
+app.use("/webhooks/providers", providerWebhookRoutes);
+
+// ─────────────────────────────────────────────────────────────
+// Sanitizers
+// ─────────────────────────────────────────────────────────────
+app.use(mongoSanitize());
+app.use(xssClean());
+app.use(hpp());
+
+// ─────────────────────────────────────────────────────────────
 // Rate limit global (avec Redis si dispo)
-// IMPORTANT: skip si appel interne valide
+// IMPORTANT:
+// - skip si appel interne valide
+// - skip pour les webhooks provider (ils ont leur propre limiter)
 // ─────────────────────────────────────────────────────────────
 let globalRateLimiter;
 let RedisStore, Redis, redisClient;
@@ -714,16 +774,21 @@ const baseRateLimitConfig = {
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, error: "Trop de requêtes, veuillez réessayer plus tard." },
+  message: {
+    success: false,
+    error: "Trop de requêtes, veuillez réessayer plus tard.",
+  },
   skip: (req) => {
     if (
       req.path.startsWith("/docs") ||
       req.path.startsWith("/openapi") ||
       req.path === "/health" ||
-      req.path === "/api/v1/health"
-    ) return true;
+      req.path === "/api/v1/health" ||
+      req.path.startsWith("/webhooks/providers")
+    ) {
+      return true;
+    }
 
-    // ✅ skip si appel interne (gateway/principal)
     if (isTrustedInternalCall(req)) return true;
 
     return false;
@@ -733,7 +798,6 @@ const baseRateLimitConfig = {
 if (process.env.REDIS_URL && RedisStore && Redis) {
   redisClient = new Redis(process.env.REDIS_URL, { tls: {} });
 
-  // @ts-ignore
   globalRateLimiter = rateLimit({
     ...baseRateLimitConfig,
     store: new RedisStore({
@@ -752,7 +816,9 @@ if (process.env.REDIS_URL && RedisStore && Redis) {
 
 app.use(globalRateLimiter);
 
-// Slow-down sur auth / confirmations sensibles
+// ─────────────────────────────────────────────────────────────
+// Slow-down / protection routes sensibles
+// ─────────────────────────────────────────────────────────────
 const slowDown = tryRequire("express-slow-down");
 
 const authLimiter = rateLimit({
@@ -779,7 +845,7 @@ app.use(
 );
 
 // ─────────────────────────────────────────────────────────────
-// Routes
+// Routes applicatives
 // ─────────────────────────────────────────────────────────────
 let server;
 
@@ -802,27 +868,33 @@ let server;
       adminTransactionRoutes
     );
 
-    // Public/user routes
+    // Public / user
     app.use("/api/v1/transactions", transactionRoutes);
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);
 
-    // ✅ Internal routes (principal/gateway/jobs)
+    // Internal
     app.use("/api/v1/internal", internalTxRoutes);
     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
 
-    app.get("/api/v1/health", (_req, res) => res.status(200).json({ status: "ok" }));
+    app.get("/api/v1/health", (_req, res) =>
+      res.status(200).json({ status: "ok", timestamp: new Date().toISOString() })
+    );
 
     app.use((_req, res) =>
       res.status(404).json({ success: false, error: "Ressource non trouvée" })
     );
 
-    if (sentry) app.use(sentry.Handlers.errorHandler());
+    if (sentry && sentry.Handlers?.errorHandler) {
+      app.use(sentry.Handlers.errorHandler());
+    }
+
     app.use(errorHandler);
 
     server = app.listen(config.port, () => {
       logger.info(`🚀 Service démarré sur ${config.port} (${config.env})`);
       logger.info(`📘 Docs: /docs  —  Spec: /openapi.yaml /openapi.json`);
+      logger.info("🔐 Webhooks providers: /webhooks/providers/:rail/:provider");
     });
   } catch (err) {
     logger.error("Échec démarrage:", err);
@@ -830,10 +902,13 @@ let server;
   }
 })();
 
+// ─────────────────────────────────────────────────────────────
 // Robustesse process
+// ─────────────────────────────────────────────────────────────
 process.on("unhandledRejection", (reason) => {
   logger.error("unhandledRejection:", reason);
 });
+
 process.on("uncaughtException", (err) => {
   logger.error("uncaughtException:", err);
   process.exit(1);
@@ -842,18 +917,22 @@ process.on("uncaughtException", (err) => {
 const graceful = async (signal) => {
   try {
     logger.info(`[${signal}] Arrêt en cours…`);
+
     if (server) {
       await new Promise((resolve) => server.close(resolve));
       logger.info("HTTP server fermé");
     }
+
     try {
       if (redisClient) await redisClient.quit();
     } catch (_) {}
+
     process.exit(0);
   } catch (e) {
     logger.error("Erreur shutdown:", e);
     process.exit(1);
   }
 };
+
 process.on("SIGTERM", () => graceful("SIGTERM"));
 process.on("SIGINT", () => graceful("SIGINT"));
