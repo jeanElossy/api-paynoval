@@ -1,7 +1,7 @@
 "use strict";
 
 const createError = require("http-errors");
-const { getProviderAdapter } = require("./providerSelector");
+const { getProviderAdapter } = require("../../../providers/providerSelector");
 
 function buildCardPayoutPayload(tx) {
   const md = tx.metadata || {};

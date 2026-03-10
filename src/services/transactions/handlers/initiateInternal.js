@@ -35,13 +35,68 @@ const {
   extractPricingBundle,
 } = require("../shared/pricing");
 
+function norm(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
+function upperSanitized(v) {
+  return sanitize(v || "").toUpperCase();
+}
+
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function buildSafeMeta(...parts) {
+  return Object.assign(
+    {},
+    ...parts.map((p) => (isPlainObject(p) ? p : {}))
+  );
+}
+
+function safeLog(level, message, meta = {}) {
+  try {
+    const payload = isPlainObject(meta) ? meta : {};
+    if (logger && typeof logger[level] === "function") {
+      logger[level](message, payload);
+      return;
+    }
+    const line = `${message} ${JSON.stringify(payload)}`;
+    if (level === "error") return console.error(line);
+    if (level === "warn") return console.warn(line);
+    console.log(line);
+  } catch {
+    console.log(message);
+  }
+}
+
+function safeSessionChain(query, session) {
+  return session ? query.session(session) : query;
+}
+
+async function abortQuietly(session) {
+  try {
+    if (session && CAN_USE_SHARED_SESSION) {
+      await session.abortTransaction();
+    }
+  } catch {}
+}
+
+async function endQuietly(session) {
+  try {
+    if (session) session.endSession();
+  } catch {}
+}
+
 async function initiateInternal(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      session.startTransaction();
+    }
 
-    const body = req.body || {};
+    const body = isPlainObject(req.body) ? req.body : {};
 
     const {
       toEmail,
@@ -59,6 +114,34 @@ async function initiateInternal(req, res, next) {
       meta = {},
     } = body;
 
+    const fundsNorm = norm(funds);
+    const destinationNorm = norm(destination);
+    const providerNorm = norm(body.provider);
+    const methodNorm = norm(body.method);
+
+    const isInternalFlow =
+      fundsNorm === "paynoval" &&
+      destinationNorm === "paynoval" &&
+      (!providerNorm || providerNorm === "paynoval") &&
+      (!methodNorm || methodNorm === "paynoval" || methodNorm === "internal");
+
+    if (!isInternalFlow) {
+      throw createError(
+        400,
+        "initiateInternal ne supporte que le flow PayNoval vers PayNoval"
+      );
+    }
+
+    const authHeader = String(req.headers?.authorization || "").trim();
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      throw createError(401, "Token manquant");
+    }
+
+    const senderId = String(req.user?.id || "").trim();
+    if (!senderId) {
+      throw createError(401, "Utilisateur non authentifié");
+    }
+
     const cleanEmail = String(toEmail || "").trim().toLowerCase();
     if (!cleanEmail || !isEmailLike(cleanEmail)) {
       throw createError(400, "Email du destinataire requis");
@@ -70,22 +153,16 @@ async function initiateInternal(req, res, next) {
       throw createError(400, "securityQuestion + securityAnswer requis");
     }
 
-    if (!destination || !funds || !country) {
-      throw createError(400, "Données de transaction incomplètes");
-    }
-
-    if (description && description.length > MAX_DESC_LENGTH) {
+    if (description && String(description).length > MAX_DESC_LENGTH) {
       throw createError(400, "Description trop longue");
     }
 
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      throw createError(401, "Token manquant");
+    if (!country || !String(country).trim()) {
+      throw createError(400, "country requis");
     }
 
-    const senderId = req.user.id;
     const amt = toFloat(amount ?? body.amountSource);
-    if (!amt || Number.isNaN(amt) || amt <= 0) {
+    if (!Number.isFinite(amt) || amt <= 0) {
       throw createError(400, "Montant invalide");
     }
 
@@ -95,30 +172,35 @@ async function initiateInternal(req, res, next) {
       sender: senderId,
       receiverEmail: cleanEmail,
       amount: amt,
-      currency: body.senderCurrencyCode || body.currencySource || body.senderCurrencySymbol,
+      currency:
+        body.senderCurrencyCode ||
+        body.currencySource ||
+        body.senderCurrencySymbol ||
+        body.fromCurrency ||
+        body.currency ||
+        null,
     });
 
     const sessOpts = maybeSessionOpts(session);
+    const activeSession = sessOpts?.session || null;
 
-    const senderUser = await User.findById(senderId)
-      .select("fullName email")
-      .lean()
-      .session(sessOpts.session || null);
+    let senderQuery = User.findById(senderId).select("fullName email");
+    let receiverQuery = User.findOne({ email: cleanEmail }).select("_id fullName email");
+
+    senderQuery = safeSessionChain(senderQuery, activeSession).lean();
+    receiverQuery = safeSessionChain(receiverQuery, activeSession).lean();
+
+    const [senderUser, receiver] = await Promise.all([senderQuery, receiverQuery]);
 
     if (!senderUser) {
       throw createError(403, "Utilisateur invalide");
     }
 
-    const receiver = await User.findOne({ email: cleanEmail })
-      .select("_id fullName email")
-      .lean()
-      .session(sessOpts.session || null);
-
     if (!receiver) {
       throw createError(404, "Destinataire introuvable");
     }
 
-    if (receiver._id.toString() === senderId) {
+    if (String(receiver._id) === senderId) {
       throw createError(400, "Auto-transfert impossible");
     }
 
@@ -131,13 +213,13 @@ async function initiateInternal(req, res, next) {
           body.currency,
         country
       ) ||
-      sanitize(
+      upperSanitized(
         body.senderCurrencyCode ||
           body.currencySource ||
           body.fromCurrency ||
           body.senderCurrencySymbol ||
           body.currency
-      ).toUpperCase();
+      );
 
     const currencyTargetISO =
       normCur(
@@ -147,28 +229,53 @@ async function initiateInternal(req, res, next) {
           body.localCurrencySymbol,
         country
       ) ||
-      sanitize(
+      upperSanitized(
         body.localCurrencyCode ||
           body.currencyTarget ||
           body.toCurrency ||
           body.localCurrencySymbol
-      ).toUpperCase();
+      );
+
+    if (!currencySourceISO) {
+      throw createError(400, "Devise source introuvable");
+    }
+
+    if (!currencyTargetISO) {
+      throw createError(400, "Devise destination introuvable");
+    }
 
     req.body.senderCurrencyCode = currencySourceISO;
     req.body.localCurrencyCode = currencyTargetISO;
     req.body.senderCurrencySymbol = currencySourceISO;
     req.body.localCurrencySymbol = currencyTargetISO;
+    req.body.funds = "paynoval";
+    req.body.destination = "paynoval";
+    req.body.provider = "paynoval";
 
     const pricingInput = pickBodyPricingInput({
-      ...req.body,
+      ...body,
       amount: amt,
+      funds: "paynoval",
+      destination: "paynoval",
+      provider: "paynoval",
+      method: methodNorm || "internal",
+      txType: body.txType || "TRANSFER",
       fromCurrency: currencySourceISO,
       toCurrency: currencyTargetISO,
+      fromCountry: body.fromCountry || country,
+      toCountry: body.toCountry || body.destinationCountry || country,
+    });
+
+    safeLog("info", "[TX INTERNAL] initiate:start", {
+      senderId,
+      toEmail: cleanEmail,
+      amount: amt,
+      currencySourceISO,
+      currencyTargetISO,
+      funds: "paynoval",
+      destination: "paynoval",
       provider: "paynoval",
-      method: req.body.method || "INTERNAL",
-      txType: req.body.txType || "TRANSFER",
-      fromCountry: req.body.fromCountry || country,
-      toCountry: req.body.toCountry || req.body.destinationCountry || country,
+      method: pricingInput.method || "internal",
     });
 
     let pricingPayload;
@@ -178,11 +285,13 @@ async function initiateInternal(req, res, next) {
         pricingInput,
       });
     } catch (e) {
-      logger.error("[pricing/quote] gateway error", {
+      safeLog("error", "[TX INTERNAL] pricing quote gateway error", {
+        senderId,
+        toEmail: cleanEmail,
         pricingInput,
-        status: e.response?.status,
-        responseData: e.response?.data,
-        message: e.message,
+        status: e?.response?.status || null,
+        responseData: e?.response?.data || null,
+        message: e?.message || "unknown_error",
       });
       throw createError(502, "Service pricing indisponible");
     }
@@ -199,142 +308,167 @@ async function initiateInternal(req, res, next) {
     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
       throw createError(500, "grossFrom pricing invalide");
     }
+
+    if (!Number.isFinite(fee) || fee < 0) {
+      throw createError(500, "fee pricing invalide");
+    }
+
     if (!Number.isFinite(netFrom) || netFrom < 0) {
       throw createError(500, "netFrom pricing invalide");
     }
+
     if (!Number.isFinite(netTo) || netTo <= 0) {
       throw createError(500, "netTo pricing invalide");
     }
 
     const amountSourceStd = round2(grossFrom);
     const feeSourceStd = round2(fee);
+    const netFromStd = round2(netFrom);
     const amountTargetStd = round2(netTo);
     const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
+    const adminRevenueStd = Number.isFinite(Number(adminRevenue))
+      ? round2(Number(adminRevenue))
+      : 0;
+
+    if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
+      throw createError(500, "Taux appliqué invalide");
+    }
+
+    if (netFromStd > amountSourceStd) {
+      throw createError(500, "Incohérence pricing: netFrom > grossFrom");
+    }
 
     const reference = await generateTransactionRef();
     const securityAnswerHash = sha256Hex(aRaw);
     const amlSnapshot = req.aml || null;
 
-    const txMeta = {
-      ...((meta && typeof meta === "object") ? meta : {}),
-      ...((metadata && typeof metadata === "object") ? metadata : {}),
+    const safeRecipientInfo = isPlainObject(recipientInfo) ? recipientInfo : {};
+    const recipientName = sanitize(safeRecipientInfo.name || "") || receiver.fullName;
+
+    const txMeta = buildSafeMeta(meta, metadata, {
       entry: "transfer.pending",
       ownerUserId: senderUser._id,
       receiverUserId: receiver._id,
       requestOrigin: "tx-core",
+      flowIsolation: "internal_only",
+    });
+
+    const txDoc = {
+      userId: senderUser._id,
+      internalImported: false,
+
+      flow: "PAYNOVAL_INTERNAL_TRANSFER",
+      operationKind: "transfer",
+      initiatedBy: "user",
+      context: "paynoval_internal_transfer",
+      contextId: null,
+
+      reference,
+      idempotencyKey: body.idempotencyKey || null,
+
+      sender: senderUser._id,
+      receiver: receiver._id,
+
+      senderName: senderUser.fullName,
+      senderEmail: senderUser.email,
+      nameDestinataire: recipientName,
+      recipientEmail: cleanEmail,
+
+      destination: "paynoval",
+      funds: "paynoval",
+      provider: "paynoval",
+      operator: body.operator || null,
+      country: sanitize(country),
+
+      amount: dec2(amountSourceStd),
+      transactionFees: dec2(feeSourceStd),
+      netAmount: dec2(netFromStd),
+      exchangeRate: dec2(rateUsed),
+      localAmount: dec2(amountTargetStd),
+
+      senderCurrencySymbol: currencySourceISO,
+      localCurrencySymbol: currencyTargetISO,
+
+      amountSource: dec2(amountSourceStd),
+      amountTarget: dec2(amountTargetStd),
+      feeSource: dec2(feeSourceStd),
+      fxRateSourceToTarget: dec2(rateUsed),
+      currencySource: currencySourceISO,
+      currencyTarget: currencyTargetISO,
+
+      money: {
+        source: { amount: amountSourceStd, currency: currencySourceISO },
+        feeSource: { amount: feeSourceStd, currency: currencySourceISO },
+        target: { amount: amountTargetStd, currency: currencyTargetISO },
+        fxRateSourceToTarget: rateUsed,
+      },
+
+      pricingSnapshot: normalizePricingSnapshot(pricingSnapshot),
+      pricingRuleApplied: pricingSnapshot?.ruleApplied || null,
+      pricingFxRuleApplied: pricingSnapshot?.fxRuleApplied || null,
+
+      feeSnapshot: {
+        fee: feeSourceStd,
+        netAfterFees: netFromStd,
+        convertedNetAfterFees: amountTargetStd,
+        exchangeRate: rateUsed,
+        pricingDebug: pricingSnapshot?.debug || null,
+      },
+      feeActual: null,
+      feeId: null,
+
+      adminRevenue: adminRevenueStd,
+      adminRevenueCredited: false,
+      adminRevenueCreditedAt: null,
+
+      securityQuestion: q,
+      securityAnswerHash,
+      securityCode: securityAnswerHash,
+
+      amlSnapshot,
+      amlStatus: amlSnapshot?.status || "passed",
+
+      description: sanitize(description),
+      orderId: body.orderId || null,
+
+      metadata: {
+        provider: "paynoval",
+        method: methodNorm || "internal",
+        txType: body.txType || "TRANSFER",
+        rail: "internal",
+      },
+      meta: txMeta,
+
+      status: "pending",
+      providerStatus: "FUNDS_RESERVED_PENDING_CONFIRMATION",
+
+      fundsReserved: false,
+      fundsReservedAt: null,
+      fundsCaptured: false,
+      fundsCapturedAt: null,
+      beneficiaryCredited: false,
+      beneficiaryCreditedAt: null,
+      reserveReleased: false,
+      reserveReleasedAt: null,
+      reversedAt: null,
+      executedAt: null,
+
+      attemptCount: 0,
+      lastAttemptAt: null,
+      lockedUntil: null,
     };
 
-    const [tx] = await Transaction.create(
-      [
-        {
-          userId: senderUser._id,
-          internalImported: false,
+    const [tx] = await Transaction.create([txDoc], sessOpts);
 
-          flow: "PAYNOVAL_INTERNAL_TRANSFER",
-          operationKind: "transfer",
-          initiatedBy: "user",
-          context: "paynoval_internal_transfer",
-          contextId: null,
-
-          reference,
-          idempotencyKey: body.idempotencyKey || null,
-
-          sender: senderUser._id,
-          receiver: receiver._id,
-
-          senderName: senderUser.fullName,
-          senderEmail: senderUser.email,
-          nameDestinataire:
-            recipientInfo.name && sanitize(recipientInfo.name)
-              ? sanitize(recipientInfo.name)
-              : receiver.fullName,
-          recipientEmail: cleanEmail,
-
-          destination: "paynoval",
-          funds: "paynoval",
-          provider: "paynoval",
-          operator: body.operator || null,
-          country: sanitize(country),
-
-          amount: dec2(amountSourceStd),
-          transactionFees: dec2(feeSourceStd),
-          netAmount: dec2(netFrom),
-          exchangeRate: dec2(rateUsed),
-          localAmount: dec2(amountTargetStd),
-
-          senderCurrencySymbol: currencySourceISO,
-          localCurrencySymbol: currencyTargetISO,
-
-          amountSource: dec2(amountSourceStd),
-          amountTarget: dec2(amountTargetStd),
-          feeSource: dec2(feeSourceStd),
-          fxRateSourceToTarget: dec2(rateUsed),
-          currencySource: currencySourceISO,
-          currencyTarget: currencyTargetISO,
-
-          money: {
-            source: { amount: amountSourceStd, currency: currencySourceISO },
-            feeSource: { amount: feeSourceStd, currency: currencySourceISO },
-            target: { amount: amountTargetStd, currency: currencyTargetISO },
-            fxRateSourceToTarget: rateUsed,
-          },
-
-          pricingSnapshot: normalizePricingSnapshot(pricingSnapshot),
-          pricingRuleApplied: pricingSnapshot?.ruleApplied || null,
-          pricingFxRuleApplied: pricingSnapshot?.fxRuleApplied || null,
-
-          feeSnapshot: {
-            fee: feeSourceStd,
-            netAfterFees: netFrom,
-            convertedNetAfterFees: amountTargetStd,
-            exchangeRate: rateUsed,
-            pricingDebug: pricingSnapshot?.debug || null,
-          },
-          feeActual: null,
-          feeId: null,
-
-          adminRevenue,
-          adminRevenueCredited: false,
-          adminRevenueCreditedAt: null,
-
-          securityQuestion: q,
-          securityAnswerHash,
-          securityCode: securityAnswerHash,
-
-          amlSnapshot,
-          amlStatus: amlSnapshot?.status || "passed",
-
-          description: sanitize(description),
-          orderId: body.orderId || null,
-
-          metadata: {
-            provider: "paynoval",
-            method: req.body.method || "INTERNAL",
-            txType: req.body.txType || "TRANSFER",
-          },
-          meta: txMeta,
-
-          status: "pending",
-          providerStatus: "PENDING_CONFIRMATION",
-
-          fundsReserved: false,
-          fundsReservedAt: null,
-          fundsCaptured: false,
-          fundsCapturedAt: null,
-          beneficiaryCredited: false,
-          beneficiaryCreditedAt: null,
-          reserveReleased: false,
-          reserveReleasedAt: null,
-          reversedAt: null,
-          executedAt: null,
-
-          attemptCount: 0,
-          lastAttemptAt: null,
-          lockedUntil: null,
-        },
-      ],
-      sessOpts
-    );
+    safeLog("info", "[TX INTERNAL] transaction-created", {
+      transactionId: String(tx._id),
+      reference: tx.reference,
+      flow: tx.flow,
+      status: tx.status,
+      providerStatus: tx.providerStatus,
+      senderId,
+      receiverId: String(receiver._id),
+    });
 
     await reserveSenderFunds({
       transaction: tx,
@@ -349,6 +483,14 @@ async function initiateInternal(req, res, next) {
     tx.providerStatus = "FUNDS_RESERVED";
     await tx.save(sessOpts);
 
+    safeLog("info", "[TX INTERNAL] funds-reserved", {
+      transactionId: String(tx._id),
+      reference: tx.reference,
+      amountSourceStd,
+      currencySourceISO,
+      fundsReserved: tx.fundsReserved,
+    });
+
     logTransaction({
       userId: senderId,
       type: "initiate",
@@ -356,21 +498,34 @@ async function initiateInternal(req, res, next) {
       amount: amountSourceStd,
       currency: currencySourceISO,
       toEmail: cleanEmail,
-      details: { transactionId: tx._id.toString(), reference: tx.reference },
+      details: {
+        transactionId: String(tx._id),
+        reference: tx.reference,
+        flow: tx.flow,
+      },
       flagged: false,
       flagReason: "",
       transactionId: tx._id,
       ip: req.ip,
-    }).catch(() => {});
+    }).catch((logErr) => {
+      safeLog("warn", "[TX INTERNAL] logTransaction failed", {
+        transactionId: String(tx._id),
+        reference: tx.reference,
+        message: logErr?.message || "unknown_error",
+      });
+    });
 
     await notifyParties(tx, "initiated", session, currencySourceISO);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
-    session.endSession();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
+
+    await endQuietly(session);
 
     return res.status(201).json({
       success: true,
-      transactionId: tx._id.toString(),
+      transactionId: String(tx._id),
       reference: tx.reference,
       flow: tx.flow,
       status: tx.status,
@@ -379,23 +534,21 @@ async function initiateInternal(req, res, next) {
       pricing: {
         feeSource: feeSourceStd,
         feeSourceCurrency: currencySourceISO,
-        netFrom,
+        netFrom: netFromStd,
         netTo: amountTargetStd,
         targetCurrency: currencyTargetISO,
         marketRate: pricingSnapshot?.result?.marketRate ?? null,
         appliedRate: pricingSnapshot?.result?.appliedRate ?? null,
-        feeRevenue: pricingSnapshot?.result?.feeRevenue || null,
-        fxRevenue: pricingSnapshot?.result?.fxRevenue || null,
+        feeRevenue: pricingSnapshot?.result?.feeRevenue ?? null,
+        fxRevenue: pricingSnapshot?.result?.fxRevenue ?? null,
       },
-      adminRevenue,
+      adminRevenue: adminRevenueStd,
       fundsReserved: true,
       adminCreditedAtInitiate: false,
     });
   } catch (err) {
-    try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
-    } catch {}
-    session.endSession();
+    await abortQuietly(session);
+    await endQuietly(session);
     next(err);
   }
 }

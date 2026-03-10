@@ -2,7 +2,7 @@
 
 const axios = require("axios");
 const crypto = require("crypto");
-const { verifyHmacWebhook } = require("../shared/webhookSecurity");
+const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
 
 const PROVIDER = "stripe";
 
