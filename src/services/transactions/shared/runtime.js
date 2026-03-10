@@ -4,11 +4,6 @@
  * --------------------------------------------------------------------------
  * Runtime partagé transactions (LAZY / SAFE)
  * --------------------------------------------------------------------------
- * Objectif :
- * - ne jamais exiger les connexions Mongo au chargement du module
- * - éviter le crash Render si les controllers sont importés avant bootstrap DB
- * - exposer des accès lazy/cachés aux connexions, modèles et services
- * --------------------------------------------------------------------------
  */
 
 const mongoose = require("mongoose");
@@ -139,9 +134,7 @@ function maybeSessionOpts(session) {
 function safeEndSession(session) {
   try {
     session?.endSession?.();
-  } catch {
-    // no-op
-  }
+  } catch {}
 }
 
 async function safeCommit(session) {
@@ -153,9 +146,7 @@ async function safeAbort(session) {
   if (!canUseSharedSession() || !session) return;
   try {
     await session.abortTransaction();
-  } catch {
-    // no-op
-  }
+  } catch {}
 }
 
 function getRuntime() {
@@ -211,55 +202,69 @@ function getRuntime() {
   };
 }
 
-module.exports = {
-  mongoose,
-  axios,
-  config,
+const runtime = {};
 
-  validationService,
-  logTransaction,
-  logger,
-  notifyTransactionViaGateway,
-  convertAmount,
-  normCur,
-  generateTransactionRef,
+Object.defineProperties(runtime, {
+  mongoose: { get: () => mongoose },
+  axios: { get: () => axios },
+  config: { get: () => config },
 
-  reserveSenderFunds,
-  captureSenderReserve,
-  releaseSenderReserve,
-  creditReceiverFunds,
-  debitReceiverFunds,
-  refundSenderFunds,
-  creditAdminRevenue,
-  chargeCancellationFee,
-  createLedgerEntry,
+  validationService: { get: () => validationService },
+  logTransaction: { get: () => logTransaction },
+  logger: { get: () => logger },
+  notifyTransactionViaGateway: { get: () => notifyTransactionViaGateway },
+  convertAmount: { get: () => convertAmount },
+  normCur: { get: () => normCur },
+  generateTransactionRef: { get: () => generateTransactionRef },
 
-  normalizePricingSnapshot,
-  buildAdminRevenueBreakdown,
-  roundMoney,
+  reserveSenderFunds: { get: () => reserveSenderFunds },
+  captureSenderReserve: { get: () => captureSenderReserve },
+  releaseSenderReserve: { get: () => releaseSenderReserve },
+  creditReceiverFunds: { get: () => creditReceiverFunds },
+  debitReceiverFunds: { get: () => debitReceiverFunds },
+  refundSenderFunds: { get: () => refundSenderFunds },
+  creditAdminRevenue: { get: () => creditAdminRevenue },
+  chargeCancellationFee: { get: () => chargeCancellationFee },
+  createLedgerEntry: { get: () => createLedgerEntry },
 
-  assertTransition,
+  normalizePricingSnapshot: { get: () => normalizePricingSnapshot },
+  buildAdminRevenueBreakdown: { get: () => buildAdminRevenueBreakdown },
+  roundMoney: { get: () => roundMoney },
 
-  PRINCIPAL_URL,
-  GATEWAY_URL,
-  INTERNAL_TOKEN,
+  assertTransition: { get: () => assertTransition },
 
-  getUsersConnectionSafe,
-  getTxConnectionSafe,
+  PRINCIPAL_URL: { get: () => PRINCIPAL_URL },
+  GATEWAY_URL: { get: () => GATEWAY_URL },
+  INTERNAL_TOKEN: { get: () => INTERNAL_TOKEN },
 
-  getUserModel,
-  getNotificationModel,
-  getOutboxModel,
-  getTransactionModel,
-  getBalanceModel,
-  getLedgerEntryModel,
+  usersConn: { get: () => getUsersConnectionSafe() },
+  txConn: { get: () => getTxConnectionSafe() },
 
-  canUseSharedSession,
-  startTxSession,
-  maybeSessionOpts,
-  safeCommit,
-  safeAbort,
-  safeEndSession,
+  User: { get: () => getUserModel() },
+  Notification: { get: () => getNotificationModel() },
+  Outbox: { get: () => getOutboxModel() },
+  Transaction: { get: () => getTransactionModel() },
+  Balance: { get: () => getBalanceModel() },
+  LedgerEntry: { get: () => getLedgerEntryModel() },
 
-  getRuntime,
-};
+  getUsersConnectionSafe: { get: () => getUsersConnectionSafe },
+  getTxConnectionSafe: { get: () => getTxConnectionSafe },
+
+  getUserModel: { get: () => getUserModel },
+  getNotificationModel: { get: () => getNotificationModel },
+  getOutboxModel: { get: () => getOutboxModel },
+  getTransactionModel: { get: () => getTransactionModel },
+  getBalanceModel: { get: () => getBalanceModel },
+  getLedgerEntryModel: { get: () => getLedgerEntryModel },
+
+  canUseSharedSession: { get: () => canUseSharedSession },
+  startTxSession: { get: () => startTxSession },
+  maybeSessionOpts: { get: () => maybeSessionOpts },
+  safeCommit: { get: () => safeCommit },
+  safeAbort: { get: () => safeAbort },
+  safeEndSession: { get: () => safeEndSession },
+
+  getRuntime: { get: () => getRuntime },
+});
+
+module.exports = runtime;

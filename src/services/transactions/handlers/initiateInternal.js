@@ -1,21 +1,7 @@
 "use strict";
 
 const createError = require("http-errors");
-
-const {
-  User,
-  Transaction,
-  validationService,
-  logTransaction,
-  logger,
-  normCur,
-  generateTransactionRef,
-  reserveSenderFunds,
-  normalizePricingSnapshot,
-  startTxSession,
-  maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
-} = require("../shared/runtime");
+const runtime = require("../shared/runtime");
 
 const { notifyParties } = require("../shared/notifications");
 
@@ -54,6 +40,7 @@ function buildSafeMeta(...parts) {
 function safeLog(level, message, meta = {}) {
   try {
     const payload = isPlainObject(meta) ? meta : {};
+    const logger = runtime.logger;
     if (logger && typeof logger[level] === "function") {
       logger[level](message, payload);
       return;
@@ -73,7 +60,7 @@ function safeSessionChain(query, session) {
 
 async function abortQuietly(session) {
   try {
-    if (session && CAN_USE_SHARED_SESSION) {
+    if (session && runtime.canUseSharedSession()) {
       await session.abortTransaction();
     }
   } catch {}
@@ -97,22 +84,11 @@ function normalizeCountryLoose(v) {
 }
 
 function resolveCountryForSource(body = {}) {
-  return (
-    body.fromCountry ||
-    body.sourceCountry ||
-    body.country ||
-    ""
-  );
+  return body.fromCountry || body.sourceCountry || body.country || "";
 }
 
 function resolveCountryForTarget(body = {}) {
-  return (
-    body.toCountry ||
-    body.destinationCountry ||
-    body.targetCountry ||
-    body.country ||
-    ""
-  );
+  return body.toCountry || body.destinationCountry || body.targetCountry || body.country || "";
 }
 
 function getEffectivePricingId(body = {}) {
@@ -163,10 +139,22 @@ function buildDebugBody(body = {}) {
 }
 
 async function initiateInternal(req, res, next) {
-  const session = await startTxSession();
+  const session = await runtime.startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) {
+    const User = runtime.User;
+    const Transaction = runtime.Transaction;
+    const validationService = runtime.validationService;
+    const logTransaction = runtime.logTransaction;
+    const normCur = runtime.normCur;
+    const generateTransactionRef = runtime.generateTransactionRef;
+    const reserveSenderFunds = runtime.reserveSenderFunds;
+    const normalizePricingSnapshot = runtime.normalizePricingSnapshot;
+
+    if (!User) throw createError(500, "User model indisponible");
+    if (!Transaction) throw createError(500, "Transaction model indisponible");
+
+    if (runtime.canUseSharedSession()) {
       session.startTransaction();
     }
 
@@ -268,7 +256,7 @@ async function initiateInternal(req, res, next) {
         null,
     });
 
-    const sessOpts = maybeSessionOpts(session);
+    const sessOpts = runtime.maybeSessionOpts(session);
     const activeSession = sessOpts?.session || null;
 
     let senderQuery = User.findById(senderId).select("fullName email");
@@ -636,7 +624,7 @@ async function initiateInternal(req, res, next) {
 
     await notifyParties(tx, "initiated", session, currencySourceISO);
 
-    if (CAN_USE_SHARED_SESSION) {
+    if (runtime.canUseSharedSession()) {
       await session.commitTransaction();
     }
 

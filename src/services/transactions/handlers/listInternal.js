@@ -1,6 +1,6 @@
 "use strict";
 
-const { Transaction } = require("../shared/runtime");
+const runtime = require("../shared/runtime");
 const { pickAuthedUserId } = require("../shared/helpers");
 
 async function listInternal(req, res, next) {
@@ -8,6 +8,14 @@ async function listInternal(req, res, next) {
     const userId = pickAuthedUserId(req);
     if (!userId) {
       return res.status(401).json({ success: false, message: "Non autorisé" });
+    }
+
+    const Transaction = runtime.Transaction;
+    if (!Transaction) {
+      return res.status(500).json({
+        success: false,
+        message: "Transaction model indisponible",
+      });
     }
 
     const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
