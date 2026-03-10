@@ -17,24 +17,15 @@
  * --------------------------------------------------------------------------
  */
 
-"use strict";
-
 const mongoose = require("mongoose");
 const {
   roundMoney,
   buildAdminRevenueBreakdown,
 } = require("./pricingSnapshotNormalizer");
 
-const getTxConnSafe = () => {
-  try {
-    const { getTxConn } = require("../config/db");
-    return getTxConn();
-  } catch {
-    return mongoose;
-  }
-};
+const { getTxConn } = require("../config/db");
+const txConn = getTxConn();
 
-const txConn = getTxConnSafe();
 
 const LedgerEntry = require("../models/LedgerEntry")(txConn);
 const TxWalletBalance = require("../models/TxWalletBalance")(txConn);

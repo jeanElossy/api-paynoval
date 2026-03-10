@@ -96,11 +96,12 @@ async function connectTransactionsDB() {
     console.log(`✅ DB Transactions connectée : ${txConn.name}`);
 
     // ⚠️ Important: on enregistre les modèles sur txConn
-    // User sur txConn pour population si tu l'utilises côté transactions
     require('../models/User')(txConn);
     require('../models/Transaction')(txConn);
     require('../models/Outbox')(txConn);
     require('../models/Notification')(txConn);
+    require('../models/LedgerEntry')(txConn);
+    require('../models/TxWalletBalance')(txConn);
   } else {
     // eslint-disable-next-line no-console
     console.log(`ℹ️ DB Transactions déjà connectée (state=${txConn.readyState})`);
