@@ -18,10 +18,12 @@ function toFixedAmount(amount, currency = "CAD") {
 module.exports = (conn = mongoose) => {
   if (conn.models.TxWalletBalance) return conn.models.TxWalletBalance;
 
-  const balanceSchema = new conn.Schema(
+  const Schema = mongoose.Schema;
+
+  const balanceSchema = new Schema(
     {
       user: {
-        type: conn.Schema.Types.ObjectId,
+        type: Schema.Types.ObjectId,
         ref: "User",
         required: [true, "L'identifiant utilisateur est requis"],
         index: true,
@@ -38,19 +40,19 @@ module.exports = (conn = mongoose) => {
       },
 
       amount: {
-        type: conn.Schema.Types.Decimal128,
+        type: mongoose.Schema.Types.Decimal128,
         required: true,
         default: () => mongoose.Types.Decimal128.fromString("0"),
       },
 
       reservedAmount: {
-        type: conn.Schema.Types.Decimal128,
+        type: mongoose.Schema.Types.Decimal128,
         required: true,
         default: () => mongoose.Types.Decimal128.fromString("0"),
       },
 
       availableAmount: {
-        type: conn.Schema.Types.Decimal128,
+        type: mongoose.Schema.Types.Decimal128,
         required: true,
         default: () => mongoose.Types.Decimal128.fromString("0"),
       },
@@ -63,7 +65,7 @@ module.exports = (conn = mongoose) => {
       },
 
       metadata: {
-        type: conn.Schema.Types.Mixed,
+        type: mongoose.Schema.Types.Mixed,
         default: null,
       },
     },
