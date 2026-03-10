@@ -469,7 +469,10 @@ async function initiateInternal(req, res, next) {
       contextId: null,
 
       reference,
-      idempotencyKey: body.idempotencyKey || null,
+      idempotencyKey:
+        typeof body.idempotencyKey === "string" && body.idempotencyKey.trim()
+          ? body.idempotencyKey.trim()
+          : undefined,
 
       sender: senderUser._id,
       receiver: receiver._id,

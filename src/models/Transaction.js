@@ -133,9 +133,8 @@ const transactionSchema = new mongoose.Schema(
 
     idempotencyKey: {
       type: String,
-      default: null,
+      default: undefined,
       trim: true,
-      index: true,
     },
 
     verificationToken: {
@@ -317,9 +316,6 @@ const transactionSchema = new mongoose.Schema(
       default: null,
     },
 
-    /**
-     * Legacy compat
-     */
     currency: {
       type: String,
       default: null,
@@ -688,15 +684,35 @@ transactionSchema.index({ archived: 1, createdAt: -1 });
 
 transactionSchema.index(
   { sender: 1, idempotencyKey: 1 },
-  { unique: true, sparse: true }
+  {
+    unique: true,
+    partialFilterExpression: {
+      sender: { $exists: true, $ne: null },
+      idempotencyKey: { $exists: true, $type: "string" },
+    },
+  }
 );
+
 transactionSchema.index(
   { userId: 1, reference: 1 },
-  { unique: true, sparse: true }
+  {
+    unique: true,
+    partialFilterExpression: {
+      userId: { $exists: true, $ne: null },
+      reference: { $exists: true, $type: "string" },
+    },
+  }
 );
+
 transactionSchema.index(
   { userId: 1, idempotencyKey: 1 },
-  { unique: true, sparse: true }
+  {
+    unique: true,
+    partialFilterExpression: {
+      userId: { $exists: true, $ne: null },
+      idempotencyKey: { $exists: true, $type: "string" },
+    },
+  }
 );
 
 transactionSchema.set("toJSON", {
@@ -738,6 +754,18 @@ transactionSchema.set("toJSON", {
 transactionSchema.pre("validate", function (next) {
   if (this.isNew && !this.verificationToken) {
     this.verificationToken = crypto.randomBytes(32).toString("hex");
+  }
+
+  if (typeof this.reference === "string") {
+    const trimmedRef = this.reference.trim();
+    if (trimmedRef) this.reference = trimmedRef;
+  }
+
+  if (typeof this.idempotencyKey === "string") {
+    const trimmed = this.idempotencyKey.trim();
+    this.idempotencyKey = trimmed || undefined;
+  } else if (this.idempotencyKey == null) {
+    this.idempotencyKey = undefined;
   }
 
   if (this.currency != null) this.currency = normCurrency(this.currency);
