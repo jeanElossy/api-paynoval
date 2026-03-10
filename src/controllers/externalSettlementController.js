@@ -20,14 +20,14 @@ const {
   startTxSession,
   maybeSessionOpts,
   CAN_USE_SHARED_SESSION,
-} = require("../shared/runtime");
+} = require("../services/transactions/shared/runtime");
 
-const { notifyParties } = require("../shared/notifications");
-const { round2, toFloat } = require("../shared/helpers");
+const { notifyParties } = require("../services/transactions/shared/notifications");
+const { round2, toFloat } = require("../services/transactions/shared/helpers");
 const {
   isOutboundExternalFlow,
   isInboundExternalFlow,
-} = require("./flowHelpers");
+} = require("../services/transactions/handlers/flowHelpers");
 
 function low(v) {
   return String(v || "").trim().toLowerCase();
