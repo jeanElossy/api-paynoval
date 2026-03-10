@@ -36,10 +36,12 @@ async function initiateByFlow(req, res, next) {
     const flow = resolveExternalFlow(body);
 
     if (isOutboundExternalFlow(flow)) {
+      console.log("[TX FLOW] External flow detected:", flow);
       return initiateOutboundExternal(req, res, next);
     }
 
     if (isInboundExternalFlow(flow)) {
+      console.log("[TX FLOW] External flow detected:", flow);
       return initiateInboundExternal(req, res, next);
     }
 
