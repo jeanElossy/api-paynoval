@@ -896,6 +896,7 @@ async function bootstrap() {
 
     // ✅ nouvelle route settlement cagnotte
     const cagnotteSettlementRoutes = require("./routes/cagnotteSettlementRoutes");
+    const cagnotteVaultSettlementRoutes = require("./routes/cagnotteVaultSettlementRoutes");
 
     app.use("/webhooks/providers", providerWebhookRoutes);
 
@@ -917,6 +918,9 @@ async function bootstrap() {
 
     // ✅ TX Core settlement cagnotte
     app.use("/api/v1/cagnotte", cagnotteSettlementRoutes);
+    app.use("/api/v1/cagnotte", cagnotteVaultSettlementRoutes);
+
+
 
     app.get("/api/v1/health", (_req, res) =>
       res.status(200).json({ status: "ok", timestamp: new Date().toISOString() })
