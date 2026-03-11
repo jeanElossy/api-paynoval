@@ -25,6 +25,7 @@ function round2(n) {
 function toUserClauses(userId) {
   const id = String(userId || "").trim();
   if (!id) return [];
+
   const clauses = [
     { userId: id },
     { user: id },
@@ -45,6 +46,45 @@ function toUserClauses(userId) {
   return clauses;
 }
 
+function isRetryableMongoTxError(err) {
+  const msg = String(err?.message || "").toLowerCase();
+
+  if (Array.isArray(err?.errorLabels)) {
+    if (err.errorLabels.includes("TransientTransactionError")) return true;
+    if (err.errorLabels.includes("UnknownTransactionCommitResult")) return true;
+  }
+
+  return (
+    msg.includes("please retry the operation") ||
+    msg.includes("please retry your operation") ||
+    msg.includes("multi-document transaction") ||
+    msg.includes("transienttransactionerror") ||
+    msg.includes("unknowntransactioncommitresult") ||
+    msg.includes("unable to write to collection") ||
+    msg.includes("due to catalog changes")
+  );
+}
+
+async function runWithMongoTxRetry(work, { retries = 3, backoffMs = 150 } = {}) {
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      return await work(attempt);
+    } catch (err) {
+      lastErr = err;
+
+      if (!isRetryableMongoTxError(err) || attempt >= retries) {
+        throw err;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt));
+    }
+  }
+
+  throw lastErr;
+}
+
 async function findWalletForUser({ TxWalletBalance, userId, currency, session }) {
   const cur = normalizeCurrencyCode(currency);
   return TxWalletBalance.findOne({
@@ -63,7 +103,7 @@ async function ensureWalletForUser({ TxWalletBalance, userId, currency, session 
 
   if (wallet) return wallet;
 
-  wallet = await TxWalletBalance.create(
+  const created = await TxWalletBalance.create(
     [
       {
         userId: String(userId),
@@ -78,7 +118,7 @@ async function ensureWalletForUser({ TxWalletBalance, userId, currency, session 
     { session }
   );
 
-  return wallet[0];
+  return created[0];
 }
 
 exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
@@ -136,156 +176,200 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
     });
   }
 
-  const session = await txConn.startSession();
-  let committed = false;
+  const result = await runWithMongoTxRetry(
+    async () => {
+      const session = await txConn.startSession();
+      let committed = false;
 
-  try {
-    session.startTransaction();
+      try {
+        session.startTransaction();
 
-    const payerWallet = await findWalletForUser({
-      TxWalletBalance,
-      userId: payerId,
-      currency: payerCurrency,
-      session,
-    });
-
-    if (!payerWallet) {
-      await session.abortTransaction();
-      return res.status(404).json({
-        success: false,
-        error: `Wallet payeur introuvable en ${payerCurrency}.`,
-      });
-    }
-
-    const currentAmount = round2(payerWallet.amount);
-    const currentAvailable = round2(
-      payerWallet.availableAmount != null
-        ? payerWallet.availableAmount
-        : payerWallet.amount
-    );
-
-    if (currentAmount < payerAmount || currentAvailable < payerAmount) {
-      await session.abortTransaction();
-      return res.status(400).json({
-        success: false,
-        error: "Solde insuffisant.",
-        details: {
-          walletCurrency: payerCurrency,
-          amount: currentAmount,
-          availableAmount: currentAvailable,
-          required: payerAmount,
-        },
-      });
-    }
-
-    const updatedPayerWallet = await TxWalletBalance.findOneAndUpdate(
-      {
-        _id: payerWallet._id,
-        amount: { $gte: payerAmount },
-        availableAmount: { $gte: payerAmount },
-      },
-      {
-        $inc: {
-          amount: -payerAmount,
-          availableAmount: -payerAmount,
-        },
-      },
-      { new: true, session }
-    );
-
-    if (!updatedPayerWallet) {
-      await session.abortTransaction();
-      return res.status(409).json({
-        success: false,
-        error: "Le wallet payeur a changé pendant le règlement. Réessaie.",
-      });
-    }
-
-    let updatedAdminWallet = null;
-
-    if (feeAmount > 0) {
-      const adminWallet = await ensureWalletForUser({
-        TxWalletBalance,
-        userId: adminId,
-        currency: feeCurrency,
-        session,
-      });
-
-      updatedAdminWallet = await TxWalletBalance.findOneAndUpdate(
-        { _id: adminWallet._id },
-        {
-          $inc: {
-            amount: feeAmount,
-            availableAmount: feeAmount,
-          },
-        },
-        { new: true, session }
-      );
-    }
-
-    const settlementDocs = await CagnotteSettlement.create(
-      [
-        {
+        const existingInTx = await CagnotteSettlement.findOne({
           reference: ref,
-          idempotencyKey: idem,
+        }).session(session);
+
+        if (existingInTx) {
+          try {
+            await session.abortTransaction();
+          } catch (_) {}
+
+          return {
+            statusCode: 200,
+            body: {
+              success: true,
+              alreadyProcessed: true,
+              data: existingInTx.toObject ? existingInTx.toObject() : existingInTx,
+            },
+          };
+        }
+
+        const payerWallet = await findWalletForUser({
+          TxWalletBalance,
           userId: payerId,
-          adminUserId: adminId,
-          payer: {
-            amount: payerAmount,
-            currency: payerCurrency,
+          currency: payerCurrency,
+          session,
+        });
+
+        if (!payerWallet) {
+          try {
+            await session.abortTransaction();
+          } catch (_) {}
+
+          return {
+            statusCode: 404,
+            body: {
+              success: false,
+              error: `Wallet payeur introuvable en ${payerCurrency}.`,
+            },
+          };
+        }
+
+        const currentAmount = round2(payerWallet.amount);
+        const currentAvailable = round2(
+          payerWallet.availableAmount != null
+            ? payerWallet.availableAmount
+            : payerWallet.amount
+        );
+
+        if (currentAmount < payerAmount || currentAvailable < payerAmount) {
+          try {
+            await session.abortTransaction();
+          } catch (_) {}
+
+          return {
+            statusCode: 400,
+            body: {
+              success: false,
+              error: "Solde insuffisant.",
+              details: {
+                walletCurrency: payerCurrency,
+                amount: currentAmount,
+                availableAmount: currentAvailable,
+                required: payerAmount,
+              },
+            },
+          };
+        }
+
+        const updatedPayerWallet = await TxWalletBalance.findOneAndUpdate(
+          {
+            _id: payerWallet._id,
+            amount: { $gte: payerAmount },
+            availableAmount: { $gte: payerAmount },
           },
-          feeCredit: {
-            amount: feeAmount,
-            currency: feeCurrency || undefined,
-            baseAmount: round2(feeCredit?.baseAmount || 0),
-            baseCurrencyCode: normalizeCurrencyCode(
-              feeCredit?.baseCurrencyCode
-            ),
+          {
+            $inc: {
+              amount: -payerAmount,
+              availableAmount: -payerAmount,
+            },
           },
-          status: "confirmed",
-          payerWalletAfter: {
-            walletId: String(updatedPayerWallet._id),
-            currency: updatedPayerWallet.currency,
-            amount: round2(updatedPayerWallet.amount),
-            availableAmount: round2(updatedPayerWallet.availableAmount),
-            reservedAmount: round2(updatedPayerWallet.reservedAmount || 0),
+          { new: true, session }
+        );
+
+        if (!updatedPayerWallet) {
+          try {
+            await session.abortTransaction();
+          } catch (_) {}
+
+          return {
+            statusCode: 409,
+            body: {
+              success: false,
+              error: "Le wallet payeur a changé pendant le règlement. Réessaie.",
+            },
+          };
+        }
+
+        let updatedAdminWallet = null;
+
+        if (feeAmount > 0) {
+          const adminWallet = await ensureWalletForUser({
+            TxWalletBalance,
+            userId: adminId,
+            currency: feeCurrency,
+            session,
+          });
+
+          updatedAdminWallet = await TxWalletBalance.findOneAndUpdate(
+            { _id: adminWallet._id },
+            {
+              $inc: {
+                amount: feeAmount,
+                availableAmount: feeAmount,
+              },
+            },
+            { new: true, session }
+          );
+        }
+
+        const settlementDocs = await CagnotteSettlement.create(
+          [
+            {
+              reference: ref,
+              idempotencyKey: idem,
+              userId: payerId,
+              adminUserId: adminId,
+              payer: {
+                amount: payerAmount,
+                currency: payerCurrency,
+              },
+              feeCredit: {
+                amount: feeAmount,
+                currency: feeCurrency || undefined,
+                baseAmount: round2(feeCredit?.baseAmount || 0),
+                baseCurrencyCode: normalizeCurrencyCode(
+                  feeCredit?.baseCurrencyCode
+                ),
+              },
+              status: "confirmed",
+              payerWalletAfter: {
+                walletId: String(updatedPayerWallet._id),
+                currency: updatedPayerWallet.currency,
+                amount: round2(updatedPayerWallet.amount),
+                availableAmount: round2(updatedPayerWallet.availableAmount),
+                reservedAmount: round2(updatedPayerWallet.reservedAmount || 0),
+              },
+              adminWalletAfter: updatedAdminWallet
+                ? {
+                    walletId: String(updatedAdminWallet._id),
+                    currency: updatedAdminWallet.currency,
+                    amount: round2(updatedAdminWallet.amount),
+                    availableAmount: round2(updatedAdminWallet.availableAmount),
+                    reservedAmount: round2(updatedAdminWallet.reservedAmount || 0),
+                  }
+                : null,
+              meta: meta || {},
+            },
+          ],
+          { session }
+        );
+
+        const settlement = settlementDocs[0];
+
+        await session.commitTransaction();
+        committed = true;
+
+        return {
+          statusCode: 201,
+          body: {
+            success: true,
+            data: settlement.toObject ? settlement.toObject() : settlement,
           },
-          adminWalletAfter: updatedAdminWallet
-            ? {
-                walletId: String(updatedAdminWallet._id),
-                currency: updatedAdminWallet.currency,
-                amount: round2(updatedAdminWallet.amount),
-                availableAmount: round2(updatedAdminWallet.availableAmount),
-                reservedAmount: round2(updatedAdminWallet.reservedAmount || 0),
-              }
-            : null,
-          meta: meta || {},
-        },
-      ],
-      { session }
-    );
+        };
+      } catch (err) {
+        try {
+          if (!committed) await session.abortTransaction();
+        } catch (_) {}
 
-    const settlement = settlementDocs[0];
+        throw err;
+      } finally {
+        try {
+          session.endSession();
+        } catch (_) {}
+      }
+    },
+    { retries: 3, backoffMs: 150 }
+  );
 
-    await session.commitTransaction();
-    committed = true;
-
-    return res.status(201).json({
-      success: true,
-      data: settlement.toObject ? settlement.toObject() : settlement,
-    });
-  } catch (err) {
-    try {
-      if (!committed) await session.abortTransaction();
-    } catch (_) {}
-
-    return res.status(500).json({
-      success: false,
-      error: err?.message || "Erreur interne TX Core.",
-    });
-  } finally {
-    try {
-      session.endSession();
-    } catch (_) {}
-  }
+  return res.status(result.statusCode).json(result.body);
 });
