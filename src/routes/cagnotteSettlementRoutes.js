@@ -8,8 +8,12 @@ const router = express.Router();
 
 function verifyInternalToken(req, res, next) {
   const expected = String(
-    process.env.TX_CORE_INTERNAL_TOKEN || process.env.INTERNAL_TX_TOKEN || ""
+    process.env.TX_CORE_INTERNAL_TOKEN ||
+      process.env.INTERNAL_TX_TOKEN ||
+      process.env.INTERNAL_TOKEN ||
+      ""
   ).trim();
+
   const got = String(req.headers["x-internal-token"] || "").trim();
 
   if (!expected) {
@@ -32,7 +36,10 @@ function verifyInternalToken(req, res, next) {
 function checkValidation(req, res, next) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return res.status(400).json({ success: false, errors: errors.array() });
+    return res.status(400).json({
+      success: false,
+      errors: errors.array(),
+    });
   }
   return next();
 }
