@@ -409,6 +409,7 @@ async function bootstrap() {
     const adminTransactionRoutes = require("./routes/admin/transactions.admin.routes");
     const internalPaymentsRoutes = require("./routes/internalPaymentsRoutes");
     const internalTxRoutes = require("./routes/internalTransactions.routes");
+    const cagnotteSettlementRoutes = require("./routes/cagnotteSettlementRoutes");
 
     // Webhooks AVANT sanitizers
     app.use("/webhooks/providers", providerWebhookRoutes);
@@ -432,6 +433,8 @@ async function bootstrap() {
     // Internal
     app.use("/api/v1/internal", internalTxRoutes);
     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
+
+    app.use("/api/v1/cagnotte", cagnotteSettlementRoutes);
 
     app.get("/api/v1/health", (_req, res) =>
       res.status(200).json({ status: "ok", timestamp: new Date().toISOString() })
