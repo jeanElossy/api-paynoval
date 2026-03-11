@@ -200,6 +200,7 @@ app.use(
       "Idempotency-Key",
       "x-idempotency-key",
       "x-internal-token",
+      "x-service-name",
       "x-user-id",
       "x-device-id",
       "x-session-id",
@@ -361,6 +362,14 @@ const baseRateLimitConfig = {
       return true;
     }
 
+    // ✅ settlements internes critiques
+    if (
+      req.path === "/api/v1/cagnotte/participation/settle" ||
+      req.path === "/api/v1/cagnotte/vault-withdrawals/settle"
+    ) {
+      return true;
+    }
+
     if (isTrustedInternalCall(req)) return true;
 
     return false;
@@ -387,6 +396,18 @@ if (process.env.REDIS_URL && RedisStore && Redis) {
     );
   }
 }
+
+// ✅ Debug temporaire pour confirmer les appels internes
+app.use((req, _res, next) => {
+  if (req.path.startsWith("/api/v1/cagnotte")) {
+    logger.info("[TX CORE][internal-check]", {
+      path: req.path,
+      internalTokenPresent: !!req.headers["x-internal-token"],
+      trusted: isTrustedInternalCall(req),
+    });
+  }
+  next();
+});
 
 app.use(globalRateLimiter);
 
