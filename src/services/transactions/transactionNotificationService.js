@@ -10,8 +10,8 @@ const {
 } = require("./shared/runtime");
 
 
-const Notification = require("../../../models/Notification")(getUsersConnectionSafe());
-const Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
+const Notification = require("../../models/Notification")(getUsersConnectionSafe());
+const Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
 
 function toFloat(v, fallback = 0) {
   const n = Number(v);
@@ -132,7 +132,7 @@ function buildMessages(status, ctx) {
     };
   }
 
-  
+
   if (status === "cancelled") {
     return {
       sender: {
