@@ -9,7 +9,6 @@ const {
   getUsersConnectionSafe,
 } = require("./shared/runtime");
 
-
 const Notification = require("../../models/Notification")(getUsersConnectionSafe());
 const Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
 
@@ -132,7 +131,6 @@ function buildMessages(status, ctx) {
     };
   }
 
-
   if (status === "cancelled") {
     return {
       sender: {
@@ -232,10 +230,7 @@ async function enqueueUserNotification({
         status,
         txId,
         reference: tx?.reference || "",
-        role:
-          String(recipient) === String(tx?.sender || "")
-            ? "sender"
-            : "receiver",
+        role: String(recipient) === String(tx?.sender || "") ? "sender" : "receiver",
         category: "transaction",
       },
     },
