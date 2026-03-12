@@ -8,7 +8,7 @@ const {
   getUsersConnectionSafe,
 } = require("./shared/runtime");
 
-const Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
+const Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
 
 const { deliverChannels } = require("../pushNotificationService");
 
