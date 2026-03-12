@@ -14,7 +14,6 @@ const db = require("../../../config/db");
 const validationService = require("../../../services/validationService");
 const { logTransaction } = require("../../../services/aml");
 const logger = require("../../../logger");
-const { notifyTransactionViaGateway } = require("../../../services/notifyGateway");
 const { convertAmount } = require("../../../tools/currency");
 const { normCur } = require("../../../utils/currency");
 const generateTransactionRef = require("../../../utils/generateRef");
@@ -43,6 +42,7 @@ let _usersConn = null;
 let _txConn = null;
 
 let _User = null;
+let _Device = null;
 let _Notification = null;
 let _Outbox = null;
 let _Transaction = null;
@@ -67,15 +67,21 @@ function getUserModel() {
   return _User;
 }
 
+function getDeviceModel() {
+  if (_Device) return _Device;
+  _Device = require("../../../models/Device")(getUsersConnectionSafe());
+  return _Device;
+}
+
 function getNotificationModel() {
   if (_Notification) return _Notification;
-  _Notification = require("../../../models/Notification")(getUsersConnectionSafe());
+  _Notification = require("../../../models/Notification")(getTxConnectionSafe());
   return _Notification;
 }
 
 function getOutboxModel() {
   if (_Outbox) return _Outbox;
-  _Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
+  _Outbox = require("../../../models/Outbox")(getTxConnectionSafe());
   return _Outbox;
 }
 
@@ -159,6 +165,7 @@ function getRuntime() {
     txConn: getTxConnectionSafe(),
 
     User: getUserModel(),
+    Device: getDeviceModel(),
     Notification: getNotificationModel(),
     Outbox: getOutboxModel(),
     Transaction: getTransactionModel(),
@@ -168,7 +175,6 @@ function getRuntime() {
     validationService,
     logTransaction,
     logger,
-    notifyTransactionViaGateway,
     convertAmount,
     normCur,
     generateTransactionRef,
@@ -212,7 +218,6 @@ Object.defineProperties(runtime, {
   validationService: { get: () => validationService },
   logTransaction: { get: () => logTransaction },
   logger: { get: () => logger },
-  notifyTransactionViaGateway: { get: () => notifyTransactionViaGateway },
   convertAmount: { get: () => convertAmount },
   normCur: { get: () => normCur },
   generateTransactionRef: { get: () => generateTransactionRef },
@@ -241,6 +246,7 @@ Object.defineProperties(runtime, {
   txConn: { get: () => getTxConnectionSafe() },
 
   User: { get: () => getUserModel() },
+  Device: { get: () => getDeviceModel() },
   Notification: { get: () => getNotificationModel() },
   Outbox: { get: () => getOutboxModel() },
   Transaction: { get: () => getTransactionModel() },
@@ -251,6 +257,7 @@ Object.defineProperties(runtime, {
   getTxConnectionSafe: { get: () => getTxConnectionSafe },
 
   getUserModel: { get: () => getUserModel },
+  getDeviceModel: { get: () => getDeviceModel },
   getNotificationModel: { get: () => getNotificationModel },
   getOutboxModel: { get: () => getOutboxModel },
   getTransactionModel: { get: () => getTransactionModel },

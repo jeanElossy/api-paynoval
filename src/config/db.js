@@ -76,8 +76,11 @@ async function connectTransactionsDB() {
     // eslint-disable-next-line no-console
     console.log(`✅ DB Users connectée : ${mongoose.connection.name}`);
 
-    // Charge modèle User sur mongoose default (comme tu faisais)
+    // Charge modèles liés à la DB users
     require('../models/User')();
+    require('../models/Device')(mongoose.connection);
+
+
   } else {
     // eslint-disable-next-line no-console
     console.log(`ℹ️ DB Users déjà connectée (state=${mongoose.connection.readyState})`);
