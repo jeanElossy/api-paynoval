@@ -4,12 +4,14 @@ const crypto = require("crypto");
 
 const {
   User,
-  Notification,
-  Outbox,
   logger,
   maybeSessionOpts,
+  getUsersConnectionSafe,
 } = require("./shared/runtime");
 
+
+const Notification = require("../../../models/Notification")(getUsersConnectionSafe());
+const Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
 
 function toFloat(v, fallback = 0) {
   const n = Number(v);
@@ -194,28 +196,21 @@ async function enqueueUserNotification({
   type,
   data,
   channels = ["push"],
-  session,
 }) {
-  const sessOpts = maybeSessionOpts(session);
-
-  await Notification.create(
-    [
-      {
-        recipient: recipientId,
-        type,
-        title,
-        message,
-        data,
-        read: false,
-        date: new Date(),
-        channels: ["in_app", ...channels],
-      },
-    ],
-    sessOpts
-  );
-
-  const txId = tx?._id?.toString?.() || "";
   const recipient = String(recipientId || "");
+  const txId = tx?._id?.toString?.() || "";
+
+  await Notification.create({
+    recipient,
+    type,
+    title,
+    message,
+    data,
+    read: false,
+    readAt: null,
+    date: new Date(),
+    channels: ["in_app", ...channels],
+  });
 
   const outboxDocs = channels.map((channel) => ({
     service: "notifications",
@@ -223,6 +218,8 @@ async function enqueueUserNotification({
     aggregateType: "transaction",
     aggregateId: txId,
     status: "pending",
+    attempts: 0,
+    maxAttempts: 8,
     payload: {
       userId: recipient,
       title,
@@ -243,10 +240,14 @@ async function enqueueUserNotification({
     },
     idempotencyKey: buildOutboxIdempotencyKey(txId, recipient, status, channel),
     availableAt: new Date(),
+    processedAt: null,
+    lockedAt: null,
+    lockedBy: "",
+    lastError: "",
   }));
 
   if (outboxDocs.length) {
-    await Outbox.insertMany(outboxDocs, sessOpts);
+    await Outbox.insertMany(outboxDocs, { ordered: false });
   }
 }
 
@@ -256,12 +257,12 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
 
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender)
-        .select("email fullName wantsEmail notificationPreferences")
+        .select("_id email fullName wantsEmail notificationPreferences")
         .lean()
         .session(sessOpts.session || null),
 
       User.findById(tx.receiver)
-        .select("email fullName wantsEmail notificationPreferences")
+        .select("_id email fullName wantsEmail notificationPreferences")
         .lean()
         .session(sessOpts.session || null),
     ]);
@@ -326,7 +327,6 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       type: messages.sender.type,
       data: senderData,
       channels: senderChannels,
-      session,
     });
 
     await enqueueUserNotification({
@@ -338,8 +338,21 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       type: messages.receiver.type,
       data: receiverData,
       channels: receiverChannels,
-      session,
     });
+
+    logger?.info?.(
+      {
+        txId: tx?._id?.toString?.(),
+        reference: tx?.reference || "",
+        status,
+        senderId: sender._id?.toString?.(),
+        receiverId: receiver._id?.toString?.(),
+        senderChannels,
+        receiverChannels,
+        targetDb: "users/main",
+      },
+      "[transactionNotificationService] notifications persisted to principal DB"
+    );
   } catch (err) {
     logger?.error?.(
       { err: err?.message || err, txId: tx?._id?.toString?.() || null, status },

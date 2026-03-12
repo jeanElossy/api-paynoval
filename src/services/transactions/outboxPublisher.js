@@ -4,9 +4,11 @@ const os = require("os");
 const crypto = require("crypto");
 
 const {
-  Outbox,
   logger,
+  getUsersConnectionSafe,
 } = require("./shared/runtime");
+
+const Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
 
 const { deliverChannels } = require("../pushNotificationService");
 
@@ -27,10 +29,7 @@ async function lockNextOutboxItem(workerId, service = "notifications") {
       service,
       status: { $in: ["pending", "retry"] },
       availableAt: { $lte: now },
-      $or: [
-        { lockedAt: null },
-        { lockedAt: { $exists: false } },
-      ],
+      $or: [{ lockedAt: null }, { lockedAt: { $exists: false } }],
     },
     {
       $set: {
@@ -94,9 +93,10 @@ async function processOutboxItem(item) {
   if (!item) return { ok: false, reason: "NO_ITEM" };
 
   const payload = item?.payload || {};
-  const channels = Array.isArray(payload.channels) && payload.channels.length
-    ? payload.channels
-    : ["push"];
+  const channels =
+    Array.isArray(payload.channels) && payload.channels.length
+      ? payload.channels
+      : ["push"];
 
   if (item.event !== "notification.deliver") {
     throw new Error(`Unsupported outbox event: ${item.event}`);
@@ -149,6 +149,7 @@ async function processPendingOutbox({ limit = 50, workerId } = {}) {
           service: item.service,
           event: item.event,
           result: res?.result || {},
+          targetDb: "users/main",
         },
         "[outboxPublisher] processed"
       );
@@ -161,6 +162,7 @@ async function processPendingOutbox({ limit = 50, workerId } = {}) {
           service: item.service,
           event: item.event,
           err: err?.message || err,
+          targetDb: "users/main",
         },
         "[outboxPublisher] process failed"
       );
@@ -184,7 +186,7 @@ function startOutboxWorker({
   const wid = workerId || buildWorkerId();
 
   logger?.info?.(
-    { workerId: wid, intervalMs, batchSize },
+    { workerId: wid, intervalMs, batchSize, targetDb: "users/main" },
     "[outboxPublisher] worker started"
   );
 
@@ -196,7 +198,7 @@ function startOutboxWorker({
       });
     } catch (err) {
       logger?.error?.(
-        { err: err?.message || err, workerId: wid },
+        { err: err?.message || err, workerId: wid, targetDb: "users/main" },
         "[outboxPublisher] worker tick failed"
       );
     }

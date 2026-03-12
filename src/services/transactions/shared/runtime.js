@@ -73,15 +73,23 @@ function getDeviceModel() {
   return _Device;
 }
 
+/**
+ * ✅ IMPORTANT
+ * Les notifications visibles par l'utilisateur doivent aller dans la base principale.
+ */
 function getNotificationModel() {
   if (_Notification) return _Notification;
-  _Notification = require("../../../models/Notification")(getTxConnectionSafe());
+  _Notification = require("../../../models/Notification")(getUsersConnectionSafe());
   return _Notification;
 }
 
+/**
+ * ✅ IMPORTANT
+ * L'Outbox consommée par le worker doit aussi être dans la base principale.
+ */
 function getOutboxModel() {
   if (_Outbox) return _Outbox;
-  _Outbox = require("../../../models/Outbox")(getTxConnectionSafe());
+  _Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
   return _Outbox;
 }
 
