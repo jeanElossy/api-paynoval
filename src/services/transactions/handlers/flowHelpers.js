@@ -31,6 +31,10 @@ function low(v) {
   return String(v || "").trim().toLowerCase();
 }
 
+function up(v) {
+  return String(v || "").trim().toUpperCase();
+}
+
 function sanitizePlainObject(obj = {}) {
   const out = {};
   for (const [k, v] of Object.entries(obj || {})) {
@@ -38,6 +42,59 @@ function sanitizePlainObject(obj = {}) {
     out[k] = v;
   }
   return out;
+}
+
+function normalizeCountryValue(v) {
+  return String(v || "")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+}
+
+function normalizeCountryISO(v) {
+  const s = normalizeCountryValue(v);
+
+  const map = {
+    "COTE D'IVOIRE": "CI",
+    "COTE DIVOIRE": "CI",
+    "IVORY COAST": "CI",
+    CI: "CI",
+
+    FRANCE: "FR",
+    FR: "FR",
+
+    CANADA: "CA",
+    CA: "CA",
+
+    BELGIQUE: "BE",
+    BELGIUM: "BE",
+    BE: "BE",
+
+    ALLEMAGNE: "DE",
+    GERMANY: "DE",
+    DE: "DE",
+
+    SENEGAL: "SN",
+    SN: "SN",
+
+    MALI: "ML",
+    ML: "ML",
+
+    BURKINA: "BF",
+    "BURKINA FASO": "BF",
+    BF: "BF",
+
+    CAMEROUN: "CM",
+    CAMEROON: "CM",
+    CM: "CM",
+
+    USA: "US",
+    "UNITED STATES": "US",
+    US: "US",
+  };
+
+  return map[s] || s;
 }
 
 function maskPan(raw) {
@@ -53,7 +110,18 @@ function redactSensitiveFields(obj = {}) {
   for (const [k, v] of Object.entries(obj)) {
     const kk = low(k);
 
-    if (["securityanswer", "securitycode", "validationcode", "cvc", "cvv", "pin", "otp"].includes(kk)) {
+    if (
+      [
+        "securityanswer",
+        "securitycode",
+        "validationcode",
+        "cvc",
+        "cvv",
+        "pin",
+        "otp",
+        "securityanswerhash",
+      ].includes(kk)
+    ) {
       continue;
     }
 
@@ -73,37 +141,101 @@ function redactSensitiveFields(obj = {}) {
   return out;
 }
 
-function resolveExternalFlow(body = {}) {
-  const funds = low(body.funds);
-  const destination = low(body.destination);
-  const action = low(body.action || "send");
+function normalizeProviderAlias(v) {
+  const s = low(v);
 
-  if (funds === "paynoval" && destination === "mobilemoney" && (action === "send" || action === "withdraw")) {
+  if (!s) return "";
+
+  if (["mobilemoney", "mobile_money", "momo"].includes(s)) return "mobilemoney";
+  if (["orange", "orange_money"].includes(s)) return "orange";
+  if (["mtn", "mtn_momo", "mtn_money"].includes(s)) return "mtn";
+  if (["moov", "moov_money", "flooz"].includes(s)) return "moov";
+  if (["wave"].includes(s)) return "wave";
+
+  if (["bank", "banque"].includes(s)) return "bank";
+
+  if (["card", "visa", "stripe", "visa_direct"].includes(s)) return s;
+
+  if (["paynoval", "internal"].includes(s)) return "paynoval";
+
+  return s;
+}
+
+function normalizeFundsOrDestination(v) {
+  const s = low(v);
+
+  if (!s) return "";
+
+  if (["mobilemoney", "mobile_money", "momo"].includes(s)) return "mobilemoney";
+  if (["bank", "banque"].includes(s)) return "bank";
+  if (["card", "visa", "stripe", "visa_direct"].includes(s)) return s;
+  if (["paynoval", "internal"].includes(s)) return "paynoval";
+
+  return s;
+}
+
+function normalizeAction(body = {}) {
+  const action = low(body.action);
+  if (action) {
+    if (["withdraw", "retrait", "send", "payout"].includes(action)) return "withdraw";
+    if (["deposit", "depot", "topup", "collection"].includes(action)) return "deposit";
+    return action;
+  }
+
+  const txType = up(body.txType || body.transactionType || "");
+  if (txType === "WITHDRAW") return "withdraw";
+  if (txType === "DEPOSIT") return "deposit";
+
+  return "send";
+}
+
+function resolveExternalFlow(body = {}) {
+  const funds = normalizeFundsOrDestination(body.funds);
+  const destination = normalizeFundsOrDestination(body.destination);
+  const action = normalizeAction(body);
+
+  if (
+    funds === "paynoval" &&
+    destination === "mobilemoney" &&
+    ["send", "withdraw"].includes(action)
+  ) {
     return OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT;
   }
 
-  if (funds === "paynoval" && destination === "bank" && (action === "send" || action === "withdraw")) {
+  if (
+    funds === "paynoval" &&
+    destination === "bank" &&
+    ["send", "withdraw"].includes(action)
+  ) {
     return OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT;
   }
 
   if (
     funds === "paynoval" &&
-    ["card", "stripe", "visa_direct"].includes(destination) &&
-    (action === "send" || action === "withdraw")
+    ["card", "visa", "stripe", "visa_direct"].includes(destination) &&
+    ["send", "withdraw"].includes(action)
   ) {
     return OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT;
   }
 
-  if (funds === "mobilemoney" && destination === "paynoval" && action === "deposit") {
+  if (
+    funds === "mobilemoney" &&
+    destination === "paynoval" &&
+    action === "deposit"
+  ) {
     return INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL;
   }
 
-  if (funds === "bank" && destination === "paynoval" && action === "deposit") {
+  if (
+    funds === "bank" &&
+    destination === "paynoval" &&
+    action === "deposit"
+  ) {
     return INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL;
   }
 
   if (
-    ["card", "stripe", "visa_direct"].includes(funds) &&
+    ["card", "visa", "stripe", "visa_direct"].includes(funds) &&
     destination === "paynoval" &&
     action === "deposit"
   ) {
@@ -126,80 +258,104 @@ function isExternalFlow(flow) {
 }
 
 function resolveProviderForFlow(flow, body = {}) {
-  const hinted = low(
+  const hinted = normalizeProviderAlias(
     body.provider ||
       body.providerSelected ||
-      body.metadata?.provider ||
+      body.operatorKey ||
+      body.operatorName ||
       body.operator ||
+      body.metadata?.provider ||
+      body.meta?.provider ||
+      body.beneficiary?.operatorKey ||
+      body.beneficiary?.operatorName ||
+      body.recipientInfo?.operatorKey ||
+      body.recipientInfo?.operatorName ||
       ""
   );
 
-  if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT) return "mobilemoney";
-  if (flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL) return "mobilemoney";
+  if (
+    flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT ||
+    flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
+  ) {
+    if (["orange", "mtn", "moov", "wave"].includes(hinted)) return hinted;
+    return "mobilemoney";
+  }
 
-  if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT) return "bank";
-  if (flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL) return "bank";
+  if (
+    flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT ||
+    flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
+  ) {
+    return "bank";
+  }
 
-  if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) return hinted === "visa_direct" ? "visa_direct" : "stripe";
-  if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) return hinted === "stripe" ? "stripe" : "visa_direct";
+  if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
+    if (hinted === "stripe") return "stripe";
+    return "visa_direct";
+  }
+
+  if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
+    if (hinted === "visa_direct") return "visa_direct";
+    return "stripe";
+  }
 
   return hinted || "paynoval";
 }
 
 function resolveCountries(body = {}, fallbackCountry = "") {
-  const country = String(
+  const rawCountry =
     body.country ||
-      body.destinationCountry ||
-      body.toCountry ||
-      body.fromCountry ||
-      fallbackCountry ||
-      ""
-  ).trim();
+    body.destinationCountry ||
+    body.toCountry ||
+    body.targetCountry ||
+    body.fromCountry ||
+    body.sourceCountry ||
+    fallbackCountry ||
+    "";
 
-  const fromCountry = String(body.fromCountry || fallbackCountry || country || "").trim();
-  const toCountry = String(body.toCountry || body.destinationCountry || country || "").trim();
+  const rawFrom =
+    body.fromCountry ||
+    body.sourceCountry ||
+    fallbackCountry ||
+    rawCountry ||
+    "";
 
-  return { country, fromCountry, toCountry };
+  const rawTo =
+    body.toCountry ||
+    body.targetCountry ||
+    body.destinationCountry ||
+    fallbackCountry ||
+    rawCountry ||
+    "";
+
+  return {
+    country: normalizeCountryISO(rawCountry),
+    fromCountry: normalizeCountryISO(rawFrom),
+    toCountry: normalizeCountryISO(rawTo),
+  };
 }
 
 function resolveCurrencies({ body = {}, normCur, country = "" }) {
+  const sourceRaw =
+    body.senderCurrencyCode ||
+    body.currencySource ||
+    body.fromCurrency ||
+    body.senderCurrencySymbol ||
+    body.currency ||
+    "";
+
+  const targetRaw =
+    body.localCurrencyCode ||
+    body.currencyTarget ||
+    body.toCurrency ||
+    body.localCurrencySymbol ||
+    body.currency ||
+    "";
+
   const currencySourceISO =
-    normCur(
-      body.senderCurrencyCode ||
-        body.currencySource ||
-        body.fromCurrency ||
-        body.senderCurrencySymbol ||
-        body.currency,
-      country
-    ) ||
-    String(
-      body.senderCurrencyCode ||
-        body.currencySource ||
-        body.fromCurrency ||
-        body.senderCurrencySymbol ||
-        body.currency ||
-        ""
-    )
-      .trim()
-      .toUpperCase();
+    normCur(sourceRaw, country) || up(sourceRaw);
 
   const currencyTargetISO =
-    normCur(
-      body.localCurrencyCode ||
-        body.currencyTarget ||
-        body.toCurrency ||
-        body.localCurrencySymbol,
-      country
-    ) ||
-    String(
-      body.localCurrencyCode ||
-        body.currencyTarget ||
-        body.toCurrency ||
-        body.localCurrencySymbol ||
-        ""
-    )
-      .trim()
-      .toUpperCase();
+    normCur(targetRaw, country) || up(targetRaw);
 
   if (!currencySourceISO || !currencyTargetISO) {
     throw createError(400, "Devises source/cible invalides");
@@ -214,8 +370,12 @@ function buildExternalMetadata({ flow, provider, body = {}, extra = {} }) {
   return sanitizePlainObject({
     provider,
     providerSelected: provider,
+    operator: body.operator || null,
+    operatorName: body.operatorName || null,
+    operatorKey: body.operatorKey || null,
     method: body.method || null,
-    txType: body.txType || null,
+    methodType: body.methodType || null,
+    txType: body.txType || body.transactionType || null,
     action: body.action || null,
     flow,
     requestSnapshot: safeBody,
@@ -229,7 +389,21 @@ function buildExternalMeta({ senderUser = null, receiverUser = null, body = {}, 
     senderUserId: senderUser?._id || null,
     receiverUserId: receiverUser?._id || null,
     requestOrigin: "tx-core",
-    recipientInfo: redactSensitiveFields(body.recipientInfo || {}),
+    recipientInfo: redactSensitiveFields(
+      body.recipientInfo || body.beneficiary || {}
+    ),
+    funds: body.funds || null,
+    destination: body.destination || null,
+    fundsUi: body.fundsUi || null,
+    destinationUi: body.destinationUi || null,
+    quoteId: body.quoteId || null,
+    pricingId: body.pricingId || body.pricingLockId || null,
+    effectivePricingId:
+      body.effectivePricingId ||
+      body.pricingId ||
+      body.pricingLockId ||
+      body.quoteId ||
+      null,
     ...extra,
   });
 }

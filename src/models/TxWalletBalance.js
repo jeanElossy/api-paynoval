@@ -1,3 +1,5 @@
+// File: models/TxWalletBalance.js
+
 "use strict";
 
 const mongoose = require("mongoose");

@@ -851,7 +851,6 @@
 
 
 
-
 "use strict";
 
 const createError = require("http-errors");
@@ -921,6 +920,7 @@ function pickExternalDisplayName(body = {}) {
       body.cardHolder ||
       body.toName ||
       body.recipientInfo?.name ||
+      body.beneficiary?.name ||
       "Bénéficiaire externe"
   );
 }
@@ -935,58 +935,158 @@ function pickExternalRef(body = {}) {
   );
 }
 
+function pickExternalRecipientEmail(body = {}) {
+  const email =
+    body.toEmail ||
+    body.recipientEmail ||
+    body.recipientInfo?.email ||
+    body.recipientInfo?.recipientEmail ||
+    body.beneficiary?.email ||
+    "";
+
+  if (!isEmailLike(email)) return null;
+  return String(email).trim().toLowerCase();
+}
+
+function normalizeMethodForPricing(body = {}, provider = "") {
+  const method = String(body.method || "").trim().toUpperCase();
+  if (method) return method;
+
+  const methodType = String(body.methodType || "").trim().toLowerCase();
+
+  if (methodType === "internal") return "INTERNAL";
+  if (methodType === "bank") return "BANK";
+  if (methodType === "visa" || methodType === "card") return "VISA";
+
+  if (
+    ["mobilemoney", "mobile_money", "momo", "mobilemoneyaccount", "mobile_money_account"].includes(
+      methodType
+    )
+  ) {
+    return "MOBILE_MONEY";
+  }
+
+  if (provider) return String(provider).trim().toUpperCase();
+  return "MOBILE_MONEY";
+}
+
+function normalizeTxTypeForPricing(body = {}) {
+  const txType = String(body.txType || body.transactionType || "").trim().toUpperCase();
+  if (txType) return txType;
+
+  const action = String(body.action || "").trim().toLowerCase();
+  if (action === "deposit") return "DEPOSIT";
+  if (action === "withdraw") return "WITHDRAW";
+
+  return "TRANSFER";
+}
+
 function buildRecipientExternalMeta(flow, body = {}) {
   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT) {
     return {
-      phoneNumber: body.phoneNumber || body.toPhone || null,
-      operator: body.operator || body.metadata?.provider || null,
-      recipientName: body.recipientName || body.recipientInfo?.name || null,
+      phoneNumber:
+        body.phoneNumber ||
+        body.toPhone ||
+        body.recipientPhone ||
+        body.recipient ||
+        body.beneficiary?.phoneNumber ||
+        null,
+      operator:
+        body.operator ||
+        body.operatorName ||
+        body.metadata?.provider ||
+        body.meta?.provider ||
+        null,
+      recipientName:
+        body.recipientName ||
+        body.toName ||
+        body.recipientInfo?.name ||
+        body.beneficiary?.name ||
+        null,
     };
   }
 
   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT) {
     return {
-      iban: body.iban || null,
-      swift: body.swift || null,
-      bankName: body.bankName || null,
-      accountHolder: body.accountHolder || null,
+      iban: body.iban || body.beneficiary?.iban || null,
+      swift: body.swift || body.beneficiary?.swift || null,
+      bankName: body.bankName || body.beneficiary?.bankName || null,
+      accountHolder:
+        body.accountHolder ||
+        body.recipientName ||
+        body.beneficiary?.accountHolder ||
+        body.beneficiary?.name ||
+        null,
       accountNumberLast4: body.accountNumber
         ? String(body.accountNumber).slice(-4)
+        : body.bankAccountNumber
+        ? String(body.bankAccountNumber).slice(-4)
+        : body.beneficiary?.accountNumber
+        ? String(body.beneficiary.accountNumber).slice(-4)
         : null,
     };
   }
 
   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
     return {
-      maskedCardNumber: maskPan(body.cardNumber),
-      cardHolder: body.cardHolder || body.toName || null,
+      maskedCardNumber: maskPan(body.cardNumber || body.beneficiary?.cardNumber),
+      cardHolder:
+        body.cardHolder ||
+        body.toName ||
+        body.recipientName ||
+        body.beneficiary?.cardHolder ||
+        body.beneficiary?.name ||
+        null,
       providerHint: body.provider || body.providerSelected || null,
     };
   }
 
   if (flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL) {
     return {
-      phoneNumber: body.phoneNumber || body.fromPhone || null,
-      operator: body.operator || body.metadata?.provider || null,
+      phoneNumber:
+        body.phoneNumber ||
+        body.fromPhone ||
+        body.recipientPhone ||
+        body.beneficiary?.phoneNumber ||
+        null,
+      operator:
+        body.operator ||
+        body.operatorName ||
+        body.metadata?.provider ||
+        body.meta?.provider ||
+        null,
     };
   }
 
   if (flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL) {
     return {
-      iban: body.iban || null,
-      swift: body.swift || null,
-      bankName: body.bankName || null,
-      accountHolder: body.accountHolder || null,
+      iban: body.iban || body.beneficiary?.iban || null,
+      swift: body.swift || body.beneficiary?.swift || null,
+      bankName: body.bankName || body.beneficiary?.bankName || null,
+      accountHolder:
+        body.accountHolder ||
+        body.senderName ||
+        body.beneficiary?.accountHolder ||
+        body.beneficiary?.name ||
+        null,
       accountNumberLast4: body.accountNumber
         ? String(body.accountNumber).slice(-4)
+        : body.bankAccountNumber
+        ? String(body.bankAccountNumber).slice(-4)
+        : body.beneficiary?.accountNumber
+        ? String(body.beneficiary.accountNumber).slice(-4)
         : null,
     };
   }
 
   if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
     return {
-      maskedCardNumber: maskPan(body.cardNumber),
-      cardHolder: body.cardHolder || null,
+      maskedCardNumber: maskPan(body.cardNumber || body.beneficiary?.cardNumber),
+      cardHolder:
+        body.cardHolder ||
+        body.senderName ||
+        body.beneficiary?.cardHolder ||
+        null,
       providerHint: body.provider || body.providerSelected || null,
     };
   }
@@ -994,7 +1094,15 @@ function buildRecipientExternalMeta(flow, body = {}) {
   return {};
 }
 
-async function buildPricingContext({ req, body, amount, country, provider, currencySourceISO, currencyTargetISO }) {
+async function buildPricingContext({
+  req,
+  body,
+  amount,
+  country,
+  provider,
+  currencySourceISO,
+  currencyTargetISO,
+}) {
   const authHeader = ensureBearer(req);
 
   const pricingInput = pickBodyPricingInput({
@@ -1003,10 +1111,10 @@ async function buildPricingContext({ req, body, amount, country, provider, curre
     fromCurrency: currencySourceISO,
     toCurrency: currencyTargetISO,
     provider,
-    method: body.method || provider.toUpperCase(),
-    txType: body.txType || (body.action === "deposit" ? "DEPOSIT" : body.action === "withdraw" ? "WITHDRAW" : "TRANSFER"),
-    fromCountry: body.fromCountry || country,
-    toCountry: body.toCountry || body.destinationCountry || country,
+    method: normalizeMethodForPricing(body, provider),
+    txType: normalizeTxTypeForPricing(body),
+    fromCountry: body.fromCountry || body.sourceCountry || country,
+    toCountry: body.toCountry || body.targetCountry || body.destinationCountry || country,
   });
 
   let pricingPayload;
@@ -1127,8 +1235,7 @@ async function initiateOutboundExternal(req, res, next) {
     await validationService.detectBasicFraud({
       sender: senderId,
       receiverEmail:
-        body.toEmail ||
-        body.recipientEmail ||
+        pickExternalRecipientEmail(body) ||
         externalRecipientMeta.phoneNumber ||
         externalRecipientMeta.iban ||
         externalRecipientMeta.maskedCardNumber ||
@@ -1143,7 +1250,12 @@ async function initiateOutboundExternal(req, res, next) {
     req.body.localCurrencySymbol = currencyTargetISO;
     req.body.fromCountry = fromCountry;
     req.body.toCountry = toCountry;
+    req.body.sourceCountry = fromCountry;
+    req.body.targetCountry = toCountry;
     req.body.country = resolvedCountry;
+    req.body.description = sanitize(description);
+    req.body.securityQuestion = q;
+    req.body.securityAnswer = aRaw;
 
     const pricingCtx = await buildPricingContext({
       req,
@@ -1155,7 +1267,7 @@ async function initiateOutboundExternal(req, res, next) {
       currencyTargetISO,
     });
 
-    const reference = await generateTransactionRef();
+    const reference = sanitize(body.reference) || (await generateTransactionRef());
     const securityAnswerHash = sha256Hex(aRaw);
     const amlSnapshot = req.aml || null;
 
@@ -1168,6 +1280,14 @@ async function initiateOutboundExternal(req, res, next) {
           entry: "external_payout.pending",
           requestOrigin: "tx-core",
           externalRecipient: externalRecipientMeta,
+          description: sanitize(description),
+          securityQuestion: q,
+          effectivePricingId:
+            body.effectivePricingId ||
+            body.pricingLockId ||
+            body.pricingId ||
+            body.quoteId ||
+            null,
         },
       }),
     };
@@ -1202,9 +1322,7 @@ async function initiateOutboundExternal(req, res, next) {
           senderName: senderUser.fullName,
           senderEmail: senderUser.email,
           nameDestinataire: pickExternalDisplayName(body),
-          recipientEmail: isEmailLike(body.toEmail || body.recipientEmail || "")
-            ? String(body.toEmail || body.recipientEmail).trim().toLowerCase()
-            : null,
+          recipientEmail: pickExternalRecipientEmail(body),
           destination:
             flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
               ? "mobilemoney"
@@ -1213,7 +1331,7 @@ async function initiateOutboundExternal(req, res, next) {
               : "visa_direct",
           funds: "paynoval",
           provider,
-          operator: body.operator || txMetadata?.provider || null,
+          operator: body.operator || body.operatorName || txMetadata?.provider || null,
           country: sanitize(resolvedCountry),
           amount: dec2(pricingCtx.amountSourceStd),
           transactionFees: dec2(pricingCtx.feeSourceStd),
@@ -1423,7 +1541,13 @@ async function initiateInboundExternal(req, res, next) {
     });
 
     await validationService.detectBasicFraud({
-      sender: body.phoneNumber || body.iban || body.cardHolder || body.accountHolder || "external",
+      sender:
+        body.phoneNumber ||
+        body.fromPhone ||
+        body.iban ||
+        body.cardHolder ||
+        body.accountHolder ||
+        "external",
       receiverEmail: receiverUser.email,
       amount: amt,
       currency: currencySourceISO,
@@ -1435,7 +1559,10 @@ async function initiateInboundExternal(req, res, next) {
     req.body.localCurrencySymbol = currencyTargetISO;
     req.body.fromCountry = fromCountry;
     req.body.toCountry = toCountry;
+    req.body.sourceCountry = fromCountry;
+    req.body.targetCountry = toCountry;
     req.body.country = resolvedCountry;
+    req.body.description = sanitize(description);
 
     const pricingCtx = await buildPricingContext({
       req,
@@ -1447,7 +1574,7 @@ async function initiateInboundExternal(req, res, next) {
       currencyTargetISO,
     });
 
-    const reference = await generateTransactionRef();
+    const reference = sanitize(body.reference) || (await generateTransactionRef());
     const amlSnapshot = req.aml || null;
 
     const txMeta = {
@@ -1459,6 +1586,13 @@ async function initiateInboundExternal(req, res, next) {
           entry: "external_collection.pending",
           requestOrigin: "tx-core",
           externalSource: externalSourceMeta,
+          description: sanitize(description),
+          effectivePricingId:
+            body.effectivePricingId ||
+            body.pricingLockId ||
+            body.pricingId ||
+            body.quoteId ||
+            null,
         },
       }),
     };
@@ -1509,7 +1643,7 @@ async function initiateInboundExternal(req, res, next) {
               ? "visa_direct"
               : "stripe",
           provider,
-          operator: body.operator || txMetadata?.provider || null,
+          operator: body.operator || body.operatorName || txMetadata?.provider || null,
           country: sanitize(resolvedCountry),
           amount: dec2(pricingCtx.amountSourceStd),
           transactionFees: dec2(pricingCtx.feeSourceStd),

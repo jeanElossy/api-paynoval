@@ -365,7 +365,8 @@ const baseRateLimitConfig = {
     // ✅ settlements internes critiques
     if (
       req.path === "/api/v1/cagnotte/participation/settle" ||
-      req.path === "/api/v1/cagnotte/vault-withdrawals/settle"
+      req.path === "/api/v1/cagnotte/vault-withdrawals/settle" ||
+      req.path === "/api/v1/cagnotte/closure-fees/settle"
     ) {
       return true;
     }
@@ -457,6 +458,7 @@ async function bootstrap() {
     const internalTxRoutes = require("./routes/internalTransactions.routes");
     const cagnotteSettlementRoutes = require("./routes/cagnotteSettlementRoutes");
     const cagnotteVaultSettlementRoutes = require("./routes/cagnotteVaultSettlementRoutes");
+    const cagnotteClosureFeesRoutes = require("./routes/cagnotteClosureFeesRoutes");
 
     // Webhooks AVANT sanitizers
     app.use("/webhooks/providers", providerWebhookRoutes);
@@ -484,6 +486,7 @@ async function bootstrap() {
     // Cagnotte settlements
     app.use("/api/v1/cagnotte", cagnotteSettlementRoutes);
     app.use("/api/v1/cagnotte", cagnotteVaultSettlementRoutes);
+    app.use("/api/v1/cagnotte", cagnotteClosureFeesRoutes);
 
     app.get("/api/v1/health", (_req, res) =>
       res.status(200).json({
@@ -507,6 +510,7 @@ async function bootstrap() {
       logger.info(`📘 Docs: /docs  —  Spec: /openapi.yaml /openapi.json`);
       logger.info("🔐 Webhooks providers: /webhooks/providers/:rail/:provider");
       logger.info("💰 Cagnotte TX settlement: /api/v1/cagnotte/participation/settle");
+      logger.info("💰 Cagnotte close TX settlement: /api/v1/cagnotte/closure-fees/settle");
       logger.info(
         "🏦 Cagnotte Vault TX settlement: /api/v1/cagnotte/vault-withdrawals/settle"
       );
