@@ -15,7 +15,7 @@
 //   assertTransition,
 // } = require("../shared/runtime");
 
-// const { notifyParties } = require("../shared/notifications");
+// const { notifyTransactionEvent } = require("../transactionNotificationService");
 
 // const {
 //   sanitize,
@@ -176,7 +176,7 @@
 //         tx.providerStatus = "LOCKED_TOO_MANY_ATTEMPTS";
 //         await tx.save(sessOpts);
 
-//         await notifyParties(tx, "locked", session, tx.senderCurrencySymbol);
+//         await notifyTransactionEvent(tx, "locked", session, tx.senderCurrencySymbol);
 
 //         throw createError(423, `Réponse incorrecte. Transaction bloquée ${LOCK_MINUTES} min.`);
 //       }
@@ -215,12 +215,6 @@
 //       tx.providerStatus = "FUNDS_CAPTURED";
 //     }
 
-//     /**
-//      * FLOW INTERNE
-//      * - crédit receiver local
-//      * - crédit revenu admin
-//      * - status = confirmed
-//      */
 //     if (isInternalTransfer(tx)) {
 //       if (!tx.beneficiaryCredited) {
 //         await creditReceiverFunds({
@@ -263,7 +257,7 @@
 //       tx.providerStatus = "SUCCESS";
 
 //       await tx.save(sessOpts);
-//       await notifyParties(tx, "confirmed", session, sourceCurrency);
+//       await notifyTransactionEvent(tx, "confirmed", session, sourceCurrency);
 
 //       if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
 //       session.endSession();
@@ -285,20 +279,13 @@
 //       });
 //     }
 
-//     /**
-//      * PAYOUT EXTERNE
-//      * - on capture la réserve
-//      * - on NE crédite PAS de bénéficiaire local
-//      * - on NE confirme PAS définitivement ici
-//      * - le succès final doit venir du provider / webhook
-//      */
 //     tx.status = "processing";
 //     tx.providerStatus = tx.providerReference
 //       ? "PROVIDER_SUBMITTED"
 //       : "CONFIRMED_BY_USER_PENDING_PROVIDER";
 //     await tx.save(sessOpts);
 
-//     await notifyParties(tx, "processing", session, sourceCurrency);
+//     await notifyTransactionEvent(tx, "processing", session, sourceCurrency);
 
 //     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
 //     session.endSession();
@@ -330,8 +317,6 @@
 
 
 
-
-
 "use strict";
 
 const createError = require("http-errors");
@@ -350,6 +335,7 @@ const {
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
+const { syncReferralAfterConfirmedTx } = require("../services/referralSyncService");
 
 const {
   sanitize,
@@ -386,6 +372,15 @@ function isInboundExternalCollection(tx) {
   return INBOUND_EXTERNAL_FLOWS.has(String(tx?.flow || ""));
 }
 
+function buildReferralSyncError(err) {
+  return {
+    ok: false,
+    skipped: true,
+    reason: "REFERRAL_SYNC_EXCEPTION",
+    error: err?.message || "Referral sync failed",
+  };
+}
+
 async function confirmController(req, res, next) {
   const session = await startTxSession();
 
@@ -408,6 +403,7 @@ async function confirmController(req, res, next) {
 
     const tx = await Transaction.findById(transactionId)
       .select([
+        "+userId",
         "+flow",
         "+provider",
         "+providerStatus",
@@ -437,6 +433,8 @@ async function confirmController(req, res, next) {
         "+fundsReserved",
         "+fundsCaptured",
         "+beneficiaryCredited",
+        "+reference",
+        "+confirmedAt",
       ])
       .session(sessOpts.session || null);
 
@@ -593,8 +591,17 @@ async function confirmController(req, res, next) {
       await tx.save(sessOpts);
       await notifyTransactionEvent(tx, "confirmed", session, sourceCurrency);
 
-      if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+      if (CAN_USE_SHARED_SESSION) {
+        await session.commitTransaction();
+      }
       session.endSession();
+
+      let referralSync = null;
+      try {
+        referralSync = await syncReferralAfterConfirmedTx(tx);
+      } catch (refErr) {
+        referralSync = buildReferralSyncError(refErr);
+      }
 
       return res.json({
         success: true,
@@ -610,6 +617,7 @@ async function confirmController(req, res, next) {
         fundsCaptured: !!tx.fundsCaptured,
         beneficiaryCredited: !!tx.beneficiaryCredited,
         adminRevenueCredited: !!tx.adminRevenueCredited,
+        referralSync,
       });
     }
 
@@ -617,11 +625,13 @@ async function confirmController(req, res, next) {
     tx.providerStatus = tx.providerReference
       ? "PROVIDER_SUBMITTED"
       : "CONFIRMED_BY_USER_PENDING_PROVIDER";
-    await tx.save(sessOpts);
 
+    await tx.save(sessOpts);
     await notifyTransactionEvent(tx, "processing", session, sourceCurrency);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) {
+      await session.commitTransaction();
+    }
     session.endSession();
 
     return res.status(202).json({
