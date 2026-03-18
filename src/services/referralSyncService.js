@@ -1,7 +1,7 @@
 "use strict";
 
-const { Transaction } = require("../shared/runtime");
-const { toFloat } = require("../shared/helpers");
+const { Transaction } = require("./transactions/shared/runtime");
+const { toFloat } = require("./transactions/shared/helpers");
 
 const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
 const OUTBOUND_EXTERNAL_FLOWS = new Set([
