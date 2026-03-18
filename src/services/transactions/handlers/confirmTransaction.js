@@ -335,7 +335,7 @@ const {
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
-const { syncReferralAfterConfirmedTx } = require("../services/referralSyncService");
+const { syncReferralAfterConfirmedTx } = require("../../services/referralSyncService");
 
 const {
   sanitize,
