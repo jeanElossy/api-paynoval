@@ -391,7 +391,7 @@ const {
   isOutboundExternalFlow,
   isInboundExternalFlow,
 } = require("./flowHelpers");
-const { syncReferralAfterConfirmedTx } = require("../services/referralSyncService");
+const { syncReferralAfterConfirmedTx } = require("../../referralSyncService");
 
 function low(v) {
   return String(v || "").trim().toLowerCase();
