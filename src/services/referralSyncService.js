@@ -276,6 +276,7 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+
 function logReferral(label, payload) {
   try {
     console.log(`[REFERRAL][TX-CORE] ${label} =`, JSON.stringify(payload, null, 2));
