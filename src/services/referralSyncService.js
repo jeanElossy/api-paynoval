@@ -276,6 +276,14 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function logReferral(label, payload) {
+  try {
+    console.log(`[REFERRAL][TX-CORE] ${label} =`, JSON.stringify(payload, null, 2));
+  } catch (err) {
+    console.log(`[REFERRAL][TX-CORE] ${label} =`, payload);
+  }
+}
+
 function getPrincipalReferralBaseUrl() {
   return normalizeBaseUrl(
     process.env.BACKEND_PRINCIPAL_URL ||
@@ -301,6 +309,14 @@ async function postJsonWithTimeout(url, payload, headers = {}, timeoutMs = 10000
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    logReferral("HTTP_POST.url", url);
+    logReferral("HTTP_POST.payload", payload);
+    logReferral("HTTP_POST.headers", {
+      ...headers,
+      "x-internal-token": headers?.["x-internal-token"] ? "***masked***" : undefined,
+    });
+    logReferral("HTTP_POST.timeoutMs", timeoutMs);
+
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -320,11 +336,23 @@ async function postJsonWithTimeout(url, payload, headers = {}, timeoutMs = 10000
       json = { raw: text };
     }
 
-    return {
+    const responsePayload = {
       ok: res.ok,
       status: res.status,
       data: json,
     };
+
+    logReferral("HTTP_POST.response", responsePayload);
+
+    return responsePayload;
+  } catch (error) {
+    logReferral("HTTP_POST.error", {
+      message: error?.message || "UNKNOWN_ERROR",
+      name: error?.name || "",
+      stack: error?.stack || "",
+      url,
+    });
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -341,12 +369,7 @@ function getSourceAmount(tx) {
 
 function getTargetAmount(tx) {
   return safeNumber(
-    toFloat(
-      tx?.localAmount ??
-        tx?.amountTarget ??
-        tx?.targetAmount ??
-        0
-    )
+    toFloat(tx?.localAmount ?? tx?.amountTarget ?? tx?.targetAmount ?? 0)
   );
 }
 
@@ -378,7 +401,7 @@ async function getConfirmedReferralStats({
   triggerTargetAmount = 0,
 }) {
   if (!actorUserId) {
-    return {
+    const emptyStats = {
       confirmedCount: 0,
 
       source: {
@@ -395,18 +418,28 @@ async function getConfirmedReferralStats({
         currency: normalizeCurrency(targetCurrency),
       },
 
-      // compat ancien backend
       confirmedTotal: 0,
       largestConfirmedAmount: 0,
       lastConfirmedAmount: safeNumber(triggerSourceAmount),
       currency: normalizeCurrency(sourceCurrency),
     };
+
+    logReferral("getConfirmedReferralStats.actor_missing", {
+      actorUserId,
+      sourceCurrency,
+      targetCurrency,
+      triggerSourceAmount,
+      triggerTargetAmount,
+      stats: emptyStats,
+    });
+
+    return emptyStats;
   }
 
   const normalizedSourceCurrency = normalizeCurrency(sourceCurrency);
   const normalizedTargetCurrency = normalizeCurrency(targetCurrency);
 
-  const rows = await Transaction.aggregate([
+  const pipeline = [
     {
       $match: {
         status: "confirmed",
@@ -450,7 +483,20 @@ async function getConfirmedReferralStats({
         },
       },
     },
-  ]);
+  ];
+
+  logReferral("getConfirmedReferralStats.query", {
+    actorUserId,
+    sourceCurrency: normalizedSourceCurrency,
+    targetCurrency: normalizedTargetCurrency,
+    triggerSourceAmount,
+    triggerTargetAmount,
+    flows: Array.from(BONUS_COUNTABLE_FLOWS),
+    pipeline,
+  });
+
+  const rows = await Transaction.aggregate(pipeline);
+  logReferral("getConfirmedReferralStats.aggregate_rows", rows);
 
   const row = rows?.[0] || {};
 
@@ -463,7 +509,7 @@ async function getConfirmedReferralStats({
   const sourceTotal = safeNumber(row.sourceTotal);
   const targetTotal = safeNumber(row.targetTotal);
 
-  return {
+  const finalStats = {
     confirmedCount: safeNumber(row.confirmedCount),
 
     source: {
@@ -480,41 +526,60 @@ async function getConfirmedReferralStats({
       currency: normalizedTargetCurrency,
     },
 
-    // compat ancien backend
     confirmedTotal: sourceTotal,
-    largestConfirmedAmount: Math.max(sourceLargestFromDb, normalizedTriggerSourceAmount),
+    largestConfirmedAmount: Math.max(
+      sourceLargestFromDb,
+      normalizedTriggerSourceAmount
+    ),
     lastConfirmedAmount: normalizedTriggerSourceAmount,
     currency: normalizedSourceCurrency,
   };
+
+  logReferral("getConfirmedReferralStats.result", finalStats);
+
+  return finalStats;
 }
 
 async function syncReferralAfterConfirmedTx(tx) {
+  logReferral("syncReferralAfterConfirmedTx.input_tx", tx);
+
   const baseUrl = getPrincipalReferralBaseUrl();
   const internalToken = getPrincipalInternalToken();
 
+  logReferral("syncReferralAfterConfirmedTx.env", {
+    baseUrl,
+    hasInternalToken: !!internalToken,
+  });
+
   if (!baseUrl) {
-    return {
+    const result = {
       ok: false,
       skipped: true,
       reason: "PRINCIPAL_BASE_URL_MISSING",
     };
+    logReferral("syncReferralAfterConfirmedTx.skip", result);
+    return result;
   }
 
   if (!internalToken) {
-    return {
+    const result = {
       ok: false,
       skipped: true,
       reason: "PRINCIPAL_INTERNAL_TOKEN_MISSING",
     };
+    logReferral("syncReferralAfterConfirmedTx.skip", result);
+    return result;
   }
 
   const actorUserId = getReferralActorUserId(tx);
   if (!actorUserId) {
-    return {
+    const result = {
       ok: false,
       skipped: true,
       reason: "REFERRAL_ACTOR_USER_MISSING",
     };
+    logReferral("syncReferralAfterConfirmedTx.skip", result);
+    return result;
   }
 
   const triggerTxId = String(tx?._id || "");
@@ -547,12 +612,17 @@ async function syncReferralAfterConfirmedTx(tx) {
     },
   };
 
+  logReferral("confirmPayload", confirmPayload);
+
   const confirmResp = await postJsonWithTimeout(
     `${baseUrl}/internal/referral/on-transaction-confirm`,
     confirmPayload,
     headers,
     10000
   );
+
+  logReferral("confirmResp", confirmResp);
+  logReferral("confirmResp.data", confirmResp?.data);
 
   const stats = await getConfirmedReferralStats({
     actorUserId,
@@ -561,6 +631,8 @@ async function syncReferralAfterConfirmedTx(tx) {
     triggerSourceAmount,
     triggerTargetAmount,
   });
+
+  logReferral("stats", stats);
 
   const awardPayload = {
     refereeId: actorUserId,
@@ -581,6 +653,8 @@ async function syncReferralAfterConfirmedTx(tx) {
     stats,
   };
 
+  logReferral("awardPayload", awardPayload);
+
   const awardResp = await postJsonWithTimeout(
     `${baseUrl}/internal/referral/award-bonus`,
     awardPayload,
@@ -588,7 +662,10 @@ async function syncReferralAfterConfirmedTx(tx) {
     10000
   );
 
-  return {
+  logReferral("awardResp", awardResp);
+  logReferral("awardResp.data", awardResp?.data);
+
+  const result = {
     ok: confirmResp.ok && awardResp.ok,
     actorUserId,
     stats,
@@ -603,6 +680,10 @@ async function syncReferralAfterConfirmedTx(tx) {
       data: awardResp.data,
     },
   };
+
+  logReferral("syncReferralAfterConfirmedTx.result", result);
+
+  return result;
 }
 
 module.exports = {
