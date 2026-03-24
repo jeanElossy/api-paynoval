@@ -25,14 +25,18 @@ const {
   creditReceiverFunds,
   debitReceiverFunds,
   refundSenderFunds,
-  creditAdminRevenue,
+  creditTreasuryRevenue,
   chargeCancellationFee,
   createLedgerEntry,
+  resolveTreasuryFromSystemType,
+  getTreasuryUserIdBySystemType,
+  normalizeTreasurySystemType,
+  TREASURY_SYSTEM_TYPES,
 } = require("../../../services/ledgerService");
 
 const {
   normalizePricingSnapshot,
-  buildAdminRevenueBreakdown,
+  buildTreasuryRevenueBreakdown,
   roundMoney,
 } = require("../../../services/pricingSnapshotNormalizer");
 
@@ -73,20 +77,12 @@ function getDeviceModel() {
   return _Device;
 }
 
-/**
- * ✅ IMPORTANT
- * Les notifications visibles par l'utilisateur doivent aller dans la base principale.
- */
 function getNotificationModel() {
   if (_Notification) return _Notification;
   _Notification = require("../../../models/Notification")(getUsersConnectionSafe());
   return _Notification;
 }
 
-/**
- * ✅ IMPORTANT
- * L'Outbox consommée par le worker doit aussi être dans la base principale.
- */
 function getOutboxModel() {
   if (_Outbox) return _Outbox;
   _Outbox = require("../../../models/Outbox")(getUsersConnectionSafe());
@@ -114,6 +110,22 @@ function getLedgerEntryModel() {
 const PRINCIPAL_URL = config.principalUrl;
 const GATEWAY_URL = config.gatewayUrl;
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
+
+/* -------------------------------------------------------------------------- */
+/* Treasury runtime                                                           */
+/* -------------------------------------------------------------------------- */
+
+function clean(value) {
+  return String(value || "").trim();
+}
+
+const TREASURY_ENV_BY_SYSTEM_TYPE = Object.freeze({
+  REFERRAL_TREASURY: clean(process.env.REFERRAL_TREASURY_USER_ID),
+  FEES_TREASURY: clean(process.env.FEES_TREASURY_USER_ID),
+  OPERATIONS_TREASURY: clean(process.env.OPERATIONS_TREASURY_USER_ID),
+  CAGNOTTE_FEES_TREASURY: clean(process.env.CAGNOTTE_FEES_TREASURY_USER_ID),
+  FX_MARGIN_TREASURY: clean(process.env.FX_MARGIN_TREASURY_USER_ID),
+});
 
 function sameMongoClient(connA, connB) {
   try {
@@ -163,6 +175,24 @@ async function safeAbort(session) {
   } catch {}
 }
 
+function assertTreasuryConfig() {
+  const missing = [];
+
+  for (const systemType of Object.keys(TREASURY_ENV_BY_SYSTEM_TYPE)) {
+    if (!TREASURY_ENV_BY_SYSTEM_TYPE[systemType]) {
+      missing.push(systemType);
+    }
+  }
+
+  if (missing.length) {
+    throw new Error(
+      `Variables treasury manquantes: ${missing.join(", ")}`
+    );
+  }
+
+  return true;
+}
+
 function getRuntime() {
   return {
     mongoose,
@@ -193,12 +223,19 @@ function getRuntime() {
     creditReceiverFunds,
     debitReceiverFunds,
     refundSenderFunds,
-    creditAdminRevenue,
+    creditTreasuryRevenue,
     chargeCancellationFee,
     createLedgerEntry,
 
+    resolveTreasuryFromSystemType,
+    getTreasuryUserIdBySystemType,
+    normalizeTreasurySystemType,
+    TREASURY_SYSTEM_TYPES,
+    TREASURY_ENV_BY_SYSTEM_TYPE,
+    assertTreasuryConfig,
+
     normalizePricingSnapshot,
-    buildAdminRevenueBreakdown,
+    buildTreasuryRevenueBreakdown,
     roundMoney,
 
     assertTransition,
@@ -236,12 +273,19 @@ Object.defineProperties(runtime, {
   creditReceiverFunds: { get: () => creditReceiverFunds },
   debitReceiverFunds: { get: () => debitReceiverFunds },
   refundSenderFunds: { get: () => refundSenderFunds },
-  creditAdminRevenue: { get: () => creditAdminRevenue },
+  creditTreasuryRevenue: { get: () => creditTreasuryRevenue },
   chargeCancellationFee: { get: () => chargeCancellationFee },
   createLedgerEntry: { get: () => createLedgerEntry },
 
+  resolveTreasuryFromSystemType: { get: () => resolveTreasuryFromSystemType },
+  getTreasuryUserIdBySystemType: { get: () => getTreasuryUserIdBySystemType },
+  normalizeTreasurySystemType: { get: () => normalizeTreasurySystemType },
+  TREASURY_SYSTEM_TYPES: { get: () => TREASURY_SYSTEM_TYPES },
+  TREASURY_ENV_BY_SYSTEM_TYPE: { get: () => TREASURY_ENV_BY_SYSTEM_TYPE },
+  assertTreasuryConfig: { get: () => assertTreasuryConfig },
+
   normalizePricingSnapshot: { get: () => normalizePricingSnapshot },
-  buildAdminRevenueBreakdown: { get: () => buildAdminRevenueBreakdown },
+  buildTreasuryRevenueBreakdown: { get: () => buildTreasuryRevenueBreakdown },
   roundMoney: { get: () => roundMoney },
 
   assertTransition: { get: () => assertTransition },

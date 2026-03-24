@@ -16,6 +16,7 @@
 // } = require("../shared/runtime");
 
 // const { notifyTransactionEvent } = require("../transactionNotificationService");
+// const { syncReferralAfterConfirmedTx } = require("../../referralSyncService");
 
 // const {
 //   sanitize,
@@ -52,6 +53,15 @@
 //   return INBOUND_EXTERNAL_FLOWS.has(String(tx?.flow || ""));
 // }
 
+// function buildReferralSyncError(err) {
+//   return {
+//     ok: false,
+//     skipped: true,
+//     reason: "REFERRAL_SYNC_EXCEPTION",
+//     error: err?.message || "Referral sync failed",
+//   };
+// }
+
 // async function confirmController(req, res, next) {
 //   const session = await startTxSession();
 
@@ -74,6 +84,7 @@
 
 //     const tx = await Transaction.findById(transactionId)
 //       .select([
+//         "+userId",
 //         "+flow",
 //         "+provider",
 //         "+providerStatus",
@@ -103,6 +114,8 @@
 //         "+fundsReserved",
 //         "+fundsCaptured",
 //         "+beneficiaryCredited",
+//         "+reference",
+//         "+confirmedAt",
 //       ])
 //       .session(sessOpts.session || null);
 
@@ -259,8 +272,17 @@
 //       await tx.save(sessOpts);
 //       await notifyTransactionEvent(tx, "confirmed", session, sourceCurrency);
 
-//       if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+//       if (CAN_USE_SHARED_SESSION) {
+//         await session.commitTransaction();
+//       }
 //       session.endSession();
+
+//       let referralSync = null;
+//       try {
+//         referralSync = await syncReferralAfterConfirmedTx(tx);
+//       } catch (refErr) {
+//         referralSync = buildReferralSyncError(refErr);
+//       }
 
 //       return res.json({
 //         success: true,
@@ -276,6 +298,7 @@
 //         fundsCaptured: !!tx.fundsCaptured,
 //         beneficiaryCredited: !!tx.beneficiaryCredited,
 //         adminRevenueCredited: !!tx.adminRevenueCredited,
+//         referralSync,
 //       });
 //     }
 
@@ -283,11 +306,13 @@
 //     tx.providerStatus = tx.providerReference
 //       ? "PROVIDER_SUBMITTED"
 //       : "CONFIRMED_BY_USER_PENDING_PROVIDER";
-//     await tx.save(sessOpts);
 
+//     await tx.save(sessOpts);
 //     await notifyTransactionEvent(tx, "processing", session, sourceCurrency);
 
-//     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+//     if (CAN_USE_SHARED_SESSION) {
+//       await session.commitTransaction();
+//     }
 //     session.endSession();
 
 //     return res.status(202).json({
@@ -317,20 +342,24 @@
 
 
 
+
+
+
+
 "use strict";
 
 const createError = require("http-errors");
 
 const {
   Transaction,
-  User,
-  logTransaction,
   captureSenderReserve,
   creditReceiverFunds,
-  creditAdminRevenue,
+  creditTreasuryRevenue,
+  resolveTreasuryFromSystemType,
+  normalizeTreasurySystemType,
   startTxSession,
   maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
+  canUseSharedSession,
   assertTransition,
 } = require("../shared/runtime");
 
@@ -360,6 +389,9 @@ const INBOUND_EXTERNAL_FLOWS = new Set([
   "CARD_TOPUP_TO_PAYNOVAL",
 ]);
 
+const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
 function isInternalTransfer(tx) {
   return tx?.flow === INTERNAL_FLOW;
 }
@@ -381,11 +413,38 @@ function buildReferralSyncError(err) {
   };
 }
 
+function resolveFeesTreasuryMeta(tx) {
+  const treasurySystemType = normalizeTreasurySystemType(
+    tx?.treasurySystemType || DEFAULT_FEES_TREASURY_SYSTEM_TYPE
+  );
+
+  const treasuryUserId = String(
+    tx?.treasuryUserId || resolveTreasuryFromSystemType(treasurySystemType) || ""
+  ).trim();
+
+  const treasuryLabel = String(
+    tx?.treasuryLabel || DEFAULT_FEES_TREASURY_LABEL
+  ).trim();
+
+  if (!treasuryUserId) {
+    throw createError(
+      500,
+      `Treasury introuvable pour ${treasurySystemType}`
+    );
+  }
+
+  return {
+    treasuryUserId,
+    treasurySystemType,
+    treasuryLabel,
+  };
+}
+
 async function confirmController(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    if (canUseSharedSession()) session.startTransaction();
 
     const { transactionId, securityAnswer, securityCode } = req.body || {};
     const provided = sanitize(securityAnswer || securityCode || "");
@@ -428,8 +487,12 @@ async function confirmController(req, res, next) {
         "+funds",
         "+recipientEmail",
         "+pricingSnapshot",
-        "+adminRevenue",
-        "+adminRevenueCredited",
+        "+treasuryRevenue",
+        "+treasuryRevenueCredited",
+        "+treasuryRevenueCreditedAt",
+        "+treasuryUserId",
+        "+treasurySystemType",
+        "+treasuryLabel",
         "+fundsReserved",
         "+fundsCaptured",
         "+beneficiaryCredited",
@@ -439,20 +502,6 @@ async function confirmController(req, res, next) {
       .session(sessOpts.session || null);
 
     if (!tx) throw createError(404, "Transaction introuvable");
-
-    logTransaction({
-      userId: req.user?.id || req.user?._id || null,
-      type: "confirm",
-      provider: tx.provider || tx.funds || "paynoval",
-      amount: toFloat(tx.amount),
-      currency: tx.senderCurrencySymbol,
-      toEmail: tx.recipientEmail || "",
-      details: { transactionId: tx._id.toString(), flow: tx.flow },
-      flagged: false,
-      flagReason: "",
-      transactionId: tx._id,
-      ip: req.ip,
-    }).catch(() => {});
 
     const now = new Date();
 
@@ -474,7 +523,10 @@ async function confirmController(req, res, next) {
       assertTransition(tx.status, "confirmed");
 
       if (String(tx.receiver) !== String(req.user.id)) {
-        throw createError(403, "Vous n’êtes pas le destinataire de cette transaction");
+        throw createError(
+          403,
+          "Vous n’êtes pas le destinataire de cette transaction"
+        );
       }
     } else if (isOutboundExternalPayout(tx)) {
       if (!["pending", "pending_review", "relaunch"].includes(String(tx.status || ""))) {
@@ -482,13 +534,18 @@ async function confirmController(req, res, next) {
       }
 
       if (String(tx.sender) !== String(req.user.id)) {
-        throw createError(403, "Vous n’êtes pas autorisé à confirmer cette transaction");
+        throw createError(
+          403,
+          "Vous n’êtes pas autorisé à confirmer cette transaction"
+        );
       }
     } else {
       throw createError(400, `Flow non supporté pour confirm: ${tx.flow}`);
     }
 
-    const storedHash = String(tx.securityAnswerHash || "") || String(tx.securityCode || "");
+    const storedHash =
+      String(tx.securityAnswerHash || "") || String(tx.securityCode || "");
+
     if (!storedHash) {
       throw createError(500, "securityAnswerHash manquant sur la transaction");
     }
@@ -510,13 +567,18 @@ async function confirmController(req, res, next) {
 
         await notifyTransactionEvent(tx, "locked", session, tx.senderCurrencySymbol);
 
-        throw createError(423, `Réponse incorrecte. Transaction bloquée ${LOCK_MINUTES} min.`);
+        throw createError(
+          423,
+          `Réponse incorrecte. Transaction bloquée ${LOCK_MINUTES} min.`
+        );
       }
 
       await tx.save(sessOpts);
       throw createError(
         401,
-        `Réponse incorrecte. Il vous reste ${MAX_CONFIRM_ATTEMPTS - tx.attemptCount} essai(s).`
+        `Réponse incorrecte. Il vous reste ${
+          MAX_CONFIRM_ATTEMPTS - tx.attemptCount
+        } essai(s).`
       );
     }
 
@@ -562,25 +624,24 @@ async function confirmController(req, res, next) {
         tx.providerStatus = "BENEFICIARY_CREDITED";
       }
 
-      if (!tx.adminRevenueCredited) {
-        const adminUser = await User.findOne({ email: "admin@paynoval.com" })
-          .select("_id")
-          .session(sessOpts.session || null);
+      if (!tx.treasuryRevenueCredited) {
+        const treasuryMeta = resolveFeesTreasuryMeta(tx);
 
-        if (!adminUser) {
-          throw createError(500, "Compte administrateur introuvable");
-        }
-
-        await creditAdminRevenue({
+        const creditResult = await creditTreasuryRevenue({
           transaction: tx,
           pricingSnapshot: tx.pricingSnapshot || {},
-          adminUserId: adminUser._id,
+          treasurySystemType: treasuryMeta.treasurySystemType,
+          treasuryLabel: treasuryMeta.treasuryLabel,
           session,
         });
 
-        tx.adminRevenueCredited = true;
-        tx.adminRevenueCreditedAt = new Date();
-        tx.providerStatus = "ADMIN_REVENUE_CREDITED";
+        tx.treasuryRevenue = creditResult?.treasuryRevenue || null;
+        tx.treasuryRevenueCredited = true;
+        tx.treasuryRevenueCreditedAt = new Date();
+        tx.treasuryUserId = treasuryMeta.treasuryUserId;
+        tx.treasurySystemType = treasuryMeta.treasurySystemType;
+        tx.treasuryLabel = treasuryMeta.treasuryLabel;
+        tx.providerStatus = "TREASURY_REVENUE_CREDITED";
       }
 
       tx.status = "confirmed";
@@ -591,7 +652,7 @@ async function confirmController(req, res, next) {
       await tx.save(sessOpts);
       await notifyTransactionEvent(tx, "confirmed", session, sourceCurrency);
 
-      if (CAN_USE_SHARED_SESSION) {
+      if (canUseSharedSession()) {
         await session.commitTransaction();
       }
       session.endSession();
@@ -613,10 +674,13 @@ async function confirmController(req, res, next) {
         credited: targetAmount,
         currencyCredited: targetCurrency,
         pricingSnapshot: tx.pricingSnapshot || null,
-        adminRevenue: tx.adminRevenue || null,
+        treasuryRevenue: tx.treasuryRevenue || null,
         fundsCaptured: !!tx.fundsCaptured,
         beneficiaryCredited: !!tx.beneficiaryCredited,
-        adminRevenueCredited: !!tx.adminRevenueCredited,
+        treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
+        treasuryUserId: tx.treasuryUserId || null,
+        treasurySystemType: tx.treasurySystemType || null,
+        treasuryLabel: tx.treasuryLabel || null,
         referralSync,
       });
     }
@@ -629,7 +693,7 @@ async function confirmController(req, res, next) {
     await tx.save(sessOpts);
     await notifyTransactionEvent(tx, "processing", session, sourceCurrency);
 
-    if (CAN_USE_SHARED_SESSION) {
+    if (canUseSharedSession()) {
       await session.commitTransaction();
     }
     session.endSession();
@@ -643,12 +707,12 @@ async function confirmController(req, res, next) {
       providerStatus: tx.providerStatus,
       fundsCaptured: !!tx.fundsCaptured,
       beneficiaryCredited: !!tx.beneficiaryCredited,
-      adminRevenueCredited: !!tx.adminRevenueCredited,
+      treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
       message: "Transaction confirmée côté utilisateur et en attente du provider.",
     });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);

@@ -4,32 +4,44 @@
  * --------------------------------------------------------------------------
  * Ledger Service
  * --------------------------------------------------------------------------
- * Rôle :
- * - encapsuler les mouvements financiers wallet + ledger
- * - centraliser les écritures comptables applicatives
- * - rester strict sur les validations d'entrée
- *
- * Notes importantes :
- * - Le wallet TX Core est la source de vérité opérationnelle pour les soldes.
- * - Le ledger sert d’audit trail explicite.
- * - Ce service ne doit pas "deviner" les flows métier : il exécute des
- *   primitives financières appelées par les controllers/services métier.
+ * - écritures wallet + ledger
+ * - résolution stricte des treasury par SYSTEM_TYPE
+ * - fee revenue => FEES_TREASURY
+ * - fx revenue  => FX_MARGIN_TREASURY
  * --------------------------------------------------------------------------
  */
 
 const mongoose = require("mongoose");
 const {
   roundMoney,
-  buildAdminRevenueBreakdown,
+  buildTreasuryRevenueBreakdown,
 } = require("./pricingSnapshotNormalizer");
 
 const { getTxConn } = require("../config/db");
 const txConn = getTxConn();
 
-
 const LedgerEntry = require("../models/LedgerEntry")(txConn);
 const TxWalletBalance = require("../models/TxWalletBalance")(txConn);
 
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+const TREASURY_SYSTEM_TYPES = new Set([
+  "REFERRAL_TREASURY",
+  "FEES_TREASURY",
+  "OPERATIONS_TREASURY",
+  "CAGNOTTE_FEES_TREASURY",
+  "FX_MARGIN_TREASURY",
+]);
+
+const TREASURY_ENV_BY_SYSTEM_TYPE = Object.freeze({
+  REFERRAL_TREASURY: process.env.REFERRAL_TREASURY_USER_ID,
+  FEES_TREASURY: process.env.FEES_TREASURY_USER_ID,
+  OPERATIONS_TREASURY: process.env.OPERATIONS_TREASURY_USER_ID,
+  CAGNOTTE_FEES_TREASURY: process.env.CAGNOTTE_FEES_TREASURY_USER_ID,
+  FX_MARGIN_TREASURY: process.env.FX_MARGIN_TREASURY_USER_ID,
+});
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -64,6 +76,36 @@ function normalizePositiveAmount(amount, currency = "CAD", { allowZero = false }
   return rounded;
 }
 
+function normalizeTreasurySystemType(value, fieldName = "treasurySystemType") {
+  const s = String(value || "").trim().toUpperCase();
+  if (!s) throw new Error(`${fieldName} requis`);
+  if (!TREASURY_SYSTEM_TYPES.has(s)) {
+    throw new Error(`${fieldName} invalide: ${value}`);
+  }
+  return s;
+}
+
+function getTreasuryUserIdBySystemType(systemType) {
+  const normalizedType = normalizeTreasurySystemType(systemType, "systemType");
+  const treasuryUserId = String(
+    TREASURY_ENV_BY_SYSTEM_TYPE[normalizedType] || ""
+  ).trim();
+
+  if (!treasuryUserId) {
+    throw new Error(`Aucun treasuryUserId configuré pour ${normalizedType}`);
+  }
+
+  return treasuryUserId;
+}
+
+function resolveTreasuryFromSystemType(systemType) {
+  return getTreasuryUserIdBySystemType(systemType);
+}
+
+function normalizeOptionalLabel(value, fallback = "") {
+  return String(value || fallback || "").trim();
+}
+
 function dec(n, currency = "CAD") {
   const value = normalizePositiveAmount(n, currency, { allowZero: true });
   return mongoose.Types.Decimal128.fromString(String(value));
@@ -79,8 +121,11 @@ function userWalletAccountId(userId, currency) {
   return `user_wallet:${normalizeObjectIdLike(userId, "userId")}:${normalizeCurrency(currency)}`;
 }
 
-function adminRevenueAccountId(currency = "CAD") {
-  return `admin_revenue:${normalizeCurrency(currency)}`;
+function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
+  const userId = normalizeObjectIdLike(treasuryUserId, "treasuryUserId");
+  const systemType = normalizeTreasurySystemType(treasurySystemType);
+  const cur = normalizeCurrency(currency);
+  return `treasury:${systemType}:${userId}:${cur}`;
 }
 
 function assertWalletModel() {
@@ -101,6 +146,23 @@ function assertWalletModel() {
       throw new Error(`TxWalletBalance.${method} indisponible`);
     }
   }
+}
+
+function resolveTreasuryContext({
+  treasuryUserId = null,
+  treasurySystemType,
+  treasuryLabel = "",
+}) {
+  const systemType = normalizeTreasurySystemType(treasurySystemType);
+  const resolvedTreasuryUserId = treasuryUserId
+    ? normalizeObjectIdLike(treasuryUserId, "treasuryUserId")
+    : resolveTreasuryFromSystemType(systemType);
+
+  return {
+    treasuryUserId: resolvedTreasuryUserId,
+    treasurySystemType: systemType,
+    treasuryLabel: normalizeOptionalLabel(treasuryLabel),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -126,11 +188,17 @@ async function createLedgerEntry({
   });
 
   const allowedDirections = new Set(["DEBIT", "CREDIT"]);
-  const allowedAccountTypes = new Set(["USER_WALLET", "ADMIN_REVENUE"]);
+  const allowedAccountTypes = new Set([
+    "USER_WALLET",
+    "TREASURY",
+    "SYSTEM_CLEARING",
+    "SYSTEM_RESERVE",
+  ]);
   const allowedEntryTypes = new Set([
     "RESERVE",
     "RESERVE_CAPTURE",
     "RESERVE_RELEASE",
+    "USER_DEBIT",
     "USER_CREDIT",
     "REVERSAL",
     "REFUND",
@@ -431,85 +499,194 @@ async function refundSenderFunds({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Admin revenue                                                              */
+/* Treasury revenue                                                           */
 /* -------------------------------------------------------------------------- */
 
-async function creditAdminRevenue({
+async function creditRevenueLineToTreasury({
+  transaction,
+  revenueLine,
+  explicitTreasuryUserId = null,
+  explicitTreasuryLabel = "",
+  entryType,
+  session = null,
+}) {
+  const systemType = normalizeTreasurySystemType(revenueLine?.systemType);
+
+  const treasury = resolveTreasuryContext({
+    treasuryUserId: explicitTreasuryUserId,
+    treasurySystemType: systemType,
+    treasuryLabel: explicitTreasuryLabel,
+  });
+
+  const treasuryCurrency = normalizeCurrency(
+    revenueLine?.treasuryCurrency || "CAD"
+  );
+
+  const treasuryAmount = normalizePositiveAmount(
+    revenueLine?.treasuryAmount || 0,
+    treasuryCurrency,
+    { allowZero: true }
+  );
+
+  if (treasuryAmount <= 0) {
+    return null;
+  }
+
+  await TxWalletBalance.credit(
+    treasury.treasuryUserId,
+    treasuryCurrency,
+    treasuryAmount,
+    maybeSessionOpts(session)
+  );
+
+  const metadata = {
+    treasuryUserId: treasury.treasuryUserId,
+    treasurySystemType: treasury.treasurySystemType,
+    treasuryLabel: treasury.treasuryLabel || null,
+    sourceAmount: Number(revenueLine?.sourceAmount || 0),
+    sourceCurrency: revenueLine?.sourceCurrency || null,
+    treasuryAmount,
+    treasuryCurrency,
+    conversionRateToTreasury: Number(
+      revenueLine?.conversionRateToTreasury || 0
+    ),
+    flow: transaction.flow || null,
+  };
+
+  if (entryType === "FX_REVENUE") {
+    metadata.idealNetTo = Number(revenueLine?.idealNetTo || 0);
+    metadata.actualNetTo = Number(revenueLine?.actualNetTo || 0);
+    metadata.rawAmount = Number(revenueLine?.rawAmount || 0);
+  }
+
+  const entry = await createLedgerEntry({
+    transactionId: transaction._id,
+    reference: transaction.reference,
+    userId: treasury.treasuryUserId,
+    accountType: "TREASURY",
+    accountId: treasuryAccountId({
+      treasuryUserId: treasury.treasuryUserId,
+      treasurySystemType: treasury.treasurySystemType,
+      currency: treasuryCurrency,
+    }),
+    direction: "CREDIT",
+    entryType,
+    amount: treasuryAmount,
+    currency: treasuryCurrency,
+    metadata,
+    session,
+  });
+
+  return {
+    entry,
+    treasuryUserId: treasury.treasuryUserId,
+    treasurySystemType: treasury.treasurySystemType,
+    treasuryLabel: treasury.treasuryLabel,
+    treasuryAmount,
+    treasuryCurrency,
+    sourceAmount: Number(revenueLine?.sourceAmount || 0),
+    sourceCurrency: revenueLine?.sourceCurrency || null,
+    conversionRateToTreasury: Number(
+      revenueLine?.conversionRateToTreasury || 0
+    ),
+  };
+}
+
+async function creditTreasuryRevenue({
   transaction,
   pricingSnapshot,
-  adminUserId,
+  treasuryUserId = null,
+  treasurySystemType = null,
+  treasuryLabel = "",
   session = null,
 }) {
   assertTransactionLike(transaction);
   assertWalletModel();
 
-  const adminId = normalizeObjectIdLike(adminUserId, "adminUserId");
-  const adminRevenue = buildAdminRevenueBreakdown(pricingSnapshot || {});
-  const credits = [];
+  const revenue = buildTreasuryRevenueBreakdown(pricingSnapshot || {});
+  const entries = [];
 
-  const feeCAD = normalizePositiveAmount(adminRevenue.feeCAD || 0, "CAD", {
-    allowZero: true,
-  });
+  const feeLine = revenue?.feeRevenue || null;
+  const fxLine = revenue?.fxRevenue || null;
 
-  const fxCAD = normalizePositiveAmount(adminRevenue.fxCAD || 0, "CAD", {
-    allowZero: true,
-  });
+  let feeCredit = null;
+  let fxCredit = null;
 
-  if (feeCAD > 0) {
-    await TxWalletBalance.credit(adminId, "CAD", feeCAD, maybeSessionOpts(session));
+  if (feeLine && Number(feeLine.treasuryAmount || 0) > 0) {
+    feeCredit = await creditRevenueLineToTreasury({
+      transaction,
+      revenueLine: {
+        ...feeLine,
+        systemType: "FEES_TREASURY",
+      },
+      explicitTreasuryUserId:
+        treasurySystemType === "FEES_TREASURY" ? treasuryUserId : null,
+      explicitTreasuryLabel:
+        treasurySystemType === "FEES_TREASURY" ? treasuryLabel : "",
+      entryType: "FEE_REVENUE",
+      session,
+    });
 
-    credits.push(
-      await createLedgerEntry({
-        transactionId: transaction._id,
-        reference: transaction.reference,
-        userId: adminId,
-        accountType: "ADMIN_REVENUE",
-        accountId: adminRevenueAccountId("CAD"),
-        direction: "CREDIT",
-        entryType: "FEE_REVENUE",
-        amount: feeCAD,
-        currency: "CAD",
-        metadata: {
-          sourceCurrency: adminRevenue.feeSourceCurrency || null,
-          feeSource: Number(adminRevenue.feeSource || 0),
-          flow: transaction.flow || null,
-        },
-        session,
-      })
-    );
+    if (feeCredit?.entry) entries.push(feeCredit.entry);
   }
 
-  if (fxCAD > 0) {
-    await TxWalletBalance.credit(adminId, "CAD", fxCAD, maybeSessionOpts(session));
+  if (fxLine && Number(fxLine.treasuryAmount || 0) > 0) {
+    fxCredit = await creditRevenueLineToTreasury({
+      transaction,
+      revenueLine: {
+        ...fxLine,
+        systemType: "FX_MARGIN_TREASURY",
+      },
+      explicitTreasuryUserId:
+        treasurySystemType === "FX_MARGIN_TREASURY" ? treasuryUserId : null,
+      explicitTreasuryLabel:
+        treasurySystemType === "FX_MARGIN_TREASURY" ? treasuryLabel : "",
+      entryType: "FX_REVENUE",
+      session,
+    });
 
-    credits.push(
-      await createLedgerEntry({
-        transactionId: transaction._id,
-        reference: transaction.reference,
-        userId: adminId,
-        accountType: "ADMIN_REVENUE",
-        accountId: adminRevenueAccountId("CAD"),
-        direction: "CREDIT",
-        entryType: "FX_REVENUE",
-        amount: fxCAD,
-        currency: "CAD",
-        metadata: {
-          fxToAmount: Number(adminRevenue.fxToAmount || 0),
-          fxToCurrency: adminRevenue.fxToCurrency || null,
-          flow: transaction.flow || null,
-        },
-        session,
-      })
-    );
+    if (fxCredit?.entry) entries.push(fxCredit.entry);
   }
 
   return {
-    adminRevenue: {
-      ...adminRevenue,
-      feeCAD,
-      fxCAD,
+    treasuryRevenue: {
+      feeRevenue: feeCredit
+        ? {
+            systemType: feeCredit.treasurySystemType,
+            treasuryUserId: feeCredit.treasuryUserId,
+            treasuryLabel: feeCredit.treasuryLabel,
+            sourceAmount: feeCredit.sourceAmount,
+            sourceCurrency: feeCredit.sourceCurrency,
+            treasuryAmount: feeCredit.treasuryAmount,
+            treasuryCurrency: feeCredit.treasuryCurrency,
+            conversionRateToTreasury: feeCredit.conversionRateToTreasury,
+          }
+        : {
+            ...(feeLine || {}),
+            credited: false,
+          },
+
+      fxRevenue: fxCredit
+        ? {
+            systemType: fxCredit.treasurySystemType,
+            treasuryUserId: fxCredit.treasuryUserId,
+            treasuryLabel: fxCredit.treasuryLabel,
+            sourceAmount: fxCredit.sourceAmount,
+            sourceCurrency: fxCredit.sourceCurrency,
+            treasuryAmount: fxCredit.treasuryAmount,
+            treasuryCurrency: fxCredit.treasuryCurrency,
+            conversionRateToTreasury: fxCredit.conversionRateToTreasury,
+          }
+        : {
+            ...(fxLine || {}),
+            credited: false,
+          },
+
+      totals: revenue?.totals || null,
+      marketRate: revenue?.marketRate ?? null,
+      appliedRate: revenue?.appliedRate ?? null,
     },
-    entries: credits,
+    entries,
   };
 }
 
@@ -522,9 +699,12 @@ async function chargeCancellationFee({
   senderId,
   senderCurrency,
   feeSourceAmount,
-  adminUserId,
-  adminFeeCAD,
-  conversionRateToCAD = 0,
+  treasuryUserId = null,
+  treasurySystemType = "FEES_TREASURY",
+  treasuryLabel = "",
+  treasuryFeeAmount,
+  treasuryFeeCurrency,
+  conversionRateToTreasury = 0,
   feeType = "fixed",
   feePercent = 0,
   feeId = null,
@@ -534,22 +714,35 @@ async function chargeCancellationFee({
   assertWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
-  const adminId = normalizeObjectIdLike(adminUserId, "adminUserId");
+
+  const treasury = resolveTreasuryContext({
+    treasuryUserId,
+    treasurySystemType,
+    treasuryLabel,
+  });
+
   const sourceCurrency = normalizeCurrency(senderCurrency);
+  const targetCurrency = normalizeCurrency(treasuryFeeCurrency);
 
   const out = {
     senderDebited: false,
-    adminCredited: false,
+    treasuryCredited: false,
     feeSourceAmount: normalizePositiveAmount(feeSourceAmount || 0, sourceCurrency, {
       allowZero: true,
     }),
     feeSourceCurrency: sourceCurrency,
-    adminFeeCAD: normalizePositiveAmount(adminFeeCAD || 0, "CAD", {
+    treasuryFeeAmount: normalizePositiveAmount(treasuryFeeAmount || 0, targetCurrency, {
       allowZero: true,
     }),
-    adminCurrency: "CAD",
-    conversionRateToCAD: Number(conversionRateToCAD || 0),
-    feeType: String(feeType || "fixed").trim().toLowerCase() === "percent" ? "percent" : "fixed",
+    treasuryFeeCurrency: targetCurrency,
+    treasuryUserId: treasury.treasuryUserId,
+    treasurySystemType: treasury.treasurySystemType,
+    treasuryLabel: treasury.treasuryLabel,
+    conversionRateToTreasury: Number(conversionRateToTreasury || 0),
+    feeType:
+      String(feeType || "fixed").trim().toLowerCase() === "percent"
+        ? "percent"
+        : "fixed",
     feePercent: Number(feePercent || 0),
     feeId: feeId || null,
   };
@@ -579,6 +772,9 @@ async function chargeCancellationFee({
         feePercent: out.feePercent,
         feeId: out.feeId,
         flow: transaction.flow || null,
+        treasuryUserId: treasury.treasuryUserId,
+        treasurySystemType: treasury.treasurySystemType,
+        treasuryLabel: treasury.treasuryLabel || null,
       },
       session,
     });
@@ -586,47 +782,65 @@ async function chargeCancellationFee({
     out.senderDebited = true;
   }
 
-  if (out.adminFeeCAD > 0) {
-    await TxWalletBalance.credit(adminId, "CAD", out.adminFeeCAD, maybeSessionOpts(session));
+  if (out.treasuryFeeAmount > 0) {
+    await TxWalletBalance.credit(
+      treasury.treasuryUserId,
+      out.treasuryFeeCurrency,
+      out.treasuryFeeAmount,
+      maybeSessionOpts(session)
+    );
 
     await createLedgerEntry({
       transactionId: transaction._id,
       reference: transaction.reference,
-      userId: adminId,
-      accountType: "ADMIN_REVENUE",
-      accountId: adminRevenueAccountId("CAD"),
+      userId: treasury.treasuryUserId,
+      accountType: "TREASURY",
+      accountId: treasuryAccountId({
+        treasuryUserId: treasury.treasuryUserId,
+        treasurySystemType: treasury.treasurySystemType,
+        currency: out.treasuryFeeCurrency,
+      }),
       direction: "CREDIT",
       entryType: "FEE_REVENUE",
-      amount: out.adminFeeCAD,
-      currency: "CAD",
+      amount: out.treasuryFeeAmount,
+      currency: out.treasuryFeeCurrency,
       metadata: {
         stage: "cancel",
         reason: "cancellation_fee",
         sourceCurrency: out.feeSourceCurrency,
         feeSourceAmount: out.feeSourceAmount,
-        conversionRateToCAD: out.conversionRateToCAD,
+        conversionRateToTreasury: out.conversionRateToTreasury,
         feeType: out.feeType,
         feePercent: out.feePercent,
         feeId: out.feeId,
         flow: transaction.flow || null,
+        treasuryUserId: treasury.treasuryUserId,
+        treasurySystemType: treasury.treasurySystemType,
+        treasuryLabel: treasury.treasuryLabel || null,
       },
       session,
     });
 
-    out.adminCredited = true;
+    out.treasuryCredited = true;
   }
 
   return out;
 }
 
 module.exports = {
+  TREASURY_SYSTEM_TYPES,
+  TREASURY_ENV_BY_SYSTEM_TYPE,
+  normalizeTreasurySystemType,
+  getTreasuryUserIdBySystemType,
+  resolveTreasuryFromSystemType,
+
   reserveSenderFunds,
   captureSenderReserve,
   releaseSenderReserve,
   creditReceiverFunds,
   debitReceiverFunds,
   refundSenderFunds,
-  creditAdminRevenue,
+  creditTreasuryRevenue,
   chargeCancellationFee,
   createLedgerEntry,
 };

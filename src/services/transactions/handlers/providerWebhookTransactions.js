@@ -5,6 +5,10 @@
 //  * - SUCCESS inbound  => crédit wallet receiver local
 //  * - SUCCESS outbound => confirmation finale sans crédit local receiver
 //  * - FAILED outbound  => release reserve OU refund sender si déjà capturé
+//  *
+//  * + Referral sync:
+//  *   - déclenché après commit quand la transaction devient réellement "confirmed"
+//  *   - best effort: ne casse jamais le flux financier principal
 //  */
 
 // const createError = require("http-errors");
@@ -28,6 +32,7 @@
 //   isOutboundExternalFlow,
 //   isInboundExternalFlow,
 // } = require("./flowHelpers");
+// const { syncReferralAfterConfirmedTx } = require("../../referralSyncService");
 
 // function low(v) {
 //   return String(v || "").trim().toLowerCase();
@@ -82,7 +87,7 @@
 //       payload.status || payload.providerStatus || payload.event || payload.state || null,
 //     providerReference:
 //       payload.providerReference || payload.reference || payload.externalReference || null,
-//     payload: payload,
+//     payload,
 //   });
 //   tx.webhookHistory = list.slice(-20);
 // }
@@ -114,6 +119,15 @@
 //   return null;
 // }
 
+// function buildReferralSyncError(err) {
+//   return {
+//     ok: false,
+//     skipped: true,
+//     reason: "REFERRAL_SYNC_EXCEPTION",
+//     error: err?.message || "Referral sync failed",
+//   };
+// }
+
 // async function settleExternalTransactionWebhook(req, res, next) {
 //   const session = await startTxSession();
 
@@ -133,15 +147,18 @@
 
 //     const sourceCurrency = String(tx.senderCurrencySymbol || "").trim().toUpperCase();
 //     const targetCurrency = String(tx.localCurrencySymbol || "").trim().toUpperCase();
+//     const notifyCurrency = sourceCurrency || targetCurrency || "XOF";
 //     const grossSource = round2(toFloat(tx.amount));
 //     const targetAmount = round2(toFloat(tx.localAmount));
 
 //     if (mapped === "PROCESSING") {
 //       tx.status = "processing";
 //       tx.providerStatus = payload.status || payload.providerStatus || "PROVIDER_PROCESSING";
+
 //       if (payload.providerReference || payload.reference) {
 //         tx.providerReference = payload.providerReference || payload.reference;
 //       }
+
 //       await tx.save(sessOpts);
 
 //       if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
@@ -205,10 +222,17 @@
 //         };
 
 //         await tx.save(sessOpts);
-//         await notifyParties(tx, "confirmed", session, sourceCurrency);
+//         await notifyParties(tx, "confirmed", session, notifyCurrency);
 
 //         if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
 //         session.endSession();
+
+//         let referralSync = null;
+//         try {
+//           referralSync = await syncReferralAfterConfirmedTx(tx);
+//         } catch (refErr) {
+//           referralSync = buildReferralSyncError(refErr);
+//         }
 
 //         return res.json({
 //           success: true,
@@ -216,6 +240,7 @@
 //           flow: tx.flow,
 //           status: tx.status,
 //           providerStatus: tx.providerStatus,
+//           referralSync,
 //         });
 //       }
 
@@ -264,10 +289,17 @@
 //         };
 
 //         await tx.save(sessOpts);
-//         await notifyParties(tx, "confirmed", session, targetCurrency);
+//         await notifyParties(tx, "confirmed", session, notifyCurrency);
 
 //         if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
 //         session.endSession();
+
+//         let referralSync = null;
+//         try {
+//           referralSync = await syncReferralAfterConfirmedTx(tx);
+//         } catch (refErr) {
+//           referralSync = buildReferralSyncError(refErr);
+//         }
 
 //         return res.json({
 //           success: true,
@@ -275,15 +307,14 @@
 //           flow: tx.flow,
 //           status: tx.status,
 //           providerStatus: tx.providerStatus,
+//           referralSync,
 //         });
 //       }
 
 //       throw createError(400, `Flow externe non supporté en SUCCESS: ${tx.flow}`);
 //     }
 
-//     /**
-//      * FAILED
-//      */
+//     // FAILED
 //     if (payload.providerReference || payload.reference) {
 //       tx.providerReference = payload.providerReference || payload.reference;
 //     }
@@ -325,7 +356,7 @@
 //     };
 
 //     await tx.save(sessOpts);
-//     await notifyParties(tx, "failed", session, sourceCurrency || targetCurrency);
+//     await notifyParties(tx, "failed", session, notifyCurrency);
 
 //     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
 //     session.endSession();
@@ -355,8 +386,6 @@
 
 
 
-
-
 "use strict";
 
 /**
@@ -374,15 +403,16 @@ const createError = require("http-errors");
 
 const {
   Transaction,
-  User,
   captureSenderReserve,
   releaseSenderReserve,
   refundSenderFunds,
   creditReceiverFunds,
-  creditAdminRevenue,
+  creditTreasuryRevenue,
+  resolveTreasuryFromSystemType,
+  normalizeTreasurySystemType,
   startTxSession,
   maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
+  canUseSharedSession,
 } = require("../shared/runtime");
 
 const { notifyParties } = require("../shared/notifications");
@@ -392,6 +422,9 @@ const {
   isInboundExternalFlow,
 } = require("./flowHelpers");
 const { syncReferralAfterConfirmedTx } = require("../../referralSyncService");
+
+const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
 
 function low(v) {
   return String(v || "").trim().toLowerCase();
@@ -415,6 +448,9 @@ function mapProviderState(payload = {}) {
       "paid",
       "settled",
       "captured",
+      "succeeded",
+      "approved",
+      "ok",
     ].includes(s)
   ) {
     return "SUCCESS";
@@ -430,6 +466,8 @@ function mapProviderState(payload = {}) {
       "expired",
       "rejected",
       "reversed",
+      "declined",
+      "voided",
     ].includes(s)
   ) {
     return "FAILED";
@@ -445,7 +483,10 @@ function appendWebhookHistory(tx, payload = {}) {
     status:
       payload.status || payload.providerStatus || payload.event || payload.state || null,
     providerReference:
-      payload.providerReference || payload.reference || payload.externalReference || null,
+      payload.providerReference ||
+      payload.reference ||
+      payload.externalReference ||
+      null,
     payload,
   });
   tx.webhookHistory = list.slice(-20);
@@ -466,12 +507,16 @@ async function findTransactionFromWebhook(payload = {}, session = null) {
   }
 
   if (providerReference) {
-    const byProviderRef = await Transaction.findOne({ providerReference }).session(session || null);
+    const byProviderRef = await Transaction.findOne({ providerReference }).session(
+      session || null
+    );
     if (byProviderRef) return byProviderRef;
   }
 
   if (payload.reference) {
-    const byReference = await Transaction.findOne({ reference: payload.reference }).session(session || null);
+    const byReference = await Transaction.findOne({ reference: payload.reference }).session(
+      session || null
+    );
     if (byReference) return byReference;
   }
 
@@ -487,11 +532,38 @@ function buildReferralSyncError(err) {
   };
 }
 
+function resolveFeesTreasuryMeta(tx) {
+  const treasurySystemType = normalizeTreasurySystemType(
+    tx?.treasurySystemType || DEFAULT_FEES_TREASURY_SYSTEM_TYPE
+  );
+
+  const treasuryUserId = String(
+    tx?.treasuryUserId || resolveTreasuryFromSystemType(treasurySystemType) || ""
+  ).trim();
+
+  const treasuryLabel = String(
+    tx?.treasuryLabel || DEFAULT_FEES_TREASURY_LABEL
+  ).trim();
+
+  if (!treasuryUserId) {
+    throw createError(
+      500,
+      `Treasury introuvable pour ${treasurySystemType}`
+    );
+  }
+
+  return {
+    treasuryUserId,
+    treasurySystemType,
+    treasuryLabel,
+  };
+}
+
 async function settleExternalTransactionWebhook(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    if (canUseSharedSession()) session.startTransaction();
 
     const sessOpts = maybeSessionOpts(session);
     const payload = req.body || {};
@@ -520,7 +592,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
 
       await tx.save(sessOpts);
 
-      if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+      if (canUseSharedSession()) await session.commitTransaction();
       session.endSession();
 
       return res.status(202).json({
@@ -550,24 +622,23 @@ async function settleExternalTransactionWebhook(req, res, next) {
           tx.fundsCapturedAt = new Date();
         }
 
-        if (!tx.adminRevenueCredited) {
-          const adminUser = await User.findOne({ email: "admin@paynoval.com" })
-            .select("_id")
-            .session(sessOpts.session || null);
+        if (!tx.treasuryRevenueCredited) {
+          const treasuryMeta = resolveFeesTreasuryMeta(tx);
 
-          if (!adminUser) {
-            throw createError(500, "Compte administrateur introuvable");
-          }
-
-          await creditAdminRevenue({
+          const creditResult = await creditTreasuryRevenue({
             transaction: tx,
             pricingSnapshot: tx.pricingSnapshot || {},
-            adminUserId: adminUser._id,
+            treasurySystemType: treasuryMeta.treasurySystemType,
+            treasuryLabel: treasuryMeta.treasuryLabel,
             session,
           });
 
-          tx.adminRevenueCredited = true;
-          tx.adminRevenueCreditedAt = new Date();
+          tx.treasuryRevenue = creditResult?.treasuryRevenue || null;
+          tx.treasuryRevenueCredited = true;
+          tx.treasuryRevenueCreditedAt = new Date();
+          tx.treasuryUserId = treasuryMeta.treasuryUserId;
+          tx.treasurySystemType = treasuryMeta.treasurySystemType;
+          tx.treasuryLabel = treasuryMeta.treasuryLabel;
         }
 
         tx.status = "confirmed";
@@ -583,7 +654,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
         await tx.save(sessOpts);
         await notifyParties(tx, "confirmed", session, notifyCurrency);
 
-        if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+        if (canUseSharedSession()) await session.commitTransaction();
         session.endSession();
 
         let referralSync = null;
@@ -599,6 +670,11 @@ async function settleExternalTransactionWebhook(req, res, next) {
           flow: tx.flow,
           status: tx.status,
           providerStatus: tx.providerStatus,
+          treasuryRevenue: tx.treasuryRevenue || null,
+          treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
+          treasuryUserId: tx.treasuryUserId || null,
+          treasurySystemType: tx.treasurySystemType || null,
+          treasuryLabel: tx.treasuryLabel || null,
           referralSync,
         });
       }
@@ -617,24 +693,23 @@ async function settleExternalTransactionWebhook(req, res, next) {
           tx.beneficiaryCreditedAt = new Date();
         }
 
-        if (!tx.adminRevenueCredited) {
-          const adminUser = await User.findOne({ email: "admin@paynoval.com" })
-            .select("_id")
-            .session(sessOpts.session || null);
+        if (!tx.treasuryRevenueCredited) {
+          const treasuryMeta = resolveFeesTreasuryMeta(tx);
 
-          if (!adminUser) {
-            throw createError(500, "Compte administrateur introuvable");
-          }
-
-          await creditAdminRevenue({
+          const creditResult = await creditTreasuryRevenue({
             transaction: tx,
             pricingSnapshot: tx.pricingSnapshot || {},
-            adminUserId: adminUser._id,
+            treasurySystemType: treasuryMeta.treasurySystemType,
+            treasuryLabel: treasuryMeta.treasuryLabel,
             session,
           });
 
-          tx.adminRevenueCredited = true;
-          tx.adminRevenueCreditedAt = new Date();
+          tx.treasuryRevenue = creditResult?.treasuryRevenue || null;
+          tx.treasuryRevenueCredited = true;
+          tx.treasuryRevenueCreditedAt = new Date();
+          tx.treasuryUserId = treasuryMeta.treasuryUserId;
+          tx.treasurySystemType = treasuryMeta.treasurySystemType;
+          tx.treasuryLabel = treasuryMeta.treasuryLabel;
         }
 
         tx.status = "confirmed";
@@ -650,7 +725,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
         await tx.save(sessOpts);
         await notifyParties(tx, "confirmed", session, notifyCurrency);
 
-        if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+        if (canUseSharedSession()) await session.commitTransaction();
         session.endSession();
 
         let referralSync = null;
@@ -666,6 +741,11 @@ async function settleExternalTransactionWebhook(req, res, next) {
           flow: tx.flow,
           status: tx.status,
           providerStatus: tx.providerStatus,
+          treasuryRevenue: tx.treasuryRevenue || null,
+          treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
+          treasuryUserId: tx.treasuryUserId || null,
+          treasurySystemType: tx.treasurySystemType || null,
+          treasuryLabel: tx.treasuryLabel || null,
           referralSync,
         });
       }
@@ -673,7 +753,6 @@ async function settleExternalTransactionWebhook(req, res, next) {
       throw createError(400, `Flow externe non supporté en SUCCESS: ${tx.flow}`);
     }
 
-    // FAILED
     if (payload.providerReference || payload.reference) {
       tx.providerReference = payload.providerReference || payload.reference;
     }
@@ -717,7 +796,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
     await tx.save(sessOpts);
     await notifyParties(tx, "failed", session, notifyCurrency);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (canUseSharedSession()) await session.commitTransaction();
     session.endSession();
 
     return res.json({
@@ -729,7 +808,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
     });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);

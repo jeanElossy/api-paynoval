@@ -3,7 +3,7 @@
 // const createError = require("http-errors");
 // const runtime = require("../shared/runtime");
 
-// const { notifyParties } = require("../shared/notifications");
+// const { notifyTransactionEvent } = require("../transactionNotificationService");
 
 // const {
 //   sanitize,
@@ -347,36 +347,11 @@
 //       effectivePricingId: effectivePricingId || undefined,
 //     });
 
-//     safeLog("info", "[TX INTERNAL] initiate:start", {
-//       senderId,
-//       toEmail: cleanEmail,
-//       amount: amt,
-//       currencySourceISO,
-//       currencyTargetISO,
-//       funds: "paynoval",
-//       destination: "paynoval",
-//       provider: "paynoval",
-//       method: "INTERNAL",
-//       sourceCountry: normalizeCountryLoose(sourceCountryRaw || effectiveCountry),
-//       targetCountry: normalizeCountryLoose(targetCountryRaw || effectiveCountry),
-//       pricingId: body?.pricingId || null,
-//       quoteId: body?.quoteId || null,
-//       effectivePricingId: effectivePricingId || null,
-//     });
-
 //     let pricingPayload;
 //     try {
 //       pricingPayload = await fetchPricingQuoteFromGateway({
 //         authHeader,
 //         pricingInput,
-//       });
-
-//       safeLog("info", "[TX INTERNAL] pricing quote gateway success", {
-//         senderId,
-//         toEmail: cleanEmail,
-//         pricingId: body?.pricingId || null,
-//         quoteId: body?.quoteId || null,
-//         effectivePricingId: effectivePricingId || null,
 //       });
 //     } catch (e) {
 //       safeLog("error", "[TX INTERNAL] pricing quote gateway error", {
@@ -402,15 +377,12 @@
 //     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
 //       throw createError(500, "grossFrom pricing invalide");
 //     }
-
 //     if (!Number.isFinite(fee) || fee < 0) {
 //       throw createError(500, "fee pricing invalide");
 //     }
-
 //     if (!Number.isFinite(netFrom) || netFrom < 0) {
 //       throw createError(500, "netFrom pricing invalide");
 //     }
-
 //     if (!Number.isFinite(netTo) || netTo <= 0) {
 //       throw createError(500, "netTo pricing invalide");
 //     }
@@ -426,10 +398,6 @@
 
 //     if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
 //       throw createError(500, "Taux appliqué invalide");
-//     }
-
-//     if (netFromStd > amountSourceStd) {
-//       throw createError(500, "Incohérence pricing: netFrom > grossFrom");
 //     }
 
 //     const reference = await generateTransactionRef();
@@ -568,18 +536,6 @@
 
 //     const [tx] = await Transaction.create([txDoc], sessOpts);
 
-//     safeLog("info", "[TX INTERNAL] transaction-created", {
-//       transactionId: String(tx._id),
-//       reference: tx.reference,
-//       flow: tx.flow,
-//       status: tx.status,
-//       providerStatus: tx.providerStatus,
-//       senderId,
-//       receiverId: String(receiver._id),
-//       quoteId: body?.quoteId || null,
-//       effectivePricingId: effectivePricingId || null,
-//     });
-
 //     await reserveSenderFunds({
 //       transaction: tx,
 //       senderId: senderUser._id,
@@ -592,14 +548,6 @@
 //     tx.fundsReservedAt = new Date();
 //     tx.providerStatus = "FUNDS_RESERVED";
 //     await tx.save(sessOpts);
-
-//     safeLog("info", "[TX INTERNAL] funds-reserved", {
-//       transactionId: String(tx._id),
-//       reference: tx.reference,
-//       amountSourceStd,
-//       currencySourceISO,
-//       fundsReserved: tx.fundsReserved,
-//     });
 
 //     logTransaction({
 //       userId: senderId,
@@ -617,15 +565,9 @@
 //       flagReason: "",
 //       transactionId: tx._id,
 //       ip: req.ip,
-//     }).catch((logErr) => {
-//       safeLog("warn", "[TX INTERNAL] logTransaction failed", {
-//         transactionId: String(tx._id),
-//         reference: tx.reference,
-//         message: logErr?.message || "unknown_error",
-//       });
-//     });
+//     }).catch(() => {});
 
-//     await notifyParties(tx, "initiated", session, currencySourceISO);
+//     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
 //     if (runtime.canUseSharedSession()) {
 //       await session.commitTransaction();
@@ -702,6 +644,9 @@ const {
   extractPricingBundle,
 } = require("../shared/pricing");
 
+const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
 function norm(v) {
   return String(v || "").trim().toLowerCase();
 }
@@ -757,13 +702,6 @@ function maskSecret(v) {
   return v ? "***" : undefined;
 }
 
-function normalizeCountryLoose(v) {
-  return String(v || "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, " ");
-}
-
 function resolveCountryForSource(body = {}) {
   return body.fromCountry || body.sourceCountry || body.country || "";
 }
@@ -816,6 +754,22 @@ function buildDebugBody(body = {}) {
     recipientInfo: body?.recipientInfo,
     meta: body?.meta,
     metadata: body?.metadata,
+  };
+}
+
+function resolveFeesTreasurySeed() {
+  const treasurySystemType = String(
+    runtime.normalizeTreasurySystemType
+      ? runtime.normalizeTreasurySystemType(DEFAULT_FEES_TREASURY_SYSTEM_TYPE)
+      : DEFAULT_FEES_TREASURY_SYSTEM_TYPE
+  )
+    .trim()
+    .toUpperCase();
+
+  return {
+    treasuryUserId: null,
+    treasurySystemType,
+    treasuryLabel: DEFAULT_FEES_TREASURY_LABEL,
   };
 }
 
@@ -1052,7 +1006,7 @@ async function initiateInternal(req, res, next) {
       fee,
       netFrom,
       netTo,
-      adminRevenue,
+      treasuryRevenue,
     } = extractPricingBundle(pricingPayload, pricingInput);
 
     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
@@ -1073,9 +1027,6 @@ async function initiateInternal(req, res, next) {
     const netFromStd = round2(netFrom);
     const amountTargetStd = round2(netTo);
     const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
-    const adminRevenueStd = Number.isFinite(Number(adminRevenue))
-      ? round2(Number(adminRevenue))
-      : 0;
 
     if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
       throw createError(500, "Taux appliqué invalide");
@@ -1084,6 +1035,7 @@ async function initiateInternal(req, res, next) {
     const reference = await generateTransactionRef();
     const securityAnswerHash = sha256Hex(aRaw);
     const amlSnapshot = req.aml || null;
+    const treasurySeed = resolveFeesTreasurySeed();
 
     const safeRecipientInfo = isPlainObject(recipientInfo) ? recipientInfo : {};
     const recipientName =
@@ -1174,9 +1126,12 @@ async function initiateInternal(req, res, next) {
       feeActual: null,
       feeId: null,
 
-      adminRevenue: adminRevenueStd,
-      adminRevenueCredited: false,
-      adminRevenueCreditedAt: null,
+      treasuryRevenue,
+      treasuryRevenueCredited: false,
+      treasuryRevenueCreditedAt: null,
+      treasuryUserId: treasurySeed.treasuryUserId,
+      treasurySystemType: treasurySeed.treasurySystemType,
+      treasuryLabel: treasurySeed.treasuryLabel,
 
       securityQuestion: q,
       securityAnswerHash,
@@ -1275,9 +1230,9 @@ async function initiateInternal(req, res, next) {
         feeRevenue: pricingSnapshot?.result?.feeRevenue ?? null,
         fxRevenue: pricingSnapshot?.result?.fxRevenue ?? null,
       },
-      adminRevenue: adminRevenueStd,
+      treasuryRevenue,
       fundsReserved: true,
-      adminCreditedAtInitiate: false,
+      treasuryCreditedAtInitiate: false,
     });
   } catch (err) {
     safeLog("error", "[TX INTERNAL] failed", {

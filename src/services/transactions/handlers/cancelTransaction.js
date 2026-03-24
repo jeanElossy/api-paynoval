@@ -18,7 +18,8 @@
 //   assertTransition,
 // } = require("../shared/runtime");
 
-// const { notifyParties } = require("../shared/notifications");
+// const { notifyTransactionEvent } = require("../transactionNotificationService");
+
 // const { sanitize, toFloat, round2, getGatewayBase } = require("../shared/helpers");
 
 // const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
@@ -107,9 +108,6 @@
 //       throw createError(400, `Flow non supporté pour cancel: ${tx.flow}`);
 //     }
 
-//     /**
-//      * Si déjà exécutée / créditée -> trop tard
-//      */
 //     if (tx.fundsCaptured || tx.beneficiaryCredited) {
 //       throw createError(409, "Transaction déjà exécutée, annulation impossible");
 //     }
@@ -232,7 +230,7 @@
 
 //     await tx.save(sessOpts);
 
-//     await notifyParties(tx, "cancelled", session, sourceCurrency);
+//     await notifyTransactionEvent(tx, "cancelled", session, sourceCurrency);
 
 //     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
 //     session.endSession();
@@ -269,6 +267,7 @@
 
 
 
+
 "use strict";
 
 const createError = require("http-errors");
@@ -276,21 +275,21 @@ const createError = require("http-errors");
 const {
   axios,
   Transaction,
-  User,
   logTransaction,
   releaseSenderReserve,
   chargeCancellationFee,
   convertAmount,
   GATEWAY_URL,
   INTERNAL_TOKEN,
+  resolveTreasuryFromSystemType,
+  normalizeTreasurySystemType,
   startTxSession,
   maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
+  canUseSharedSession,
   assertTransition,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
-
 const { sanitize, toFloat, round2, getGatewayBase } = require("../shared/helpers");
 
 const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
@@ -300,6 +299,9 @@ const OUTBOUND_EXTERNAL_FLOWS = new Set([
   "PAYNOVAL_TO_CARD_PAYOUT",
 ]);
 
+const FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+const FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
 function isInternalTransfer(tx) {
   return tx?.flow === INTERNAL_FLOW;
 }
@@ -308,14 +310,43 @@ function isOutboundExternalPayout(tx) {
   return OUTBOUND_EXTERNAL_FLOWS.has(String(tx?.flow || ""));
 }
 
+function resolveFeesTreasuryMeta(tx) {
+  const treasurySystemType = normalizeTreasurySystemType(
+    tx?.treasurySystemType || FEES_TREASURY_SYSTEM_TYPE
+  );
+
+  const treasuryUserId = String(
+    tx?.treasuryUserId || resolveTreasuryFromSystemType(treasurySystemType) || ""
+  ).trim();
+
+  const treasuryLabel = String(
+    tx?.treasuryLabel || FEES_TREASURY_LABEL
+  ).trim();
+
+  if (!treasuryUserId) {
+    throw createError(
+      500,
+      `Treasury introuvable pour ${treasurySystemType}`
+    );
+  }
+
+  return {
+    treasuryUserId,
+    treasurySystemType,
+    treasuryLabel,
+  };
+}
+
 async function cancelController(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    if (canUseSharedSession()) session.startTransaction();
 
-    const { transactionId, reason = "Annulé" } = req.body;
-    if (!transactionId) throw createError(400, "transactionId requis pour annuler");
+    const { transactionId, reason = "Annulé" } = req.body || {};
+    if (!transactionId) {
+      throw createError(400, "transactionId requis pour annuler");
+    }
 
     const sessOpts = maybeSessionOpts(session);
 
@@ -337,11 +368,15 @@ async function cancelController(req, res, next) {
         "+fundsReserved",
         "+fundsCaptured",
         "+reserveReleased",
+        "+reserveReleasedAt",
         "+beneficiaryCredited",
         "+cancellationFee",
         "+cancellationFeeType",
         "+cancellationFeePercent",
         "+cancellationFeeId",
+        "+treasuryUserId",
+        "+treasurySystemType",
+        "+treasuryLabel",
       ])
       .session(sessOpts.session || null);
 
@@ -354,7 +389,12 @@ async function cancelController(req, res, next) {
       amount: toFloat(tx.amount),
       currency: tx.senderCurrencySymbol,
       toEmail: tx.recipientEmail || "",
-      details: { transactionId: tx._id.toString(), reason, flow: tx.flow },
+      details: {
+        transactionId: tx._id.toString(),
+        reason,
+        flow: tx.flow,
+        treasurySystemType: FEES_TREASURY_SYSTEM_TYPE,
+      },
       flagged: false,
       flagReason: "",
       transactionId: tx._id,
@@ -363,7 +403,7 @@ async function cancelController(req, res, next) {
 
     assertTransition(tx.status, "cancelled");
 
-    const userId = String(req.user.id);
+    const userId = String(req.user?.id || req.user?._id || "");
     const senderId = String(tx.sender || "");
     const receiverId = String(tx.receiver || "");
 
@@ -385,7 +425,13 @@ async function cancelController(req, res, next) {
 
     const grossSource = round2(toFloat(tx.amount));
     const netStored = round2(toFloat(tx.netAmount));
-    const sourceCurrency = String(tx.senderCurrencySymbol || "").trim().toUpperCase();
+    const sourceCurrency = String(tx.senderCurrencySymbol || "")
+      .trim()
+      .toUpperCase();
+
+    if (!sourceCurrency) {
+      throw createError(500, "Devise source introuvable sur la transaction");
+    }
 
     if (tx.fundsReserved && !tx.reserveReleased) {
       await releaseSenderReserve({
@@ -418,7 +464,9 @@ async function cancelController(req, res, next) {
         },
         headers: {
           ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
-          ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
+          ...(req.headers.authorization
+            ? { Authorization: req.headers.authorization }
+            : {}),
         },
         timeout: 8000,
       });
@@ -440,42 +488,53 @@ async function cancelController(req, res, next) {
       throw createError(400, "Frais d’annulation supérieurs au net à rembourser");
     }
 
-    let adminFeeConverted = 0;
-    let conversionRateToCAD = 0;
+    let treasuryFeeAmount = cancellationFee;
+    let treasuryFeeCurrency = sourceCurrency;
+    let treasuryConversionRate = 1;
+
+    const treasuryMeta =
+      cancellationFee > 0 ? resolveFeesTreasuryMeta(tx) : null;
 
     if (cancellationFee > 0) {
-      try {
-        const converted = await convertAmount(sourceCurrency, "CAD", cancellationFee);
-        adminFeeConverted = round2(toFloat(converted?.converted, 0));
-        conversionRateToCAD = Number(converted?.rate || 0);
-      } catch {
-        adminFeeConverted = 0;
-        conversionRateToCAD = 0;
-      }
-    }
+      const treasuryManagedCurrency = String(
+        process.env.FEES_TREASURY_DEFAULT_CURRENCY || sourceCurrency
+      )
+        .trim()
+        .toUpperCase();
 
-    let adminUserId = null;
-    if (adminFeeConverted > 0) {
-      const adminUser = await User.findOne({ email: "admin@paynoval.com" })
-        .select("_id")
-        .session(sessOpts.session || null);
+      if (treasuryManagedCurrency && treasuryManagedCurrency !== sourceCurrency) {
+        try {
+          const converted = await convertAmount(
+            sourceCurrency,
+            treasuryManagedCurrency,
+            cancellationFee
+          );
 
-      if (!adminUser) {
-        throw createError(500, "Compte administrateur introuvable");
+          treasuryFeeAmount = round2(toFloat(converted?.converted, 0));
+          treasuryFeeCurrency = treasuryManagedCurrency;
+          treasuryConversionRate = Number(converted?.rate || 0) || 0;
+        } catch {
+          treasuryFeeAmount = cancellationFee;
+          treasuryFeeCurrency = sourceCurrency;
+          treasuryConversionRate = 1;
+        }
       }
-      adminUserId = adminUser._id;
     }
 
     let feeChargeResult = null;
-    if (cancellationFee > 0 && adminUserId) {
+
+    if (cancellationFee > 0 && treasuryMeta?.treasuryUserId) {
       feeChargeResult = await chargeCancellationFee({
         transaction: tx,
         senderId: tx.sender,
         senderCurrency: sourceCurrency,
         feeSourceAmount: cancellationFee,
-        adminUserId,
-        adminFeeCAD: adminFeeConverted,
-        conversionRateToCAD,
+        treasuryUserId: treasuryMeta.treasuryUserId,
+        treasurySystemType: treasuryMeta.treasurySystemType,
+        treasuryLabel: treasuryMeta.treasuryLabel,
+        treasuryFeeAmount,
+        treasuryFeeCurrency,
+        conversionRateToTreasury: treasuryConversionRate,
         feeType: cancellationFeeType,
         feePercent: cancellationFeePercent,
         feeId: cancellationFeeId,
@@ -499,11 +558,22 @@ async function cancelController(req, res, next) {
     tx.cancellationFeePercent = cancellationFeePercent;
     tx.cancellationFeeId = cancellationFeeId;
 
+    if (treasuryMeta) {
+      tx.treasuryUserId = treasuryMeta.treasuryUserId;
+      tx.treasurySystemType = treasuryMeta.treasurySystemType;
+      tx.treasuryLabel = treasuryMeta.treasuryLabel;
+    } else {
+      tx.treasuryUserId = tx.treasuryUserId || null;
+      tx.treasurySystemType =
+        tx.treasurySystemType || FEES_TREASURY_SYSTEM_TYPE;
+      tx.treasuryLabel = tx.treasuryLabel || FEES_TREASURY_LABEL;
+    }
+
     await tx.save(sessOpts);
 
     await notifyTransactionEvent(tx, "cancelled", session, sourceCurrency);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (canUseSharedSession()) await session.commitTransaction();
     session.endSession();
 
     return res.json({
@@ -520,13 +590,19 @@ async function cancelController(req, res, next) {
       cancellationFeeType,
       cancellationFeePercent,
       cancellationFeeId,
-      adminFeeCredited: adminFeeConverted,
-      adminCurrency: "CAD",
+      treasuryFeeCredited: treasuryFeeAmount,
+      treasuryFeeCurrency,
+      treasuryConversionRate,
+      treasuryUserId: treasuryMeta?.treasuryUserId || tx.treasuryUserId || null,
+      treasurySystemType:
+        treasuryMeta?.treasurySystemType || tx.treasurySystemType || FEES_TREASURY_SYSTEM_TYPE,
+      treasuryLabel:
+        treasuryMeta?.treasuryLabel || tx.treasuryLabel || FEES_TREASURY_LABEL,
       feeChargeResult: feeChargeResult || null,
     });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);

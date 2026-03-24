@@ -14,10 +14,12 @@
 //   normalizePricingSnapshot,
 //   startTxSession,
 //   maybeSessionOpts,
-//   CAN_USE_SHARED_SESSION,
+//   canUseSharedSession,
 // } = require("../shared/runtime");
 
-// const { notifyParties } = require("../shared/notifications");
+
+
+// const { notifyTransactionEvent } = require("../transactionNotificationService");
 
 // const {
 //   sanitize,
@@ -52,10 +54,6 @@
 
 // const { submitExternalExecution } = require("./submitExternalExecution");
 
-// /* -------------------------------------------------------------------------- */
-// /* Common helpers                                                             */
-// /* -------------------------------------------------------------------------- */
-
 // function ensureBearer(req) {
 //   const authHeader = req.headers.authorization;
 //   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -71,6 +69,7 @@
 //       body.cardHolder ||
 //       body.toName ||
 //       body.recipientInfo?.name ||
+//       body.beneficiary?.name ||
 //       "Bénéficiaire externe"
 //   );
 // }
@@ -85,58 +84,158 @@
 //   );
 // }
 
+// function pickExternalRecipientEmail(body = {}) {
+//   const email =
+//     body.toEmail ||
+//     body.recipientEmail ||
+//     body.recipientInfo?.email ||
+//     body.recipientInfo?.recipientEmail ||
+//     body.beneficiary?.email ||
+//     "";
+
+//   if (!isEmailLike(email)) return null;
+//   return String(email).trim().toLowerCase();
+// }
+
+// function normalizeMethodForPricing(body = {}, provider = "") {
+//   const method = String(body.method || "").trim().toUpperCase();
+//   if (method) return method;
+
+//   const methodType = String(body.methodType || "").trim().toLowerCase();
+
+//   if (methodType === "internal") return "INTERNAL";
+//   if (methodType === "bank") return "BANK";
+//   if (methodType === "visa" || methodType === "card") return "VISA";
+
+//   if (
+//     ["mobilemoney", "mobile_money", "momo", "mobilemoneyaccount", "mobile_money_account"].includes(
+//       methodType
+//     )
+//   ) {
+//     return "MOBILE_MONEY";
+//   }
+
+//   if (provider) return String(provider).trim().toUpperCase();
+//   return "MOBILE_MONEY";
+// }
+
+// function normalizeTxTypeForPricing(body = {}) {
+//   const txType = String(body.txType || body.transactionType || "").trim().toUpperCase();
+//   if (txType) return txType;
+
+//   const action = String(body.action || "").trim().toLowerCase();
+//   if (action === "deposit") return "DEPOSIT";
+//   if (action === "withdraw") return "WITHDRAW";
+
+//   return "TRANSFER";
+// }
+
 // function buildRecipientExternalMeta(flow, body = {}) {
 //   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT) {
 //     return {
-//       phoneNumber: body.phoneNumber || body.toPhone || null,
-//       operator: body.operator || body.metadata?.provider || null,
-//       recipientName: body.recipientName || body.recipientInfo?.name || null,
+//       phoneNumber:
+//         body.phoneNumber ||
+//         body.toPhone ||
+//         body.recipientPhone ||
+//         body.recipient ||
+//         body.beneficiary?.phoneNumber ||
+//         null,
+//       operator:
+//         body.operator ||
+//         body.operatorName ||
+//         body.metadata?.provider ||
+//         body.meta?.provider ||
+//         null,
+//       recipientName:
+//         body.recipientName ||
+//         body.toName ||
+//         body.recipientInfo?.name ||
+//         body.beneficiary?.name ||
+//         null,
 //     };
 //   }
 
 //   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT) {
 //     return {
-//       iban: body.iban || null,
-//       swift: body.swift || null,
-//       bankName: body.bankName || null,
-//       accountHolder: body.accountHolder || null,
+//       iban: body.iban || body.beneficiary?.iban || null,
+//       swift: body.swift || body.beneficiary?.swift || null,
+//       bankName: body.bankName || body.beneficiary?.bankName || null,
+//       accountHolder:
+//         body.accountHolder ||
+//         body.recipientName ||
+//         body.beneficiary?.accountHolder ||
+//         body.beneficiary?.name ||
+//         null,
 //       accountNumberLast4: body.accountNumber
 //         ? String(body.accountNumber).slice(-4)
+//         : body.bankAccountNumber
+//         ? String(body.bankAccountNumber).slice(-4)
+//         : body.beneficiary?.accountNumber
+//         ? String(body.beneficiary.accountNumber).slice(-4)
 //         : null,
 //     };
 //   }
 
 //   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
 //     return {
-//       maskedCardNumber: maskPan(body.cardNumber),
-//       cardHolder: body.cardHolder || body.toName || null,
+//       maskedCardNumber: maskPan(body.cardNumber || body.beneficiary?.cardNumber),
+//       cardHolder:
+//         body.cardHolder ||
+//         body.toName ||
+//         body.recipientName ||
+//         body.beneficiary?.cardHolder ||
+//         body.beneficiary?.name ||
+//         null,
 //       providerHint: body.provider || body.providerSelected || null,
 //     };
 //   }
 
 //   if (flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL) {
 //     return {
-//       phoneNumber: body.phoneNumber || body.fromPhone || null,
-//       operator: body.operator || body.metadata?.provider || null,
+//       phoneNumber:
+//         body.phoneNumber ||
+//         body.fromPhone ||
+//         body.recipientPhone ||
+//         body.beneficiary?.phoneNumber ||
+//         null,
+//       operator:
+//         body.operator ||
+//         body.operatorName ||
+//         body.metadata?.provider ||
+//         body.meta?.provider ||
+//         null,
 //     };
 //   }
 
 //   if (flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL) {
 //     return {
-//       iban: body.iban || null,
-//       swift: body.swift || null,
-//       bankName: body.bankName || null,
-//       accountHolder: body.accountHolder || null,
+//       iban: body.iban || body.beneficiary?.iban || null,
+//       swift: body.swift || body.beneficiary?.swift || null,
+//       bankName: body.bankName || body.beneficiary?.bankName || null,
+//       accountHolder:
+//         body.accountHolder ||
+//         body.senderName ||
+//         body.beneficiary?.accountHolder ||
+//         body.beneficiary?.name ||
+//         null,
 //       accountNumberLast4: body.accountNumber
 //         ? String(body.accountNumber).slice(-4)
+//         : body.bankAccountNumber
+//         ? String(body.bankAccountNumber).slice(-4)
+//         : body.beneficiary?.accountNumber
+//         ? String(body.beneficiary.accountNumber).slice(-4)
 //         : null,
 //     };
 //   }
 
 //   if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
 //     return {
-//       maskedCardNumber: maskPan(body.cardNumber),
-//       cardHolder: body.cardHolder || null,
+//       maskedCardNumber: maskPan(body.cardNumber || body.beneficiary?.cardNumber),
+//       cardHolder:
+//         body.cardHolder ||
+//         body.senderName ||
+//         body.beneficiary?.cardHolder ||
+//         null,
 //       providerHint: body.provider || body.providerSelected || null,
 //     };
 //   }
@@ -144,7 +243,15 @@
 //   return {};
 // }
 
-// async function buildPricingContext({ req, body, amount, country, provider, currencySourceISO, currencyTargetISO }) {
+// async function buildPricingContext({
+//   req,
+//   body,
+//   amount,
+//   country,
+//   provider,
+//   currencySourceISO,
+//   currencyTargetISO,
+// }) {
 //   const authHeader = ensureBearer(req);
 
 //   const pricingInput = pickBodyPricingInput({
@@ -153,10 +260,10 @@
 //     fromCurrency: currencySourceISO,
 //     toCurrency: currencyTargetISO,
 //     provider,
-//     method: body.method || provider.toUpperCase(),
-//     txType: body.txType || (body.action === "deposit" ? "DEPOSIT" : body.action === "withdraw" ? "WITHDRAW" : "TRANSFER"),
-//     fromCountry: body.fromCountry || country,
-//     toCountry: body.toCountry || body.destinationCountry || country,
+//     method: normalizeMethodForPricing(body, provider),
+//     txType: normalizeTxTypeForPricing(body),
+//     fromCountry: body.fromCountry || body.sourceCountry || country,
+//     toCountry: body.toCountry || body.targetCountry || body.destinationCountry || country,
 //   });
 
 //   let pricingPayload;
@@ -181,7 +288,7 @@
 //     fee,
 //     netFrom,
 //     netTo,
-//     adminRevenue,
+//     treasuryRevenue,
 //   } = extractPricingBundle(pricingPayload, pricingInput);
 
 //   if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
@@ -207,19 +314,15 @@
 //     netFrom,
 //     amountTargetStd,
 //     rateUsed,
-//     adminRevenue,
+//     treasuryRevenue,
 //   };
 // }
-
-// /* -------------------------------------------------------------------------- */
-// /* Outbound payout: PayNoval -> external rail                                 */
-// /* -------------------------------------------------------------------------- */
 
 // async function initiateOutboundExternal(req, res, next) {
 //   const session = await startTxSession();
 
 //   try {
-//     if (CAN_USE_SHARED_SESSION) session.startTransaction();
+//     if (canUseSharedSession()) session.startTransaction();
 
 //     const body = req.body || {};
 //     const flow = resolveExternalFlow(body);
@@ -281,8 +384,7 @@
 //     await validationService.detectBasicFraud({
 //       sender: senderId,
 //       receiverEmail:
-//         body.toEmail ||
-//         body.recipientEmail ||
+//         pickExternalRecipientEmail(body) ||
 //         externalRecipientMeta.phoneNumber ||
 //         externalRecipientMeta.iban ||
 //         externalRecipientMeta.maskedCardNumber ||
@@ -297,7 +399,12 @@
 //     req.body.localCurrencySymbol = currencyTargetISO;
 //     req.body.fromCountry = fromCountry;
 //     req.body.toCountry = toCountry;
+//     req.body.sourceCountry = fromCountry;
+//     req.body.targetCountry = toCountry;
 //     req.body.country = resolvedCountry;
+//     req.body.description = sanitize(description);
+//     req.body.securityQuestion = q;
+//     req.body.securityAnswer = aRaw;
 
 //     const pricingCtx = await buildPricingContext({
 //       req,
@@ -309,7 +416,7 @@
 //       currencyTargetISO,
 //     });
 
-//     const reference = await generateTransactionRef();
+//     const reference = sanitize(body.reference) || (await generateTransactionRef());
 //     const securityAnswerHash = sha256Hex(aRaw);
 //     const amlSnapshot = req.aml || null;
 
@@ -322,6 +429,14 @@
 //           entry: "external_payout.pending",
 //           requestOrigin: "tx-core",
 //           externalRecipient: externalRecipientMeta,
+//           description: sanitize(description),
+//           securityQuestion: q,
+//           effectivePricingId:
+//             body.effectivePricingId ||
+//             body.pricingLockId ||
+//             body.pricingId ||
+//             body.quoteId ||
+//             null,
 //         },
 //       }),
 //     };
@@ -344,26 +459,19 @@
 //         {
 //           userId: senderUser._id,
 //           internalImported: false,
-
 //           flow,
 //           operationKind: "transfer",
 //           initiatedBy: "user",
 //           context: "external_payout",
 //           contextId: null,
-
 //           reference,
 //           idempotencyKey: body.idempotencyKey || null,
-
 //           sender: senderUser._id,
 //           receiver: null,
-
 //           senderName: senderUser.fullName,
 //           senderEmail: senderUser.email,
 //           nameDestinataire: pickExternalDisplayName(body),
-//           recipientEmail: isEmailLike(body.toEmail || body.recipientEmail || "")
-//             ? String(body.toEmail || body.recipientEmail).trim().toLowerCase()
-//             : null,
-
+//           recipientEmail: pickExternalRecipientEmail(body),
 //           destination:
 //             flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
 //               ? "mobilemoney"
@@ -372,36 +480,30 @@
 //               : "visa_direct",
 //           funds: "paynoval",
 //           provider,
-//           operator: body.operator || txMetadata?.provider || null,
+//           operator: body.operator || body.operatorName || txMetadata?.provider || null,
 //           country: sanitize(resolvedCountry),
-
 //           amount: dec2(pricingCtx.amountSourceStd),
 //           transactionFees: dec2(pricingCtx.feeSourceStd),
 //           netAmount: dec2(pricingCtx.netFrom),
 //           exchangeRate: dec2(pricingCtx.rateUsed),
 //           localAmount: dec2(pricingCtx.amountTargetStd),
-
 //           senderCurrencySymbol: currencySourceISO,
 //           localCurrencySymbol: currencyTargetISO,
-
 //           amountSource: dec2(pricingCtx.amountSourceStd),
 //           amountTarget: dec2(pricingCtx.amountTargetStd),
 //           feeSource: dec2(pricingCtx.feeSourceStd),
 //           fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
 //           currencySource: currencySourceISO,
 //           currencyTarget: currencyTargetISO,
-
 //           money: {
 //             source: { amount: pricingCtx.amountSourceStd, currency: currencySourceISO },
 //             feeSource: { amount: pricingCtx.feeSourceStd, currency: currencySourceISO },
 //             target: { amount: pricingCtx.amountTargetStd, currency: currencyTargetISO },
 //             fxRateSourceToTarget: pricingCtx.rateUsed,
 //           },
-
 //           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
 //           pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
 //           pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
-
 //           feeSnapshot: {
 //             fee: pricingCtx.feeSourceStd,
 //             netAfterFees: pricingCtx.netFrom,
@@ -411,28 +513,24 @@
 //           },
 //           feeActual: null,
 //           feeId: null,
-
-//           adminRevenue: pricingCtx.adminRevenue,
-//           adminRevenueCredited: false,
-//           adminRevenueCreditedAt: null,
-
+//           treasuryRevenue: pricingCtx.treasuryRevenue,
+//           treasuryRevenueCredited: false,
+//           treasuryRevenueCreditedAt: null,
+//           treasuryUserId: null,
+//           treasurySystemType: "FEES_TREASURY",
+//           treasuryLabel: "PayNoval Fees Treasury",
 //           securityQuestion: q,
 //           securityAnswerHash,
 //           securityCode: securityAnswerHash,
-
 //           amlSnapshot,
 //           amlStatus: amlSnapshot?.status || "passed",
-
 //           description: sanitize(description),
 //           orderId: body.orderId || null,
-
 //           metadata: txMetadata,
 //           meta: txMeta,
-
 //           status: "pending",
 //           providerReference: pickExternalRef(body),
 //           providerStatus: "PENDING_USER_CONFIRMATION",
-
 //           fundsReserved: false,
 //           fundsReservedAt: null,
 //           fundsCaptured: false,
@@ -443,7 +541,6 @@
 //           reserveReleasedAt: null,
 //           reversedAt: null,
 //           executedAt: null,
-
 //           attemptCount: 0,
 //           lastAttemptAt: null,
 //           lockedUntil: null,
@@ -488,9 +585,9 @@
 //       ip: req.ip,
 //     }).catch(() => {});
 
-//     await notifyParties(tx, "initiated", session, currencySourceISO);
+//     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
-//     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+//     if (canUseSharedSession()) await session.commitTransaction();
 //     session.endSession();
 
 //     let execution = null;
@@ -528,29 +625,25 @@
 //         feeRevenue: pricingCtx.pricingSnapshot?.result?.feeRevenue || null,
 //         fxRevenue: pricingCtx.pricingSnapshot?.result?.fxRevenue || null,
 //       },
-//       adminRevenue: pricingCtx.adminRevenue,
+//       treasuryRevenue: pricingCtx.treasuryRevenue,
 //       fundsReserved: true,
-//       adminCreditedAtInitiate: false,
+//       treasuryCreditedAtInitiate: false,
 //       externalRecipient: redactSensitiveFields(externalRecipientMeta),
 //     });
 //   } catch (err) {
 //     try {
-//       if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+//       if (canUseSharedSession()) await session.abortTransaction();
 //     } catch {}
 //     session.endSession();
 //     next(err);
 //   }
 // }
 
-// /* -------------------------------------------------------------------------- */
-// /* Inbound collection: external rail -> PayNoval                              */
-// /* -------------------------------------------------------------------------- */
-
 // async function initiateInboundExternal(req, res, next) {
 //   const session = await startTxSession();
 
 //   try {
-//     if (CAN_USE_SHARED_SESSION) session.startTransaction();
+//     if (canUseSharedSession()) session.startTransaction();
 
 //     const body = req.body || {};
 //     const flow = resolveExternalFlow(body);
@@ -600,7 +693,13 @@
 //     });
 
 //     await validationService.detectBasicFraud({
-//       sender: body.phoneNumber || body.iban || body.cardHolder || body.accountHolder || "external",
+//       sender:
+//         body.phoneNumber ||
+//         body.fromPhone ||
+//         body.iban ||
+//         body.cardHolder ||
+//         body.accountHolder ||
+//         "external",
 //       receiverEmail: receiverUser.email,
 //       amount: amt,
 //       currency: currencySourceISO,
@@ -612,7 +711,10 @@
 //     req.body.localCurrencySymbol = currencyTargetISO;
 //     req.body.fromCountry = fromCountry;
 //     req.body.toCountry = toCountry;
+//     req.body.sourceCountry = fromCountry;
+//     req.body.targetCountry = toCountry;
 //     req.body.country = resolvedCountry;
+//     req.body.description = sanitize(description);
 
 //     const pricingCtx = await buildPricingContext({
 //       req,
@@ -624,7 +726,7 @@
 //       currencyTargetISO,
 //     });
 
-//     const reference = await generateTransactionRef();
+//     const reference = sanitize(body.reference) || (await generateTransactionRef());
 //     const amlSnapshot = req.aml || null;
 
 //     const txMeta = {
@@ -636,6 +738,13 @@
 //           entry: "external_collection.pending",
 //           requestOrigin: "tx-core",
 //           externalSource: externalSourceMeta,
+//           description: sanitize(description),
+//           effectivePricingId:
+//             body.effectivePricingId ||
+//             body.pricingLockId ||
+//             body.pricingId ||
+//             body.quoteId ||
+//             null,
 //         },
 //       }),
 //     };
@@ -658,19 +767,15 @@
 //         {
 //           userId: receiverUser._id,
 //           internalImported: false,
-
 //           flow,
 //           operationKind: "transfer",
 //           initiatedBy: "user",
 //           context: "external_collection",
 //           contextId: null,
-
 //           reference,
 //           idempotencyKey: body.idempotencyKey || null,
-
 //           sender: null,
 //           receiver: receiverUser._id,
-
 //           senderName: sanitize(
 //             body.senderName ||
 //               body.accountHolder ||
@@ -680,7 +785,6 @@
 //           senderEmail: null,
 //           nameDestinataire: receiverUser.fullName,
 //           recipientEmail: receiverUser.email,
-
 //           destination: "paynoval",
 //           funds:
 //             flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
@@ -691,36 +795,30 @@
 //               ? "visa_direct"
 //               : "stripe",
 //           provider,
-//           operator: body.operator || txMetadata?.provider || null,
+//           operator: body.operator || body.operatorName || txMetadata?.provider || null,
 //           country: sanitize(resolvedCountry),
-
 //           amount: dec2(pricingCtx.amountSourceStd),
 //           transactionFees: dec2(pricingCtx.feeSourceStd),
 //           netAmount: dec2(pricingCtx.netFrom),
 //           exchangeRate: dec2(pricingCtx.rateUsed),
 //           localAmount: dec2(pricingCtx.amountTargetStd),
-
 //           senderCurrencySymbol: currencySourceISO,
 //           localCurrencySymbol: currencyTargetISO,
-
 //           amountSource: dec2(pricingCtx.amountSourceStd),
 //           amountTarget: dec2(pricingCtx.amountTargetStd),
 //           feeSource: dec2(pricingCtx.feeSourceStd),
 //           fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
 //           currencySource: currencySourceISO,
 //           currencyTarget: currencyTargetISO,
-
 //           money: {
 //             source: { amount: pricingCtx.amountSourceStd, currency: currencySourceISO },
 //             feeSource: { amount: pricingCtx.feeSourceStd, currency: currencySourceISO },
 //             target: { amount: pricingCtx.amountTargetStd, currency: currencyTargetISO },
 //             fxRateSourceToTarget: pricingCtx.rateUsed,
 //           },
-
 //           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
 //           pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
 //           pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
-
 //           feeSnapshot: {
 //             fee: pricingCtx.feeSourceStd,
 //             netAfterFees: pricingCtx.netFrom,
@@ -730,28 +828,24 @@
 //           },
 //           feeActual: null,
 //           feeId: null,
-
-//           adminRevenue: pricingCtx.adminRevenue,
-//           adminRevenueCredited: false,
-//           adminRevenueCreditedAt: null,
-
+//           treasuryRevenue: pricingCtx.treasuryRevenue,
+//           treasuryRevenueCredited: false,
+//           treasuryRevenueCreditedAt: null,
+//           treasuryUserId: null,
+//           treasurySystemType: "FEES_TREASURY",
+//           treasuryLabel: "PayNoval Fees Treasury",
 //           securityQuestion: null,
 //           securityAnswerHash: null,
 //           securityCode: null,
-
 //           amlSnapshot,
 //           amlStatus: amlSnapshot?.status || "passed",
-
 //           description: sanitize(description),
 //           orderId: body.orderId || null,
-
 //           metadata: txMetadata,
 //           meta: txMeta,
-
 //           status: "processing",
 //           providerReference: pickExternalRef(body),
 //           providerStatus: "AWAITING_PROVIDER_PAYMENT",
-
 //           fundsReserved: false,
 //           fundsReservedAt: null,
 //           fundsCaptured: false,
@@ -762,7 +856,6 @@
 //           reserveReleasedAt: null,
 //           reversedAt: null,
 //           executedAt: null,
-
 //           attemptCount: 0,
 //           lastAttemptAt: null,
 //           lockedUntil: null,
@@ -789,9 +882,9 @@
 //       ip: req.ip,
 //     }).catch(() => {});
 
-//     await notifyParties(tx, "processing", session, currencyTargetISO);
+//     await notifyTransactionEvent(tx, "processing", session, currencyTargetISO);
 
-//     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+//     if (canUseSharedSession()) await session.commitTransaction();
 //     session.endSession();
 
 //     let execution = null;
@@ -828,13 +921,13 @@
 //         feeRevenue: pricingCtx.pricingSnapshot?.result?.feeRevenue || null,
 //         fxRevenue: pricingCtx.pricingSnapshot?.result?.fxRevenue || null,
 //       },
-//       adminRevenue: pricingCtx.adminRevenue,
+//       treasuryRevenue: pricingCtx.treasuryRevenue,
 //       externalSource: redactSensitiveFields(externalSourceMeta),
 //       message: "Demande créée. En attente de confirmation provider.",
 //     });
 //   } catch (err) {
 //     try {
-//       if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+//       if (canUseSharedSession()) await session.abortTransaction();
 //     } catch {}
 //     session.endSession();
 //     next(err);
@@ -865,9 +958,10 @@ const {
   generateTransactionRef,
   reserveSenderFunds,
   normalizePricingSnapshot,
+  normalizeTreasurySystemType,
   startTxSession,
   maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
+  canUseSharedSession,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
@@ -905,12 +999,27 @@ const {
 
 const { submitExternalExecution } = require("./submitExternalExecution");
 
+const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
 function ensureBearer(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     throw createError(401, "Token manquant");
   }
   return authHeader;
+}
+
+function resolveFeesTreasurySeed() {
+  const treasurySystemType = normalizeTreasurySystemType
+    ? normalizeTreasurySystemType(DEFAULT_FEES_TREASURY_SYSTEM_TYPE)
+    : DEFAULT_FEES_TREASURY_SYSTEM_TYPE;
+
+  return {
+    treasuryUserId: null,
+    treasurySystemType,
+    treasuryLabel: DEFAULT_FEES_TREASURY_LABEL,
+  };
 }
 
 function pickExternalDisplayName(body = {}) {
@@ -1139,7 +1248,7 @@ async function buildPricingContext({
     fee,
     netFrom,
     netTo,
-    adminRevenue,
+    treasuryRevenue,
   } = extractPricingBundle(pricingPayload, pricingInput);
 
   if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
@@ -1165,7 +1274,7 @@ async function buildPricingContext({
     netFrom,
     amountTargetStd,
     rateUsed,
-    adminRevenue,
+    treasuryRevenue,
   };
 }
 
@@ -1173,7 +1282,7 @@ async function initiateOutboundExternal(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    if (canUseSharedSession()) session.startTransaction();
 
     const body = req.body || {};
     const flow = resolveExternalFlow(body);
@@ -1270,6 +1379,7 @@ async function initiateOutboundExternal(req, res, next) {
     const reference = sanitize(body.reference) || (await generateTransactionRef());
     const securityAnswerHash = sha256Hex(aRaw);
     const amlSnapshot = req.aml || null;
+    const treasurySeed = resolveFeesTreasurySeed();
 
     const txMeta = {
       ...((meta && typeof meta === "object") ? meta : {}),
@@ -1364,9 +1474,12 @@ async function initiateOutboundExternal(req, res, next) {
           },
           feeActual: null,
           feeId: null,
-          adminRevenue: pricingCtx.adminRevenue,
-          adminRevenueCredited: false,
-          adminRevenueCreditedAt: null,
+          treasuryRevenue: pricingCtx.treasuryRevenue,
+          treasuryRevenueCredited: false,
+          treasuryRevenueCreditedAt: null,
+          treasuryUserId: treasurySeed.treasuryUserId,
+          treasurySystemType: treasurySeed.treasurySystemType,
+          treasuryLabel: treasurySeed.treasuryLabel,
           securityQuestion: q,
           securityAnswerHash,
           securityCode: securityAnswerHash,
@@ -1435,7 +1548,7 @@ async function initiateOutboundExternal(req, res, next) {
 
     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (canUseSharedSession()) await session.commitTransaction();
     session.endSession();
 
     let execution = null;
@@ -1473,14 +1586,14 @@ async function initiateOutboundExternal(req, res, next) {
         feeRevenue: pricingCtx.pricingSnapshot?.result?.feeRevenue || null,
         fxRevenue: pricingCtx.pricingSnapshot?.result?.fxRevenue || null,
       },
-      adminRevenue: pricingCtx.adminRevenue,
+      treasuryRevenue: pricingCtx.treasuryRevenue,
       fundsReserved: true,
-      adminCreditedAtInitiate: false,
+      treasuryCreditedAtInitiate: false,
       externalRecipient: redactSensitiveFields(externalRecipientMeta),
     });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);
@@ -1491,7 +1604,7 @@ async function initiateInboundExternal(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    if (canUseSharedSession()) session.startTransaction();
 
     const body = req.body || {};
     const flow = resolveExternalFlow(body);
@@ -1576,6 +1689,7 @@ async function initiateInboundExternal(req, res, next) {
 
     const reference = sanitize(body.reference) || (await generateTransactionRef());
     const amlSnapshot = req.aml || null;
+    const treasurySeed = resolveFeesTreasurySeed();
 
     const txMeta = {
       ...((meta && typeof meta === "object") ? meta : {}),
@@ -1676,9 +1790,12 @@ async function initiateInboundExternal(req, res, next) {
           },
           feeActual: null,
           feeId: null,
-          adminRevenue: pricingCtx.adminRevenue,
-          adminRevenueCredited: false,
-          adminRevenueCreditedAt: null,
+          treasuryRevenue: pricingCtx.treasuryRevenue,
+          treasuryRevenueCredited: false,
+          treasuryRevenueCreditedAt: null,
+          treasuryUserId: treasurySeed.treasuryUserId,
+          treasurySystemType: treasurySeed.treasurySystemType,
+          treasuryLabel: treasurySeed.treasuryLabel,
           securityQuestion: null,
           securityAnswerHash: null,
           securityCode: null,
@@ -1729,7 +1846,7 @@ async function initiateInboundExternal(req, res, next) {
 
     await notifyTransactionEvent(tx, "processing", session, currencyTargetISO);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (canUseSharedSession()) await session.commitTransaction();
     session.endSession();
 
     let execution = null;
@@ -1766,13 +1883,13 @@ async function initiateInboundExternal(req, res, next) {
         feeRevenue: pricingCtx.pricingSnapshot?.result?.feeRevenue || null,
         fxRevenue: pricingCtx.pricingSnapshot?.result?.fxRevenue || null,
       },
-      adminRevenue: pricingCtx.adminRevenue,
+      treasuryRevenue: pricingCtx.treasuryRevenue,
       externalSource: redactSensitiveFields(externalSourceMeta),
       message: "Demande créée. En attente de confirmation provider.",
     });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);
@@ -1783,3 +1900,4 @@ module.exports = {
   initiateOutboundExternal,
   initiateInboundExternal,
 };
+

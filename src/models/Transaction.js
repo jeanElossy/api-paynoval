@@ -395,20 +395,40 @@ const transactionSchema = new mongoose.Schema(
       default: null,
     },
 
-    adminRevenue: {
+    treasuryRevenue: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
     },
 
-    adminRevenueCredited: {
+    treasuryRevenueCredited: {
       type: Boolean,
       default: false,
       index: true,
     },
 
-    adminRevenueCreditedAt: {
+    treasuryRevenueCreditedAt: {
       type: Date,
       default: null,
+    },
+
+    treasuryUserId: {
+      type: String,
+      default: null,
+      trim: true,
+      index: true,
+    },
+
+    treasurySystemType: {
+      type: String,
+      default: null,
+      trim: true,
+      index: true,
+    },
+
+    treasuryLabel: {
+      type: String,
+      default: null,
+      trim: true,
     },
 
     securityQuestion: {
@@ -679,7 +699,8 @@ transactionSchema.index({ status: 1, createdAt: -1 });
 transactionSchema.index({ flow: 1, status: 1, createdAt: -1 });
 transactionSchema.index({ provider: 1, providerStatus: 1, createdAt: -1 });
 transactionSchema.index({ providerReference: 1 }, { sparse: true });
-transactionSchema.index({ adminRevenueCredited: 1, createdAt: -1 });
+transactionSchema.index({ treasuryRevenueCredited: 1, createdAt: -1 });
+transactionSchema.index({ treasuryUserId: 1, treasurySystemType: 1, createdAt: -1 });
 transactionSchema.index({ archived: 1, createdAt: -1 });
 
 transactionSchema.index(
@@ -735,7 +756,9 @@ transactionSchema.set("toJSON", {
       if (m.source?.amount != null) m.source.amount = Number(m.source.amount);
       if (m.feeSource?.amount != null) m.feeSource.amount = Number(m.feeSource.amount);
       if (m.target?.amount != null) m.target.amount = Number(m.target.amount);
-      if (m.fxRateSourceToTarget != null) m.fxRateSourceToTarget = Number(m.fxRateSourceToTarget);
+      if (m.fxRateSourceToTarget != null) {
+        m.fxRateSourceToTarget = Number(m.fxRateSourceToTarget);
+      }
       ret.money = m;
     }
 
@@ -774,6 +797,21 @@ transactionSchema.pre("validate", function (next) {
   if (this.senderCurrencySymbol != null) this.senderCurrencySymbol = normCurrency(this.senderCurrencySymbol);
   if (this.localCurrencySymbol != null) this.localCurrencySymbol = normCurrency(this.localCurrencySymbol);
 
+  if (typeof this.treasurySystemType === "string") {
+    const t = this.treasurySystemType.trim().toUpperCase();
+    this.treasurySystemType = t || null;
+  }
+
+  if (typeof this.treasuryUserId === "string") {
+    const t = this.treasuryUserId.trim();
+    this.treasuryUserId = t || null;
+  }
+
+  if (typeof this.treasuryLabel === "string") {
+    const t = this.treasuryLabel.trim();
+    this.treasuryLabel = t || null;
+  }
+
   if (this.internalImported) {
     if (!this.userId && this.sender) this.userId = this.sender;
 
@@ -805,7 +843,7 @@ transactionSchema.pre("validate", function (next) {
   this.metadata = normalizeMixedObject(this.metadata);
   this.meta = normalizeMixedObject(this.meta);
   this.pricingSnapshot = normalizeMixedObject(this.pricingSnapshot);
-  this.adminRevenue = normalizeMixedObject(this.adminRevenue);
+  this.treasuryRevenue = normalizeMixedObject(this.treasuryRevenue);
   this.amlSnapshot = normalizeMixedObject(this.amlSnapshot);
   this.referralSnapshot = normalizeMixedObject(this.referralSnapshot);
   this.feeSnapshot = normalizeMixedObject(this.feeSnapshot);

@@ -10,6 +10,35 @@
 //   const modelName = "CagnotteVaultWithdrawalSettlement";
 //   if (conn.models[modelName]) return conn.models[modelName];
 
+//   const walletAfterSchema = new mongoose.Schema(
+//     {
+//       walletId: { type: String, default: "" },
+//       currency: { type: String, default: "", uppercase: true, trim: true },
+//       amount: { type: Number, default: 0 },
+//       availableAmount: { type: Number, default: 0 },
+//       reservedAmount: { type: Number, default: 0 },
+//     },
+//     { _id: false }
+//   );
+
+//   const moneySchema = new mongoose.Schema(
+//     {
+//       amount: { type: Number, required: true, min: 0 },
+//       currency: { type: String, required: true, uppercase: true, trim: true },
+//     },
+//     { _id: false }
+//   );
+
+//   const feeDebitSchema = new mongoose.Schema(
+//     {
+//       amount: { type: Number, default: 0, min: 0 },
+//       currency: { type: String, default: "", uppercase: true, trim: true },
+//       baseAmount: { type: Number, default: 0, min: 0 },
+//       baseCurrencyCode: { type: String, default: "", uppercase: true, trim: true },
+//     },
+//     { _id: false }
+//   );
+
 //   const schema = new mongoose.Schema(
 //     {
 //       reference: {
@@ -17,30 +46,42 @@
 //         required: true,
 //         unique: true,
 //         index: true,
+//         trim: true,
 //       },
 
 //       idempotencyKey: {
 //         type: String,
 //         required: true,
 //         index: true,
+//         trim: true,
 //       },
 
 //       userId: {
 //         type: String,
 //         required: true,
 //         index: true,
+//         trim: true,
+//       },
+
+//       adminUserId: {
+//         type: String,
+//         default: "",
+//         index: true,
+//         trim: true,
 //       },
 
 //       vaultId: {
 //         type: String,
 //         required: true,
 //         index: true,
+//         trim: true,
 //       },
 
 //       cagnotteId: {
 //         type: String,
 //         required: true,
 //         index: true,
+//         trim: true,
 //       },
 
 //       cagnotteName: {
@@ -57,39 +98,13 @@
 //       },
 
 //       credit: {
-//         amount: {
-//           type: Number,
-//           required: true,
-//           min: 0,
-//         },
-//         currency: {
-//           type: String,
-//           required: true,
-//           uppercase: true,
-//           trim: true,
-//         },
+//         type: moneySchema,
+//         required: true,
 //       },
 
 //       feeDebit: {
-//         amount: {
-//           type: Number,
-//           default: 0,
-//           min: 0,
-//         },
-//         currency: {
-//           type: String,
-//           uppercase: true,
-//           trim: true,
-//         },
-//         baseAmount: {
-//           type: Number,
-//           default: 0,
-//         },
-//         baseCurrencyCode: {
-//           type: String,
-//           uppercase: true,
-//           trim: true,
-//         },
+//         type: feeDebitSchema,
+//         default: () => ({}),
 //       },
 
 //       status: {
@@ -100,38 +115,36 @@
 //       },
 
 //       userWalletAfter: {
-//         walletId: String,
-//         currency: String,
-//         amount: Number,
-//         availableAmount: Number,
-//         reservedAmount: Number,
+//         type: walletAfterSchema,
+//         default: null,
 //       },
 
 //       adminWalletAfter: {
-//         walletId: String,
-//         currency: String,
-//         amount: Number,
-//         availableAmount: Number,
-//         reservedAmount: Number,
+//         type: walletAfterSchema,
+//         default: null,
 //       },
 
 //       meta: {
-//         type: Object,
+//         type: mongoose.Schema.Types.Mixed,
 //         default: {},
 //       },
 //     },
 //     {
 //       collection: "tx_cagnotte_vault_withdrawal_settlements",
 //       timestamps: true,
+//       minimize: false,
 //     }
 //   );
 
 //   schema.index({ userId: 1, idempotencyKey: 1 }, { unique: true });
 //   schema.index({ vaultId: 1, createdAt: -1 });
 //   schema.index({ cagnotteId: 1, createdAt: -1 });
+//   schema.index({ adminUserId: 1, createdAt: -1 });
 
 //   return conn.model(modelName, schema);
 // };
+
+
 
 
 
@@ -143,7 +156,9 @@ const mongoose = require("mongoose");
 
 module.exports = function buildCagnotteVaultWithdrawalSettlementModel(conn) {
   if (!conn) {
-    throw new Error("CagnotteVaultWithdrawalSettlement model requires a mongoose connection");
+    throw new Error(
+      "CagnotteVaultWithdrawalSettlement model requires a mongoose connection"
+    );
   }
 
   const modelName = "CagnotteVaultWithdrawalSettlement";
@@ -151,11 +166,11 @@ module.exports = function buildCagnotteVaultWithdrawalSettlementModel(conn) {
 
   const walletAfterSchema = new mongoose.Schema(
     {
-      walletId: { type: String, default: "" },
+      walletId: { type: String, default: "", trim: true },
       currency: { type: String, default: "", uppercase: true, trim: true },
-      amount: { type: Number, default: 0 },
-      availableAmount: { type: Number, default: 0 },
-      reservedAmount: { type: Number, default: 0 },
+      amount: { type: Number, default: 0, min: 0 },
+      availableAmount: { type: Number, default: 0, min: 0 },
+      reservedAmount: { type: Number, default: 0, min: 0 },
     },
     { _id: false }
   );
@@ -173,7 +188,12 @@ module.exports = function buildCagnotteVaultWithdrawalSettlementModel(conn) {
       amount: { type: Number, default: 0, min: 0 },
       currency: { type: String, default: "", uppercase: true, trim: true },
       baseAmount: { type: Number, default: 0, min: 0 },
-      baseCurrencyCode: { type: String, default: "", uppercase: true, trim: true },
+      baseCurrencyCode: {
+        type: String,
+        default: "",
+        uppercase: true,
+        trim: true,
+      },
     },
     { _id: false }
   );
@@ -202,10 +222,24 @@ module.exports = function buildCagnotteVaultWithdrawalSettlementModel(conn) {
         trim: true,
       },
 
-      adminUserId: {
+      treasuryUserId: {
         type: String,
         default: "",
         index: true,
+        trim: true,
+      },
+
+      treasurySystemType: {
+        type: String,
+        default: "",
+        index: true,
+        trim: true,
+        uppercase: true,
+      },
+
+      treasuryLabel: {
+        type: String,
+        default: "",
         trim: true,
       },
 
@@ -258,7 +292,7 @@ module.exports = function buildCagnotteVaultWithdrawalSettlementModel(conn) {
         default: null,
       },
 
-      adminWalletAfter: {
+      treasuryWalletAfter: {
         type: walletAfterSchema,
         default: null,
       },
@@ -278,7 +312,8 @@ module.exports = function buildCagnotteVaultWithdrawalSettlementModel(conn) {
   schema.index({ userId: 1, idempotencyKey: 1 }, { unique: true });
   schema.index({ vaultId: 1, createdAt: -1 });
   schema.index({ cagnotteId: 1, createdAt: -1 });
-  schema.index({ adminUserId: 1, createdAt: -1 });
+  schema.index({ treasuryUserId: 1, createdAt: -1 });
+  schema.index({ treasurySystemType: 1, createdAt: -1 });
 
   return conn.model(modelName, schema);
 };
