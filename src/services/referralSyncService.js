@@ -1,243 +1,6 @@
-// "use strict";
-
-// const { Transaction } = require("./transactions/shared/runtime");
-// const { toFloat } = require("./transactions/shared/helpers");
-
-// const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
-// const OUTBOUND_EXTERNAL_FLOWS = new Set([
-//   "PAYNOVAL_TO_MOBILEMONEY_PAYOUT",
-//   "PAYNOVAL_TO_BANK_PAYOUT",
-//   "PAYNOVAL_TO_CARD_PAYOUT",
-// ]);
-// const INBOUND_EXTERNAL_FLOWS = new Set([
-//   "MOBILEMONEY_COLLECTION_TO_PAYNOVAL",
-//   "BANK_TRANSFER_TO_PAYNOVAL",
-//   "CARD_TOPUP_TO_PAYNOVAL",
-// ]);
-
-// const BONUS_COUNTABLE_FLOWS = new Set([
-//   INTERNAL_FLOW,
-//   ...OUTBOUND_EXTERNAL_FLOWS,
-//   ...INBOUND_EXTERNAL_FLOWS,
-// ]);
-
-// function normalizeBaseUrl(value) {
-//   return String(value || "").trim().replace(/\/+$/, "");
-// }
-
-// function getPrincipalReferralBaseUrl() {
-//   return normalizeBaseUrl(
-//     process.env.BACKEND_PRINCIPAL_URL ||
-//       process.env.PRINCIPAL_BACKEND_URL ||
-//       process.env.PRINCIPAL_URL ||
-//       process.env.PRINCIPAL_BASE_URL ||
-//       process.env.BACKEND_URL ||
-//       ""
-//   );
-// }
-
-// function getPrincipalInternalToken() {
-//   return (
-//     process.env.INTERNAL_REFERRAL_TOKEN ||
-//     process.env.PRINCIPAL_INTERNAL_TOKEN ||
-//     process.env.INTERNAL_TOKEN ||
-//     ""
-//   );
-// }
-
-// async function postJsonWithTimeout(url, payload, headers = {}, timeoutMs = 10000) {
-//   const controller = new AbortController();
-//   const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-//   try {
-//     const res = await fetch(url, {
-//       method: "POST",
-//       headers: {
-//         "content-type": "application/json",
-//         ...headers,
-//       },
-//       body: JSON.stringify(payload || {}),
-//       signal: controller.signal,
-//     });
-
-//     const text = await res.text();
-//     let json = null;
-
-//     try {
-//       json = text ? JSON.parse(text) : null;
-//     } catch {
-//       json = { raw: text };
-//     }
-
-//     return {
-//       ok: res.ok,
-//       status: res.status,
-//       data: json,
-//     };
-//   } finally {
-//     clearTimeout(timer);
-//   }
-// }
-
-// function getReferralActorUserId(tx) {
-//   const candidate = tx?.userId || tx?.sender || null;
-//   return candidate ? String(candidate) : null;
-// }
-
-// async function getConfirmedReferralStats({ actorUserId, currency }) {
-//   if (!actorUserId) {
-//     return {
-//       confirmedCount: 0,
-//       confirmedTotal: 0,
-//       currency: String(currency || "").trim().toUpperCase() || "XOF",
-//     };
-//   }
-
-//   const normalizedCurrency =
-//     String(currency || "").trim().toUpperCase() || "XOF";
-
-//   const rows = await Transaction.aggregate([
-//     {
-//       $match: {
-//         status: "confirmed",
-//         flow: { $in: Array.from(BONUS_COUNTABLE_FLOWS) },
-//         $or: [
-//           { userId: actorUserId },
-//           { sender: actorUserId },
-//         ],
-//       },
-//     },
-//     {
-//       $group: {
-//         _id: null,
-//         confirmedCount: { $sum: 1 },
-//         confirmedTotal: { $sum: { $ifNull: ["$amount", 0] } },
-//       },
-//     },
-//   ]);
-
-//   const row = rows?.[0] || {};
-
-//   return {
-//     confirmedCount: Number(row.confirmedCount || 0),
-//     confirmedTotal: Number(row.confirmedTotal || 0),
-//     currency: normalizedCurrency,
-//   };
-// }
-
-// async function syncReferralAfterConfirmedTx(tx) {
-//   const baseUrl = getPrincipalReferralBaseUrl();
-//   const internalToken = getPrincipalInternalToken();
-
-//   if (!baseUrl) {
-//     return {
-//       ok: false,
-//       skipped: true,
-//       reason: "PRINCIPAL_BASE_URL_MISSING",
-//     };
-//   }
-
-//   if (!internalToken) {
-//     return {
-//       ok: false,
-//       skipped: true,
-//       reason: "PRINCIPAL_INTERNAL_TOKEN_MISSING",
-//     };
-//   }
-
-//   const actorUserId = getReferralActorUserId(tx);
-//   if (!actorUserId) {
-//     return {
-//       ok: false,
-//       skipped: true,
-//       reason: "REFERRAL_ACTOR_USER_MISSING",
-//     };
-//   }
-
-//   const triggerTxId = String(tx?._id || "");
-//   const txReference = String(tx?.reference || "");
-//   const sourceCurrency =
-//     String(
-//       tx?.senderCurrencySymbol ||
-//         tx?.currency ||
-//         tx?.localCurrencySymbol ||
-//         ""
-//     )
-//       .trim()
-//       .toUpperCase() || "XOF";
-
-//   const headers = {
-//     "x-internal-token": internalToken,
-//   };
-
-//   const confirmPayload = {
-//     userId: actorUserId,
-//     transaction: {
-//       id: triggerTxId,
-//       reference: txReference,
-//       status: String(tx?.status || "confirmed"),
-//       amount: Number(toFloat(tx?.amount)),
-//       currency: sourceCurrency,
-//       flow: String(tx?.flow || ""),
-//       confirmedAt: tx?.confirmedAt || new Date(),
-//     },
-//   };
-
-//   const confirmResp = await postJsonWithTimeout(
-//     `${baseUrl}/internal/referral/on-transaction-confirm`,
-//     confirmPayload,
-//     headers,
-//     10000
-//   );
-
-//   const stats = await getConfirmedReferralStats({
-//     actorUserId,
-//     currency: sourceCurrency,
-//   });
-
-//   const awardPayload = {
-//     refereeId: actorUserId,
-//     triggerTxId,
-//     stats,
-//   };
-
-//   const awardResp = await postJsonWithTimeout(
-//     `${baseUrl}/internal/referral/award-bonus`,
-//     awardPayload,
-//     headers,
-//     10000
-//   );
-
-//   return {
-//     ok: confirmResp.ok && awardResp.ok,
-//     actorUserId,
-//     stats,
-//     confirmCall: {
-//       ok: confirmResp.ok,
-//       status: confirmResp.status,
-//       data: confirmResp.data,
-//     },
-//     awardCall: {
-//       ok: awardResp.ok,
-//       status: awardResp.status,
-//       data: awardResp.data,
-//     },
-//   };
-// }
-
-// module.exports = {
-//   syncReferralAfterConfirmedTx,
-// };
-
-
-
-
-
-
-
-
 "use strict";
 
+const mongoose = require("mongoose");
 const { Transaction } = require("./transactions/shared/runtime");
 const { toFloat } = require("./transactions/shared/helpers");
 
@@ -276,6 +39,29 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function asObjectId(value) {
+  try {
+    if (!value) return null;
+    return new mongoose.Types.ObjectId(String(value));
+  } catch {
+    return null;
+  }
+}
+
+function dedupeMatchConditions(conditions = []) {
+  const seen = new Set();
+  const out = [];
+
+  for (const item of conditions) {
+    const key = JSON.stringify(item);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(item);
+    }
+  }
+
+  return out;
+}
 
 function logReferral(label, payload) {
   try {
@@ -440,12 +226,28 @@ async function getConfirmedReferralStats({
   const normalizedSourceCurrency = normalizeCurrency(sourceCurrency);
   const normalizedTargetCurrency = normalizeCurrency(targetCurrency);
 
+  const actorUserObjectId = asObjectId(actorUserId);
+
+  const orConditions = dedupeMatchConditions([
+    { userId: actorUserId },
+    { sender: actorUserId },
+    ...(actorUserObjectId
+      ? [{ userId: actorUserObjectId }, { sender: actorUserObjectId }]
+      : []),
+  ]);
+
+  logReferral("getConfirmedReferralStats.match_debug", {
+    actorUserId,
+    actorUserObjectId: actorUserObjectId ? String(actorUserObjectId) : null,
+    orConditions,
+  });
+
   const pipeline = [
     {
       $match: {
         status: "confirmed",
         flow: { $in: Array.from(BONUS_COUNTABLE_FLOWS) },
-        $or: [{ userId: actorUserId }, { sender: actorUserId }],
+        $or: orConditions,
       },
     },
     {
@@ -461,26 +263,20 @@ async function getConfirmedReferralStats({
             $ifNull: [
               "$localAmount",
               {
-                $ifNull: [
-                  "$amountTarget",
-                  { $ifNull: ["$targetAmount", 0] }
-                ]
-              }
-            ]
-          }
+                $ifNull: ["$amountTarget", { $ifNull: ["$targetAmount", 0] }],
+              },
+            ],
+          },
         },
         targetLargestAmount: {
           $max: {
             $ifNull: [
               "$localAmount",
               {
-                $ifNull: [
-                  "$amountTarget",
-                  { $ifNull: ["$targetAmount", 0] }
-                ]
-              }
-            ]
-          }
+                $ifNull: ["$amountTarget", { $ifNull: ["$targetAmount", 0] }],
+              },
+            ],
+          },
         },
       },
     },
@@ -507,34 +303,74 @@ async function getConfirmedReferralStats({
   const sourceLargestFromDb = safeNumber(row.sourceLargestAmount);
   const targetLargestFromDb = safeNumber(row.targetLargestAmount);
 
-  const sourceTotal = safeNumber(row.sourceTotal);
-  const targetTotal = safeNumber(row.targetTotal);
+  const sourceTotalFromDb = safeNumber(row.sourceTotal);
+  const targetTotalFromDb = safeNumber(row.targetTotal);
+  const confirmedCountFromDb = safeNumber(row.confirmedCount);
+
+  const finalConfirmedCount =
+    confirmedCountFromDb > 0
+      ? confirmedCountFromDb
+      : normalizedTriggerSourceAmount > 0 || normalizedTriggerTargetAmount > 0
+      ? 1
+      : 0;
+
+  const finalSourceTotal =
+    sourceTotalFromDb > 0
+      ? sourceTotalFromDb
+      : normalizedTriggerSourceAmount > 0
+      ? normalizedTriggerSourceAmount
+      : 0;
+
+  const finalTargetTotal =
+    targetTotalFromDb > 0
+      ? targetTotalFromDb
+      : normalizedTriggerTargetAmount > 0
+      ? normalizedTriggerTargetAmount
+      : 0;
+
+  const finalSourceLargest = Math.max(
+    sourceLargestFromDb,
+    normalizedTriggerSourceAmount
+  );
+
+  const finalTargetLargest = Math.max(
+    targetLargestFromDb,
+    normalizedTriggerTargetAmount
+  );
 
   const finalStats = {
-    confirmedCount: safeNumber(row.confirmedCount),
+    confirmedCount: finalConfirmedCount,
 
     source: {
-      total: sourceTotal,
-      largestAmount: Math.max(sourceLargestFromDb, normalizedTriggerSourceAmount),
+      total: finalSourceTotal,
+      largestAmount: finalSourceLargest,
       lastAmount: normalizedTriggerSourceAmount,
       currency: normalizedSourceCurrency,
     },
 
     target: {
-      total: targetTotal,
-      largestAmount: Math.max(targetLargestFromDb, normalizedTriggerTargetAmount),
+      total: finalTargetTotal,
+      largestAmount: finalTargetLargest,
       lastAmount: normalizedTriggerTargetAmount,
       currency: normalizedTargetCurrency,
     },
 
-    confirmedTotal: sourceTotal,
-    largestConfirmedAmount: Math.max(
-      sourceLargestFromDb,
-      normalizedTriggerSourceAmount
-    ),
+    confirmedTotal: finalSourceTotal,
+    largestConfirmedAmount: finalSourceLargest,
     lastConfirmedAmount: normalizedTriggerSourceAmount,
     currency: normalizedSourceCurrency,
   };
+
+  logReferral("getConfirmedReferralStats.normalized_totals", {
+    confirmedCountFromDb,
+    sourceTotalFromDb,
+    targetTotalFromDb,
+    finalConfirmedCount,
+    finalSourceTotal,
+    finalTargetTotal,
+    normalizedTriggerSourceAmount,
+    normalizedTriggerTargetAmount,
+  });
 
   logReferral("getConfirmedReferralStats.result", finalStats);
 
