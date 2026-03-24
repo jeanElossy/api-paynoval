@@ -4,10 +4,10 @@
  * --------------------------------------------------------------------------
  * Ledger Service
  * --------------------------------------------------------------------------
- * - écritures wallet + ledger
- * - résolution stricte des treasury par SYSTEM_TYPE
+ * - séparation explicite user wallet / system treasury wallet
  * - fee revenue => FEES_TREASURY
  * - fx revenue  => FX_MARGIN_TREASURY
+ * - fallback prudent vers TxWalletBalance si TxSystemBalance n'existe pas encore
  * --------------------------------------------------------------------------
  */
 
@@ -21,11 +21,14 @@ const { getTxConn } = require("../config/db");
 const txConn = getTxConn();
 
 const LedgerEntry = require("../models/LedgerEntry")(txConn);
-const TxWalletBalance = require("../models/TxWalletBalance")(txConn);
+const UserWalletBalance = require("../models/TxWalletBalance")(txConn);
 
-/* -------------------------------------------------------------------------- */
-/* Constants                                                                  */
-/* -------------------------------------------------------------------------- */
+let SystemWalletBalance = null;
+try {
+  SystemWalletBalance = require("../models/TxSystemBalance")(txConn);
+} catch {
+  SystemWalletBalance = null;
+}
 
 const TREASURY_SYSTEM_TYPES = new Set([
   "REFERRAL_TREASURY",
@@ -36,16 +39,12 @@ const TREASURY_SYSTEM_TYPES = new Set([
 ]);
 
 const TREASURY_ENV_BY_SYSTEM_TYPE = Object.freeze({
-  REFERRAL_TREASURY: process.env.REFERRAL_TREASURY_USER_ID,
-  FEES_TREASURY: process.env.FEES_TREASURY_USER_ID,
-  OPERATIONS_TREASURY: process.env.OPERATIONS_TREASURY_USER_ID,
-  CAGNOTTE_FEES_TREASURY: process.env.CAGNOTTE_FEES_TREASURY_USER_ID,
-  FX_MARGIN_TREASURY: process.env.FX_MARGIN_TREASURY_USER_ID,
+  REFERRAL_TREASURY: String(process.env.REFERRAL_TREASURY_USER_ID || "").trim(),
+  FEES_TREASURY: String(process.env.FEES_TREASURY_USER_ID || "").trim(),
+  OPERATIONS_TREASURY: String(process.env.OPERATIONS_TREASURY_USER_ID || "").trim(),
+  CAGNOTTE_FEES_TREASURY: String(process.env.CAGNOTTE_FEES_TREASURY_USER_ID || "").trim(),
+  FX_MARGIN_TREASURY: String(process.env.FX_MARGIN_TREASURY_USER_ID || "").trim(),
 });
-
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
 
 function maybeSessionOpts(session) {
   return session ? { session } : {};
@@ -128,8 +127,8 @@ function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
   return `treasury:${systemType}:${userId}:${cur}`;
 }
 
-function assertWalletModel() {
-  if (!TxWalletBalance) {
+function assertUserWalletModel() {
+  if (!UserWalletBalance) {
     throw new Error("TxWalletBalance indisponible");
   }
 
@@ -142,7 +141,7 @@ function assertWalletModel() {
   ];
 
   for (const method of requiredMethods) {
-    if (typeof TxWalletBalance[method] !== "function") {
+    if (typeof UserWalletBalance[method] !== "function") {
       throw new Error(`TxWalletBalance.${method} indisponible`);
     }
   }
@@ -165,9 +164,215 @@ function resolveTreasuryContext({
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Ledger generic                                                             */
-/* -------------------------------------------------------------------------- */
+function getSystemWalletModel() {
+  if (!SystemWalletBalance) {
+    return null;
+  }
+  return SystemWalletBalance;
+}
+
+function buildSystemBalanceQuery({ treasuryUserId, treasurySystemType }) {
+  const id = normalizeObjectIdLike(treasuryUserId, "treasuryUserId");
+  const systemType = normalizeTreasurySystemType(treasurySystemType);
+
+  const clauses = [
+    { userId: id, systemType },
+    { ownerId: id, systemType },
+  ];
+
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    const oid = new mongoose.Types.ObjectId(id);
+    clauses.push({ userId: oid, systemType }, { ownerId: oid, systemType });
+  }
+
+  return {
+    $or: clauses,
+  };
+}
+
+async function ensureSystemBalanceDocument({
+  treasuryUserId,
+  treasurySystemType,
+  currency,
+  treasuryLabel = "",
+  session = null,
+}) {
+  const SystemBalance = getSystemWalletModel();
+  if (!SystemBalance) return null;
+
+  const cur = normalizeCurrency(currency);
+  const query = buildSystemBalanceQuery({ treasuryUserId, treasurySystemType });
+
+  let doc = await SystemBalance.findOne(query).session(session || null);
+  if (doc) {
+    if (doc.balances == null || typeof doc.balances !== "object") {
+      doc.balances = {};
+    }
+    if (doc.balances[cur] == null) {
+      doc.balances[cur] = 0;
+    }
+    return doc;
+  }
+
+  const seedBalances = { [cur]: 0 };
+  const [created] = await SystemBalance.create(
+    [
+      {
+        userId: treasuryUserId,
+        systemType: normalizeTreasurySystemType(treasurySystemType),
+        fullName: normalizeOptionalLabel(treasuryLabel) || treasurySystemType,
+        isSystem: true,
+        managedCurrency: "MULTI",
+        defaultCurrency: cur,
+        balances: seedBalances,
+        isActive: true,
+        metadata: {
+          source: "ledgerService.ensureSystemBalanceDocument",
+        },
+      },
+    ],
+    maybeSessionOpts(session)
+  );
+
+  return created;
+}
+
+async function creditSystemWallet({
+  treasuryUserId,
+  treasurySystemType,
+  amount,
+  currency,
+  treasuryLabel = "",
+  session = null,
+}) {
+  const cur = normalizeCurrency(currency);
+  const amt = normalizePositiveAmount(amount, cur);
+
+  const SystemBalance = getSystemWalletModel();
+
+  if (SystemBalance && typeof SystemBalance.credit === "function") {
+    return SystemBalance.credit(
+      treasuryUserId,
+      normalizeTreasurySystemType(treasurySystemType),
+      cur,
+      amt,
+      maybeSessionOpts(session)
+    );
+  }
+
+  if (SystemBalance) {
+    const doc = await ensureSystemBalanceDocument({
+      treasuryUserId,
+      treasurySystemType,
+      currency: cur,
+      treasuryLabel,
+      session,
+    });
+
+    const balancePath = `balances.${cur}`;
+    return SystemBalance.findOneAndUpdate(
+      { _id: doc._id },
+      {
+        $inc: { [balancePath]: amt },
+        $set: {
+          updatedAt: new Date(),
+          defaultCurrency: doc.defaultCurrency || cur,
+          managedCurrency: doc.managedCurrency || "MULTI",
+          isSystem: true,
+          isActive: doc.isActive !== false,
+        },
+        $push: {
+          balanceHistory: {
+            type: "credit",
+            amount: amt,
+            currency: cur,
+            reason: `ledger:${normalizeTreasurySystemType(treasurySystemType)}`,
+            createdAt: new Date(),
+          },
+        },
+      },
+      { new: true, session }
+    );
+  }
+
+  await UserWalletBalance.credit(
+    treasuryUserId,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
+
+  return null;
+}
+
+async function debitSystemWallet({
+  treasuryUserId,
+  treasurySystemType,
+  amount,
+  currency,
+  treasuryLabel = "",
+  session = null,
+}) {
+  const cur = normalizeCurrency(currency);
+  const amt = normalizePositiveAmount(amount, cur);
+
+  const SystemBalance = getSystemWalletModel();
+
+  if (SystemBalance && typeof SystemBalance.debit === "function") {
+    return SystemBalance.debit(
+      treasuryUserId,
+      normalizeTreasurySystemType(treasurySystemType),
+      cur,
+      amt,
+      maybeSessionOpts(session)
+    );
+  }
+
+  if (SystemBalance) {
+    const doc = await ensureSystemBalanceDocument({
+      treasuryUserId,
+      treasurySystemType,
+      currency: cur,
+      treasuryLabel,
+      session,
+    });
+
+    const current = Number(doc?.balances?.[cur] || 0);
+    if (current < amt) {
+      throw new Error(
+        `Solde insuffisant sur ${treasurySystemType} en ${cur}. Disponible=${current}, requis=${amt}`
+      );
+    }
+
+    const balancePath = `balances.${cur}`;
+    return SystemBalance.findOneAndUpdate(
+      { _id: doc._id, [balancePath]: { $gte: amt } },
+      {
+        $inc: { [balancePath]: -amt },
+        $set: { updatedAt: new Date() },
+        $push: {
+          balanceHistory: {
+            type: "debit",
+            amount: amt,
+            currency: cur,
+            reason: `ledger:${normalizeTreasurySystemType(treasurySystemType)}`,
+            createdAt: new Date(),
+          },
+        },
+      },
+      { new: true, session }
+    );
+  }
+
+  await UserWalletBalance.debit(
+    treasuryUserId,
+    cur,
+    amt,
+    maybeSessionOpts(session)
+  );
+
+  return null;
+}
 
 async function createLedgerEntry({
   transactionId,
@@ -244,25 +449,15 @@ async function createLedgerEntry({
   return doc;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Wallet reserve / capture / release                                         */
-/* -------------------------------------------------------------------------- */
-
-async function reserveSenderFunds({
-  transaction,
-  senderId,
-  amount,
-  currency,
-  session = null,
-}) {
+async function reserveSenderFunds({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await TxWalletBalance.reserve(
+  const wallet = await UserWalletBalance.reserve(
     sender,
     cur,
     amt,
@@ -279,31 +474,22 @@ async function reserveSenderFunds({
     entryType: "RESERVE",
     amount: amt,
     currency: cur,
-    metadata: {
-      stage: "initiate",
-      flow: transaction.flow || null,
-    },
+    metadata: { stage: "initiate", flow: transaction.flow || null },
     session,
   });
 
   return wallet;
 }
 
-async function captureSenderReserve({
-  transaction,
-  senderId,
-  amount,
-  currency,
-  session = null,
-}) {
+async function captureSenderReserve({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await TxWalletBalance.captureReserve(
+  const wallet = await UserWalletBalance.captureReserve(
     sender,
     cur,
     amt,
@@ -320,31 +506,22 @@ async function captureSenderReserve({
     entryType: "RESERVE_CAPTURE",
     amount: amt,
     currency: cur,
-    metadata: {
-      stage: "confirm",
-      flow: transaction.flow || null,
-    },
+    metadata: { stage: "confirm", flow: transaction.flow || null },
     session,
   });
 
   return wallet;
 }
 
-async function releaseSenderReserve({
-  transaction,
-  senderId,
-  amount,
-  currency,
-  session = null,
-}) {
+async function releaseSenderReserve({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await TxWalletBalance.releaseReserve(
+  const wallet = await UserWalletBalance.releaseReserve(
     sender,
     cur,
     amt,
@@ -361,35 +538,22 @@ async function releaseSenderReserve({
     entryType: "RESERVE_RELEASE",
     amount: amt,
     currency: cur,
-    metadata: {
-      stage: "cancel_or_failure",
-      flow: transaction.flow || null,
-    },
+    metadata: { stage: "cancel_or_failure", flow: transaction.flow || null },
     session,
   });
 
   return wallet;
 }
 
-/* -------------------------------------------------------------------------- */
-/* User credit / debit / refund                                               */
-/* -------------------------------------------------------------------------- */
-
-async function creditReceiverFunds({
-  transaction,
-  receiverId,
-  amount,
-  currency,
-  session = null,
-}) {
+async function creditReceiverFunds({ transaction, receiverId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const receiver = normalizeObjectIdLike(receiverId, "receiverId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await TxWalletBalance.credit(
+  const wallet = await UserWalletBalance.credit(
     receiver,
     cur,
     amt,
@@ -406,31 +570,22 @@ async function creditReceiverFunds({
     entryType: "USER_CREDIT",
     amount: amt,
     currency: cur,
-    metadata: {
-      stage: "confirm",
-      flow: transaction.flow || null,
-    },
+    metadata: { stage: "confirm", flow: transaction.flow || null },
     session,
   });
 
   return wallet;
 }
 
-async function debitReceiverFunds({
-  transaction,
-  receiverId,
-  amount,
-  currency,
-  session = null,
-}) {
+async function debitReceiverFunds({ transaction, receiverId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const receiver = normalizeObjectIdLike(receiverId, "receiverId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await TxWalletBalance.debit(
+  const wallet = await UserWalletBalance.debit(
     receiver,
     cur,
     amt,
@@ -447,31 +602,22 @@ async function debitReceiverFunds({
     entryType: "REVERSAL",
     amount: amt,
     currency: cur,
-    metadata: {
-      stage: "refund",
-      flow: transaction.flow || null,
-    },
+    metadata: { stage: "refund", flow: transaction.flow || null },
     session,
   });
 
   return wallet;
 }
 
-async function refundSenderFunds({
-  transaction,
-  senderId,
-  amount,
-  currency,
-  session = null,
-}) {
+async function refundSenderFunds({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await TxWalletBalance.credit(
+  const wallet = await UserWalletBalance.credit(
     sender,
     cur,
     amt,
@@ -488,19 +634,12 @@ async function refundSenderFunds({
     entryType: "REFUND",
     amount: amt,
     currency: cur,
-    metadata: {
-      stage: "refund",
-      flow: transaction.flow || null,
-    },
+    metadata: { stage: "refund", flow: transaction.flow || null },
     session,
   });
 
   return wallet;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Treasury revenue                                                           */
-/* -------------------------------------------------------------------------- */
 
 async function creditRevenueLineToTreasury({
   transaction,
@@ -518,10 +657,7 @@ async function creditRevenueLineToTreasury({
     treasuryLabel: explicitTreasuryLabel,
   });
 
-  const treasuryCurrency = normalizeCurrency(
-    revenueLine?.treasuryCurrency || "CAD"
-  );
-
+  const treasuryCurrency = normalizeCurrency(revenueLine?.treasuryCurrency || "CAD");
   const treasuryAmount = normalizePositiveAmount(
     revenueLine?.treasuryAmount || 0,
     treasuryCurrency,
@@ -532,12 +668,14 @@ async function creditRevenueLineToTreasury({
     return null;
   }
 
-  await TxWalletBalance.credit(
-    treasury.treasuryUserId,
-    treasuryCurrency,
-    treasuryAmount,
-    maybeSessionOpts(session)
-  );
+  const walletAfter = await creditSystemWallet({
+    treasuryUserId: treasury.treasuryUserId,
+    treasurySystemType: treasury.treasurySystemType,
+    amount: treasuryAmount,
+    currency: treasuryCurrency,
+    treasuryLabel: treasury.treasuryLabel,
+    session,
+  });
 
   const metadata = {
     treasuryUserId: treasury.treasuryUserId,
@@ -547,9 +685,7 @@ async function creditRevenueLineToTreasury({
     sourceCurrency: revenueLine?.sourceCurrency || null,
     treasuryAmount,
     treasuryCurrency,
-    conversionRateToTreasury: Number(
-      revenueLine?.conversionRateToTreasury || 0
-    ),
+    conversionRateToTreasury: Number(revenueLine?.conversionRateToTreasury || 0),
     flow: transaction.flow || null,
   };
 
@@ -579,6 +715,7 @@ async function creditRevenueLineToTreasury({
 
   return {
     entry,
+    walletAfter,
     treasuryUserId: treasury.treasuryUserId,
     treasurySystemType: treasury.treasurySystemType,
     treasuryLabel: treasury.treasuryLabel,
@@ -586,9 +723,7 @@ async function creditRevenueLineToTreasury({
     treasuryCurrency,
     sourceAmount: Number(revenueLine?.sourceAmount || 0),
     sourceCurrency: revenueLine?.sourceCurrency || null,
-    conversionRateToTreasury: Number(
-      revenueLine?.conversionRateToTreasury || 0
-    ),
+    conversionRateToTreasury: Number(revenueLine?.conversionRateToTreasury || 0),
   };
 }
 
@@ -601,7 +736,7 @@ async function creditTreasuryRevenue({
   session = null,
 }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const revenue = buildTreasuryRevenueBreakdown(pricingSnapshot || {});
   const entries = [];
@@ -615,14 +750,9 @@ async function creditTreasuryRevenue({
   if (feeLine && Number(feeLine.treasuryAmount || 0) > 0) {
     feeCredit = await creditRevenueLineToTreasury({
       transaction,
-      revenueLine: {
-        ...feeLine,
-        systemType: "FEES_TREASURY",
-      },
-      explicitTreasuryUserId:
-        treasurySystemType === "FEES_TREASURY" ? treasuryUserId : null,
-      explicitTreasuryLabel:
-        treasurySystemType === "FEES_TREASURY" ? treasuryLabel : "",
+      revenueLine: { ...feeLine, systemType: "FEES_TREASURY" },
+      explicitTreasuryUserId: treasurySystemType === "FEES_TREASURY" ? treasuryUserId : null,
+      explicitTreasuryLabel: treasurySystemType === "FEES_TREASURY" ? treasuryLabel : "",
       entryType: "FEE_REVENUE",
       session,
     });
@@ -633,14 +763,9 @@ async function creditTreasuryRevenue({
   if (fxLine && Number(fxLine.treasuryAmount || 0) > 0) {
     fxCredit = await creditRevenueLineToTreasury({
       transaction,
-      revenueLine: {
-        ...fxLine,
-        systemType: "FX_MARGIN_TREASURY",
-      },
-      explicitTreasuryUserId:
-        treasurySystemType === "FX_MARGIN_TREASURY" ? treasuryUserId : null,
-      explicitTreasuryLabel:
-        treasurySystemType === "FX_MARGIN_TREASURY" ? treasuryLabel : "",
+      revenueLine: { ...fxLine, systemType: "FX_MARGIN_TREASURY" },
+      explicitTreasuryUserId: treasurySystemType === "FX_MARGIN_TREASURY" ? treasuryUserId : null,
+      explicitTreasuryLabel: treasurySystemType === "FX_MARGIN_TREASURY" ? treasuryLabel : "",
       entryType: "FX_REVENUE",
       session,
     });
@@ -649,50 +774,12 @@ async function creditTreasuryRevenue({
   }
 
   return {
-    treasuryRevenue: {
-      feeRevenue: feeCredit
-        ? {
-            systemType: feeCredit.treasurySystemType,
-            treasuryUserId: feeCredit.treasuryUserId,
-            treasuryLabel: feeCredit.treasuryLabel,
-            sourceAmount: feeCredit.sourceAmount,
-            sourceCurrency: feeCredit.sourceCurrency,
-            treasuryAmount: feeCredit.treasuryAmount,
-            treasuryCurrency: feeCredit.treasuryCurrency,
-            conversionRateToTreasury: feeCredit.conversionRateToTreasury,
-          }
-        : {
-            ...(feeLine || {}),
-            credited: false,
-          },
-
-      fxRevenue: fxCredit
-        ? {
-            systemType: fxCredit.treasurySystemType,
-            treasuryUserId: fxCredit.treasuryUserId,
-            treasuryLabel: fxCredit.treasuryLabel,
-            sourceAmount: fxCredit.sourceAmount,
-            sourceCurrency: fxCredit.sourceCurrency,
-            treasuryAmount: fxCredit.treasuryAmount,
-            treasuryCurrency: fxCredit.treasuryCurrency,
-            conversionRateToTreasury: fxCredit.conversionRateToTreasury,
-          }
-        : {
-            ...(fxLine || {}),
-            credited: false,
-          },
-
-      totals: revenue?.totals || null,
-      marketRate: revenue?.marketRate ?? null,
-      appliedRate: revenue?.appliedRate ?? null,
-    },
+    feeRevenue: feeCredit,
+    fxRevenue: fxCredit,
+    pricingSnapshot: revenue?.pricingSnapshot || pricingSnapshot || {},
     entries,
   };
 }
-
-/* -------------------------------------------------------------------------- */
-/* Cancellation fee                                                           */
-/* -------------------------------------------------------------------------- */
 
 async function chargeCancellationFee({
   transaction,
@@ -711,10 +798,9 @@ async function chargeCancellationFee({
   session = null,
 }) {
   assertTransactionLike(transaction);
-  assertWalletModel();
+  assertUserWalletModel();
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
-
   const treasury = resolveTreasuryContext({
     treasuryUserId,
     treasurySystemType,
@@ -739,16 +825,13 @@ async function chargeCancellationFee({
     treasurySystemType: treasury.treasurySystemType,
     treasuryLabel: treasury.treasuryLabel,
     conversionRateToTreasury: Number(conversionRateToTreasury || 0),
-    feeType:
-      String(feeType || "fixed").trim().toLowerCase() === "percent"
-        ? "percent"
-        : "fixed",
+    feeType: String(feeType || "fixed").trim().toLowerCase() === "percent" ? "percent" : "fixed",
     feePercent: Number(feePercent || 0),
     feeId: feeId || null,
   };
 
   if (out.feeSourceAmount > 0) {
-    await TxWalletBalance.debit(
+    await UserWalletBalance.debit(
       sender,
       out.feeSourceCurrency,
       out.feeSourceAmount,
@@ -783,12 +866,14 @@ async function chargeCancellationFee({
   }
 
   if (out.treasuryFeeAmount > 0) {
-    await TxWalletBalance.credit(
-      treasury.treasuryUserId,
-      out.treasuryFeeCurrency,
-      out.treasuryFeeAmount,
-      maybeSessionOpts(session)
-    );
+    await creditSystemWallet({
+      treasuryUserId: treasury.treasuryUserId,
+      treasurySystemType: treasury.treasurySystemType,
+      amount: out.treasuryFeeAmount,
+      currency: out.treasuryFeeCurrency,
+      treasuryLabel: treasury.treasuryLabel,
+      session,
+    });
 
     await createLedgerEntry({
       transactionId: transaction._id,
@@ -807,16 +892,16 @@ async function chargeCancellationFee({
       metadata: {
         stage: "cancel",
         reason: "cancellation_fee",
-        sourceCurrency: out.feeSourceCurrency,
-        feeSourceAmount: out.feeSourceAmount,
-        conversionRateToTreasury: out.conversionRateToTreasury,
         feeType: out.feeType,
         feePercent: out.feePercent,
         feeId: out.feeId,
-        flow: transaction.flow || null,
+        sourceAmount: out.feeSourceAmount,
+        sourceCurrency: out.feeSourceCurrency,
         treasuryUserId: treasury.treasuryUserId,
         treasurySystemType: treasury.treasurySystemType,
         treasuryLabel: treasury.treasuryLabel || null,
+        conversionRateToTreasury: out.conversionRateToTreasury,
+        flow: transaction.flow || null,
       },
       session,
     });
@@ -833,7 +918,9 @@ module.exports = {
   normalizeTreasurySystemType,
   getTreasuryUserIdBySystemType,
   resolveTreasuryFromSystemType,
-
+  getSystemWalletModel,
+  creditSystemWallet,
+  debitSystemWallet,
   reserveSenderFunds,
   captureSenderReserve,
   releaseSenderReserve,

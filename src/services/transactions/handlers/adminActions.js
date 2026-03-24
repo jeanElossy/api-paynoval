@@ -7,6 +7,7 @@ const {
   User,
   debitReceiverFunds,
   refundSenderFunds,
+  chargeCancellationFee,
   startTxSession,
   maybeSessionOpts,
   CAN_USE_SHARED_SESSION,
@@ -33,6 +34,63 @@ function isExternalFlow(tx) {
   return EXTERNAL_FLOWS.has(String(tx?.flow || ""));
 }
 
+function pickCancellationFeeInput(body = {}, tx) {
+  const feeSourceAmount = round2(
+    Number(
+      body.cancellationFeeSourceAmount ??
+        body.feeSourceAmount ??
+        body.cancellationFee ??
+        0
+    )
+  );
+
+  const treasuryFeeAmount = round2(
+    Number(
+      body.treasuryFeeAmount ??
+        body.cancellationTreasuryFeeAmount ??
+        feeSourceAmount
+    )
+  );
+
+  const senderCurrency = String(
+    body.feeSourceCurrency || tx?.senderCurrencySymbol || ""
+  )
+    .trim()
+    .toUpperCase();
+
+  const treasuryFeeCurrency = String(
+    body.treasuryFeeCurrency ||
+      body.feeTreasuryCurrency ||
+      tx?.pricingSnapshot?.treasuryCurrency ||
+      senderCurrency
+  )
+    .trim()
+    .toUpperCase();
+
+  const conversionRateToTreasury = Number(
+    body.conversionRateToTreasury ??
+      body.feeConversionRateToTreasury ??
+      0
+  );
+
+  const feeType = String(body.feeType || "fixed").trim().toLowerCase();
+  const feePercent = Number(body.feePercent || 0);
+  const feeId = body.feeId || null;
+
+  return {
+    feeSourceAmount: Number.isFinite(feeSourceAmount) ? feeSourceAmount : 0,
+    treasuryFeeAmount: Number.isFinite(treasuryFeeAmount) ? treasuryFeeAmount : 0,
+    senderCurrency,
+    treasuryFeeCurrency,
+    conversionRateToTreasury: Number.isFinite(conversionRateToTreasury)
+      ? conversionRateToTreasury
+      : 0,
+    feeType: feeType === "percent" ? "percent" : "fixed",
+    feePercent: Number.isFinite(feePercent) ? feePercent : 0,
+    feeId,
+  };
+}
+
 async function refundController(req, res, next) {
   const session = await startTxSession();
 
@@ -44,6 +102,7 @@ async function refundController(req, res, next) {
 
     const tx = await Transaction.findById(transactionId)
       .select([
+        "+reference",
         "+flow",
         "+status",
         "+sender",
@@ -54,6 +113,7 @@ async function refundController(req, res, next) {
         "+senderCurrencySymbol",
         "+beneficiaryCredited",
         "+fundsCaptured",
+        "+pricingSnapshot",
       ])
       .session(sessOpts.session || null);
 
@@ -74,6 +134,8 @@ async function refundController(req, res, next) {
 
     const targetAmount = round2(toFloat(tx.localAmount));
     const targetCurrency = String(tx.localCurrencySymbol || "").trim().toUpperCase();
+    const senderAmount = round2(toFloat(tx.amount));
+    const senderCurrency = String(tx.senderCurrencySymbol || "").trim().toUpperCase();
 
     await debitReceiverFunds({
       transaction: tx,
@@ -86,16 +148,43 @@ async function refundController(req, res, next) {
     await refundSenderFunds({
       transaction: tx,
       senderId: tx.sender,
-      amount: round2(toFloat(tx.amount)),
-      currency: String(tx.senderCurrencySymbol || "").trim().toUpperCase(),
+      amount: senderAmount,
+      currency: senderCurrency,
       session,
     });
+
+    let cancellationFeeResult = null;
+    const feeInput = pickCancellationFeeInput(req.body, tx);
+
+    if (
+      feeInput.feeSourceAmount > 0 ||
+      feeInput.treasuryFeeAmount > 0
+    ) {
+      cancellationFeeResult = await chargeCancellationFee({
+        transaction: tx,
+        senderId: tx.sender,
+        senderCurrency: feeInput.senderCurrency || senderCurrency,
+        feeSourceAmount: feeInput.feeSourceAmount,
+        treasuryUserId: null,
+        treasurySystemType: "FEES_TREASURY",
+        treasuryLabel: "PayNoval Fees Treasury",
+        treasuryFeeAmount: feeInput.treasuryFeeAmount,
+        treasuryFeeCurrency:
+          feeInput.treasuryFeeCurrency || feeInput.senderCurrency || senderCurrency,
+        conversionRateToTreasury: feeInput.conversionRateToTreasury,
+        feeType: feeInput.feeType,
+        feePercent: feeInput.feePercent,
+        feeId: feeInput.feeId,
+        session,
+      });
+    }
 
     tx.status = "refunded";
     tx.refundedAt = new Date();
     tx.refundReason = sanitize(reason);
     tx.providerStatus = "REFUNDED";
     tx.reversedAt = new Date();
+    tx.cancellationFeeResult = cancellationFeeResult || null;
     await tx.save(sessOpts);
 
     if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
@@ -110,6 +199,7 @@ async function refundController(req, res, next) {
       providerStatus: tx.providerStatus,
       refunded: targetAmount,
       currency: targetCurrency,
+      cancellationFeeResult,
     });
   } catch (err) {
     try {

@@ -1,9 +1,9 @@
 "use strict";
 
 /**
- * --------------------------------------------------------------------------
  * Runtime partagé transactions (LAZY / SAFE)
- * --------------------------------------------------------------------------
+ * - Balance => wallet utilisateur TX
+ * - SystemBalance => wallet système / treasury TX
  */
 
 const mongoose = require("mongoose");
@@ -32,6 +32,8 @@ const {
   getTreasuryUserIdBySystemType,
   normalizeTreasurySystemType,
   TREASURY_SYSTEM_TYPES,
+  creditSystemWallet,
+  debitSystemWallet,
 } = require("../../../services/ledgerService");
 
 const {
@@ -50,7 +52,8 @@ let _Device = null;
 let _Notification = null;
 let _Outbox = null;
 let _Transaction = null;
-let _Balance = null;
+let _UserWalletBalance = null;
+let _SystemBalance = null;
 let _LedgerEntry = null;
 
 function getUsersConnectionSafe() {
@@ -95,10 +98,24 @@ function getTransactionModel() {
   return _Transaction;
 }
 
+function getUserWalletBalanceModel() {
+  if (_UserWalletBalance) return _UserWalletBalance;
+  _UserWalletBalance = require("../../../models/TxWalletBalance")(getTxConnectionSafe());
+  return _UserWalletBalance;
+}
+
+function getSystemBalanceModel() {
+  if (_SystemBalance) return _SystemBalance;
+  try {
+    _SystemBalance = require("../../../models/TxSystemBalance")(getTxConnectionSafe());
+  } catch {
+    _SystemBalance = null;
+  }
+  return _SystemBalance;
+}
+
 function getBalanceModel() {
-  if (_Balance) return _Balance;
-  _Balance = require("../../../models/TxWalletBalance")(getUsersConnectionSafe());
-  return _Balance;
+  return getUserWalletBalanceModel();
 }
 
 function getLedgerEntryModel() {
@@ -110,10 +127,6 @@ function getLedgerEntryModel() {
 const PRINCIPAL_URL = config.principalUrl;
 const GATEWAY_URL = config.gatewayUrl;
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || config.internalToken || "";
-
-/* -------------------------------------------------------------------------- */
-/* Treasury runtime                                                           */
-/* -------------------------------------------------------------------------- */
 
 function clean(value) {
   return String(value || "").trim();
@@ -144,6 +157,8 @@ function canUseSharedSession() {
     return false;
   }
 }
+
+const CAN_USE_SHARED_SESSION = canUseSharedSession();
 
 async function startTxSession() {
   const txConn = getTxConnectionSafe();
@@ -185,9 +200,7 @@ function assertTreasuryConfig() {
   }
 
   if (missing.length) {
-    throw new Error(
-      `Variables treasury manquantes: ${missing.join(", ")}`
-    );
+    throw new Error(`Variables treasury manquantes: ${missing.join(", ")}`);
   }
 
   return true;
@@ -208,6 +221,8 @@ function getRuntime() {
     Outbox: getOutboxModel(),
     Transaction: getTransactionModel(),
     Balance: getBalanceModel(),
+    UserWalletBalance: getUserWalletBalanceModel(),
+    SystemBalance: getSystemBalanceModel(),
     LedgerEntry: getLedgerEntryModel(),
 
     validationService,
@@ -226,6 +241,8 @@ function getRuntime() {
     creditTreasuryRevenue,
     chargeCancellationFee,
     createLedgerEntry,
+    creditSystemWallet,
+    debitSystemWallet,
 
     resolveTreasuryFromSystemType,
     getTreasuryUserIdBySystemType,
@@ -244,6 +261,7 @@ function getRuntime() {
     GATEWAY_URL,
     INTERNAL_TOKEN,
 
+    CAN_USE_SHARED_SESSION,
     canUseSharedSession,
     startTxSession,
     maybeSessionOpts,
@@ -276,6 +294,8 @@ Object.defineProperties(runtime, {
   creditTreasuryRevenue: { get: () => creditTreasuryRevenue },
   chargeCancellationFee: { get: () => chargeCancellationFee },
   createLedgerEntry: { get: () => createLedgerEntry },
+  creditSystemWallet: { get: () => creditSystemWallet },
+  debitSystemWallet: { get: () => debitSystemWallet },
 
   resolveTreasuryFromSystemType: { get: () => resolveTreasuryFromSystemType },
   getTreasuryUserIdBySystemType: { get: () => getTreasuryUserIdBySystemType },
@@ -294,6 +314,7 @@ Object.defineProperties(runtime, {
   GATEWAY_URL: { get: () => GATEWAY_URL },
   INTERNAL_TOKEN: { get: () => INTERNAL_TOKEN },
 
+  CAN_USE_SHARED_SESSION: { get: () => CAN_USE_SHARED_SESSION },
   usersConn: { get: () => getUsersConnectionSafe() },
   txConn: { get: () => getTxConnectionSafe() },
 
@@ -303,6 +324,8 @@ Object.defineProperties(runtime, {
   Outbox: { get: () => getOutboxModel() },
   Transaction: { get: () => getTransactionModel() },
   Balance: { get: () => getBalanceModel() },
+  UserWalletBalance: { get: () => getUserWalletBalanceModel() },
+  SystemBalance: { get: () => getSystemBalanceModel() },
   LedgerEntry: { get: () => getLedgerEntryModel() },
 
   getUsersConnectionSafe: { get: () => getUsersConnectionSafe },
@@ -314,6 +337,8 @@ Object.defineProperties(runtime, {
   getOutboxModel: { get: () => getOutboxModel },
   getTransactionModel: { get: () => getTransactionModel },
   getBalanceModel: { get: () => getBalanceModel },
+  getUserWalletBalanceModel: { get: () => getUserWalletBalanceModel },
+  getSystemBalanceModel: { get: () => getSystemBalanceModel },
   getLedgerEntryModel: { get: () => getLedgerEntryModel },
 
   canUseSharedSession: { get: () => canUseSharedSession },

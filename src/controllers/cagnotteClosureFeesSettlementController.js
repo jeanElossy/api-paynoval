@@ -274,12 +274,12 @@
 
 
 
+
 "use strict";
 
 const asyncHandler = require("express-async-handler");
-const mongoose = require("mongoose");
 const { getTxConn } = require("../config/db");
-const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
+const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
 const {
   resolveTreasuryFromSystemType,
@@ -306,66 +306,6 @@ function round2(n) {
   return Math.round(Number(n || 0) * 100) / 100;
 }
 
-function toUserClauses(userId) {
-  const id = String(userId || "").trim();
-  if (!id) return [];
-
-  const clauses = [
-    { userId: id },
-    { user: id },
-    { ownerId: id },
-    { owner: id },
-  ];
-
-  if (mongoose.Types.ObjectId.isValid(id)) {
-    const oid = new mongoose.Types.ObjectId(id);
-    clauses.push(
-      { userId: oid },
-      { user: oid },
-      { ownerId: oid },
-      { owner: oid }
-    );
-  }
-
-  return clauses;
-}
-
-async function findWalletForUser({ TxWalletBalance, userId, currency, session }) {
-  const cur = normalizeCurrencyCode(currency);
-  return TxWalletBalance.findOne({
-    currency: cur,
-    $or: toUserClauses(userId),
-  }).session(session);
-}
-
-async function ensureWalletForUser({ TxWalletBalance, userId, currency, session }) {
-  let wallet = await findWalletForUser({
-    TxWalletBalance,
-    userId,
-    currency,
-    session,
-  });
-
-  if (wallet) return wallet;
-
-  const docs = await TxWalletBalance.create(
-    [
-      {
-        userId: String(userId),
-        currency: normalizeCurrencyCode(currency),
-        amount: 0,
-        availableAmount: 0,
-        reservedAmount: 0,
-        status: "ACTIVE",
-        isActive: true,
-      },
-    ],
-    { session }
-  );
-
-  return docs[0];
-}
-
 function resolveCagnotteTreasuryMeta(input = {}) {
   const treasurySystemType = normalizeTreasurySystemType(
     input.treasurySystemType || CAGNOTTE_TREASURY_SYSTEM_TYPE
@@ -388,15 +328,53 @@ function resolveCagnotteTreasuryMeta(input = {}) {
   return {
     treasuryUserId,
     treasurySystemType,
-    treasuryLabel: String(
-      input.treasuryLabel || CAGNOTTE_TREASURY_LABEL
-    ).trim(),
+    treasuryLabel: String(input.treasuryLabel || CAGNOTTE_TREASURY_LABEL).trim(),
+  };
+}
+
+async function creditTreasurySystemWallet({
+  TxSystemBalance,
+  treasuryUserId,
+  treasurySystemType,
+  treasuryLabel,
+  currency,
+  amount,
+  session,
+}) {
+  const cur = normalizeCurrencyCode(currency);
+  const amt = round2(amount);
+
+  const updated = await TxSystemBalance.credit(
+    treasuryUserId,
+    treasurySystemType,
+    cur,
+    amt,
+    {
+      session,
+      fullName: treasuryLabel,
+      historyMetadata: {
+        source: "settleCagnotteClosureFees",
+        treasurySystemType,
+      },
+    }
+  );
+
+  const currentBalance = round2(updated?.balances?.[cur] || 0);
+
+  return {
+    walletId: String(updated._id),
+    currency: cur,
+    amount: currentBalance,
+    availableAmount: currentBalance,
+    reservedAmount: 0,
+    balances: updated?.balances || {},
+    systemType: updated?.systemType || treasurySystemType,
   };
 }
 
 exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
   const txConn = getTxConn();
-  const TxWalletBalance = buildTxWalletBalanceModel(txConn);
+  const TxSystemBalance = buildTxSystemBalanceModel(txConn);
   const CagnotteVaultWithdrawalSettlement =
     buildCagnotteVaultWithdrawalSettlementModel(txConn);
 
@@ -496,31 +474,15 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
   try {
     session.startTransaction();
 
-    const treasuryWallet = await ensureWalletForUser({
-      TxWalletBalance,
-      userId: treasuryMeta.treasuryUserId,
+    const updatedTreasuryWallet = await creditTreasurySystemWallet({
+      TxSystemBalance,
+      treasuryUserId: treasuryMeta.treasuryUserId,
+      treasurySystemType: treasuryMeta.treasurySystemType,
+      treasuryLabel: treasuryMeta.treasuryLabel,
       currency: feeCurrency,
+      amount: feeAmount,
       session,
     });
-
-    const updatedTreasuryWallet = await TxWalletBalance.findOneAndUpdate(
-      { _id: treasuryWallet._id },
-      {
-        $inc: {
-          amount: feeAmount,
-          availableAmount: feeAmount,
-        },
-      },
-      { new: true, session }
-    );
-
-    if (!updatedTreasuryWallet) {
-      await session.abortTransaction();
-      return res.status(409).json({
-        success: false,
-        error: "Impossible de créditer le wallet de trésorerie.",
-      });
-    }
 
     const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
       [
@@ -547,17 +509,15 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
           },
           status: "confirmed",
           userWalletAfter: null,
-          treasuryWalletAfter: {
-            walletId: String(updatedTreasuryWallet._id),
-            currency: updatedTreasuryWallet.currency,
-            amount: round2(updatedTreasuryWallet.amount),
-            availableAmount: round2(updatedTreasuryWallet.availableAmount),
-            reservedAmount: round2(updatedTreasuryWallet.reservedAmount || 0),
-          },
+          treasuryWalletAfter: updatedTreasuryWallet,
           meta: {
             ...(meta || {}),
             settlementKind: "cagnotte_closure_fee_credit",
             initiatedByUserId: initiatorId,
+            walletSeparation: {
+              payerWalletModel: null,
+              treasuryWalletModel: "TxSystemBalance",
+            },
           },
         },
       ],

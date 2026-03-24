@@ -336,8 +336,6 @@
 
 
 
-
-
 "use strict";
 
 const asyncHandler = require("express-async-handler");
@@ -575,6 +573,10 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
             ...(meta || {}),
             settlementKind: "cagnotte_vault_withdrawal",
             noFeeApplied: true,
+            walletSeparation: {
+              payerWalletModel: "TxWalletBalance",
+              treasuryWalletModel: null,
+            },
           },
         },
       ],

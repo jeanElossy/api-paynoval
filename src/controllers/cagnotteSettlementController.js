@@ -380,13 +380,13 @@
 
 
 
-
 "use strict";
 
 const asyncHandler = require("express-async-handler");
 const mongoose = require("mongoose");
 const { getTxConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
+const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteSettlementModel = require("../models/CagnotteSettlement");
 const {
   resolveTreasuryFromSystemType,
@@ -476,40 +476,12 @@ async function runWithMongoTxRetry(work, { retries = 3, backoffMs = 150 } = {}) 
   throw lastErr;
 }
 
-async function findWalletForUser({ TxWalletBalance, userId, currency, session }) {
+async function findUserWallet({ TxWalletBalance, userId, currency, session }) {
   const cur = normalizeCurrencyCode(currency);
   return TxWalletBalance.findOne({
     currency: cur,
     $or: toUserClauses(userId),
   }).session(session);
-}
-
-async function ensureWalletForUser({ TxWalletBalance, userId, currency, session }) {
-  let wallet = await findWalletForUser({
-    TxWalletBalance,
-    userId,
-    currency,
-    session,
-  });
-
-  if (wallet) return wallet;
-
-  const created = await TxWalletBalance.create(
-    [
-      {
-        userId: String(userId),
-        currency: normalizeCurrencyCode(currency),
-        amount: 0,
-        availableAmount: 0,
-        reservedAmount: 0,
-        status: "ACTIVE",
-        isActive: true,
-      },
-    ],
-    { session }
-  );
-
-  return created[0];
 }
 
 function resolveCagnotteTreasuryMeta(input = {}) {
@@ -534,15 +506,54 @@ function resolveCagnotteTreasuryMeta(input = {}) {
   return {
     treasuryUserId,
     treasurySystemType,
-    treasuryLabel: String(
-      input.treasuryLabel || CAGNOTTE_TREASURY_LABEL
-    ).trim(),
+    treasuryLabel: String(input.treasuryLabel || CAGNOTTE_TREASURY_LABEL).trim(),
+  };
+}
+
+async function creditTreasurySystemWallet({
+  TxSystemBalance,
+  treasuryUserId,
+  treasurySystemType,
+  treasuryLabel,
+  currency,
+  amount,
+  session,
+}) {
+  const cur = normalizeCurrencyCode(currency);
+  const amt = round2(amount);
+
+  const updated = await TxSystemBalance.credit(
+    treasuryUserId,
+    treasurySystemType,
+    cur,
+    amt,
+    {
+      session,
+      fullName: treasuryLabel,
+      historyMetadata: {
+        source: "settleCagnotteParticipation",
+        treasurySystemType,
+      },
+    }
+  );
+
+  const currentBalance = round2(updated?.balances?.[cur] || 0);
+
+  return {
+    walletId: String(updated._id),
+    currency: cur,
+    amount: currentBalance,
+    availableAmount: currentBalance,
+    reservedAmount: 0,
+    balances: updated?.balances || {},
+    systemType: updated?.systemType || treasurySystemType,
   };
 }
 
 exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
   const txConn = getTxConn();
   const TxWalletBalance = buildTxWalletBalanceModel(txConn);
+  const TxSystemBalance = buildTxSystemBalanceModel(txConn);
   const CagnotteSettlement = buildCagnotteSettlementModel(txConn);
 
   const {
@@ -640,7 +651,7 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
           };
         }
 
-        const payerWallet = await findWalletForUser({
+        const payerWallet = await findUserWallet({
           TxWalletBalance,
           userId: payerId,
           currency: payerCurrency,
@@ -720,37 +731,15 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
         let updatedTreasuryWallet = null;
 
         if (feeAmount > 0) {
-          const treasuryWallet = await ensureWalletForUser({
-            TxWalletBalance,
-            userId: treasuryMeta.treasuryUserId,
+          updatedTreasuryWallet = await creditTreasurySystemWallet({
+            TxSystemBalance,
+            treasuryUserId: treasuryMeta.treasuryUserId,
+            treasurySystemType: treasuryMeta.treasurySystemType,
+            treasuryLabel: treasuryMeta.treasuryLabel,
             currency: feeCurrency,
+            amount: feeAmount,
             session,
           });
-
-          updatedTreasuryWallet = await TxWalletBalance.findOneAndUpdate(
-            { _id: treasuryWallet._id },
-            {
-              $inc: {
-                amount: feeAmount,
-                availableAmount: feeAmount,
-              },
-            },
-            { new: true, session }
-          );
-
-          if (!updatedTreasuryWallet) {
-            try {
-              await session.abortTransaction();
-            } catch {}
-
-            return {
-              statusCode: 409,
-              body: {
-                success: false,
-                error: "Impossible de créditer le wallet de trésorerie.",
-              },
-            };
-          }
         }
 
         const settlementDocs = await CagnotteSettlement.create(
@@ -782,18 +771,14 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
                 availableAmount: round2(updatedPayerWallet.availableAmount),
                 reservedAmount: round2(updatedPayerWallet.reservedAmount || 0),
               },
-              treasuryWalletAfter: updatedTreasuryWallet
-                ? {
-                    walletId: String(updatedTreasuryWallet._id),
-                    currency: updatedTreasuryWallet.currency,
-                    amount: round2(updatedTreasuryWallet.amount),
-                    availableAmount: round2(updatedTreasuryWallet.availableAmount),
-                    reservedAmount: round2(updatedTreasuryWallet.reservedAmount || 0),
-                  }
-                : null,
+              treasuryWalletAfter: updatedTreasuryWallet,
               meta: {
                 ...(meta || {}),
                 settlementKind: "cagnotte_participation_settlement",
+                walletSeparation: {
+                  payerWalletModel: "TxWalletBalance",
+                  treasuryWalletModel: "TxSystemBalance",
+                },
               },
             },
           ],
@@ -816,7 +801,6 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
         try {
           if (!committed) await session.abortTransaction();
         } catch {}
-
         throw err;
       } finally {
         try {
