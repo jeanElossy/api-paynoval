@@ -460,6 +460,8 @@ async function bootstrap() {
     const cagnotteVaultSettlementRoutes = require("./routes/cagnotteVaultSettlementRoutes");
     const cagnotteClosureFeesRoutes = require("./routes/cagnotteClosureFeesRoutes");
 
+    const internalReferralRoutes = require("./routes/internalReferralRoutes");
+
     // Webhooks AVANT sanitizers
     app.use("/webhooks/providers", providerWebhookRoutes);
 
@@ -482,6 +484,8 @@ async function bootstrap() {
     // Internal
     app.use("/api/v1/internal", internalTxRoutes);
     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
+
+    app.use("/api/v1/internal/referral", internalReferralRoutes);
 
     // Cagnotte settlements
     app.use("/api/v1/cagnotte", cagnotteSettlementRoutes);
