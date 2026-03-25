@@ -51,6 +51,7 @@ exports.transferBonus = async (req, res) => {
     }
 
     const {
+      treasuryUserId,
       treasurySystemType = "REFERRAL_TREASURY",
       treasuryCurrency = "CAD",
       sponsorId,
@@ -62,6 +63,15 @@ exports.transferBonus = async (req, res) => {
       refereeCurrency,
       metadata = {},
     } = req.body || {};
+
+    if (!treasuryUserId) {
+      return res.status(400).json({
+        success: false,
+        ok: false,
+        code: "TREASURY_USER_ID_REQUIRED",
+        error: "treasuryUserId requis",
+      });
+    }
 
     if (!sponsorId) {
       return res.status(400).json({
@@ -81,21 +91,29 @@ exports.transferBonus = async (req, res) => {
       });
     }
 
+    const normalizedBonusInputCurrency = normalizeCurrency(
+      bonusInputCurrency,
+      "CAD"
+    );
+
     const result = await transferReferralBonus({
-      treasurySystemType: String(treasurySystemType || "REFERRAL_TREASURY").trim(),
+      treasuryUserId: String(treasuryUserId || "").trim(),
+      treasurySystemType: String(
+        treasurySystemType || "REFERRAL_TREASURY"
+      ).trim(),
       treasuryCurrency: normalizeCurrency(treasuryCurrency, "CAD"),
       sponsorId: String(sponsorId),
       refereeId: String(refereeId),
       sponsorBonus: safeNumber(sponsorBonus),
       refereeBonus: safeNumber(refereeBonus),
-      bonusInputCurrency: normalizeCurrency(bonusInputCurrency, "CAD"),
+      bonusInputCurrency: normalizedBonusInputCurrency,
       sponsorCurrency: normalizeCurrency(
-        sponsorCurrency || bonusInputCurrency,
-        normalizeCurrency(bonusInputCurrency, "CAD")
+        sponsorCurrency || normalizedBonusInputCurrency,
+        normalizedBonusInputCurrency
       ),
       refereeCurrency: normalizeCurrency(
-        refereeCurrency || bonusInputCurrency,
-        normalizeCurrency(bonusInputCurrency, "CAD")
+        refereeCurrency || normalizedBonusInputCurrency,
+        normalizedBonusInputCurrency
       ),
       metadata:
         metadata && typeof metadata === "object" && !Array.isArray(metadata)
