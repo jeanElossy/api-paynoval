@@ -1,8 +1,14 @@
 // "use strict";
 
+// let logger = console;
+// try {
+//   logger = require("../utils/logger");
+// } catch {}
+
 // const mongoose = require("mongoose");
 
 // const { getTxConn } = require("../config/db");
+
 // const TxWalletBalanceModel = require("../models/TxWalletBalance");
 // const TxSystemBalanceModel = require("../models/TxSystemBalance");
 
@@ -16,7 +22,6 @@
 //   const code = String(v || fallback).trim().toUpperCase();
 //   return code || fallback;
 // }
-
 
 // function getCurrencyDecimals(currency) {
 //   const c = normalizeCurrency(currency);
@@ -77,10 +82,7 @@
 
 // function getFxConvertPath() {
 //   return normalizePath(
-//     pickFirstEnv(
-//       "FX_CONVERT_INTERNAL_PATH",
-//       "FX_INTERNAL_CONVERT_PATH"
-//     ),
+//     pickFirstEnv("FX_CONVERT_INTERNAL_PATH", "FX_INTERNAL_CONVERT_PATH"),
 //     "/internal/fx/convert"
 //   );
 // }
@@ -95,10 +97,7 @@
 
 // function getInternalHttpTimeoutMs() {
 //   const raw = Number(
-//     pickFirstEnv(
-//       "FX_INTERNAL_TIMEOUT_MS",
-//       "INTERNAL_HTTP_TIMEOUT_MS"
-//     ) || 10000
+//     pickFirstEnv("FX_INTERNAL_TIMEOUT_MS", "INTERNAL_HTTP_TIMEOUT_MS") || 10000
 //   );
 //   return Number.isFinite(raw) && raw > 0 ? raw : 10000;
 // }
@@ -492,7 +491,52 @@
 //   };
 // }
 
+// async function ensureSystemWalletStrict({
+//   TxSystemBalance,
+//   treasuryUserId,
+//   systemType,
+//   currency,
+//   session,
+//   metadata = {},
+// }) {
+//   return TxSystemBalance.ensureSystemWallet(
+//     treasuryUserId,
+//     systemType,
+//     currency,
+//     {
+//       session,
+//       metadata,
+//     }
+//   );
+// }
+
+// async function debitSystemWalletStrict({
+//   TxSystemBalance,
+//   treasuryUserId,
+//   systemType,
+//   currency,
+//   amount,
+//   session,
+//   reason,
+//   reference,
+//   metadata = {},
+// }) {
+//   return TxSystemBalance.debit(
+//     treasuryUserId,
+//     systemType,
+//     currency,
+//     amount,
+//     {
+//       session,
+//       reason,
+//       reference,
+//       metadata,
+//     }
+//   );
+// }
+
 // async function debitReferralTreasury({
+//   treasuryUserId,
 //   treasurySystemType = "REFERRAL_TREASURY",
 //   treasuryCurrency = "CAD",
 //   amount,
@@ -500,9 +544,22 @@
 //   metadata = {},
 // }) {
 //   const TxSystemBalance = getTxSystemBalance();
+//   const treasuryUser = String(treasuryUserId || "").trim();
 //   const systemType = String(treasurySystemType || "REFERRAL_TREASURY").trim();
 //   const cur = normalizeCurrency(treasuryCurrency || "CAD");
 //   const amt = roundForCurrency(amount, cur);
+
+//   if (!treasuryUser) {
+//     throw Object.assign(new Error("TREASURY_USER_ID_REQUIRED"), {
+//       code: "TREASURY_USER_ID_REQUIRED",
+//     });
+//   }
+
+//   if (!systemType) {
+//     throw Object.assign(new Error("SYSTEM_TYPE_REQUIRED"), {
+//       code: "SYSTEM_TYPE_REQUIRED",
+//     });
+//   }
 
 //   if (systemType !== "REFERRAL_TREASURY") {
 //     throw Object.assign(new Error("INVALID_REFERRAL_TREASURY_TYPE"), {
@@ -521,13 +578,16 @@
 //   if (!(amt > 0)) {
 //     return {
 //       skipped: true,
+//       treasuryUserId: treasuryUser,
 //       systemType,
 //       currency: cur,
 //       amount: 0,
 //     };
 //   }
 
-//   const wallet = await TxSystemBalance.ensureSystemWallet({
+//   const wallet = await ensureSystemWalletStrict({
+//     TxSystemBalance,
+//     treasuryUserId: treasuryUser,
 //     systemType,
 //     currency: cur,
 //     session,
@@ -540,7 +600,11 @@
 //   if (!wallet) {
 //     throw Object.assign(new Error("SYSTEM_TREASURY_NOT_FOUND"), {
 //       code: "SYSTEM_TREASURY_NOT_FOUND",
-//       details: { treasurySystemType: systemType, treasuryCurrency: cur },
+//       details: {
+//         treasuryUserId: treasuryUser,
+//         treasurySystemType: systemType,
+//         treasuryCurrency: cur,
+//       },
 //     });
 //   }
 
@@ -551,6 +615,7 @@
 //     throw Object.assign(new Error("REFERRAL_TREASURY_INSUFFICIENT_FUNDS"), {
 //       code: "REFERRAL_TREASURY_INSUFFICIENT_FUNDS",
 //       details: {
+//         treasuryUserId: treasuryUser,
 //         treasurySystemType: systemType,
 //         treasuryCurrency: cur,
 //         availableBefore,
@@ -559,7 +624,9 @@
 //     });
 //   }
 
-//   const updated = await TxSystemBalance.debit({
+//   const updated = await debitSystemWalletStrict({
+//     TxSystemBalance,
+//     treasuryUserId: treasuryUser,
 //     systemType,
 //     currency: cur,
 //     amount: amt,
@@ -578,6 +645,7 @@
 
 //   return {
 //     skipped: false,
+//     treasuryUserId: treasuryUser,
 //     systemType,
 //     currency: cur,
 //     amount: amt,
@@ -587,6 +655,7 @@
 // }
 
 // async function transferReferralBonus({
+//   treasuryUserId,
 //   treasurySystemType = "REFERRAL_TREASURY",
 //   treasuryCurrency = "CAD",
 //   sponsorId,
@@ -598,6 +667,8 @@
 //   refereeCurrency,
 //   metadata = {},
 // }) {
+//   const treasuryUser = String(treasuryUserId || "").trim();
+//   const systemType = String(treasurySystemType || "REFERRAL_TREASURY").trim();
 //   const treasuryCur = normalizeCurrency(treasuryCurrency || "CAD");
 //   const inputBonusCurrency = normalizeCurrency(bonusInputCurrency || "CAD");
 //   const sponsorCur = normalizeCurrency(sponsorCurrency || inputBonusCurrency);
@@ -605,6 +676,12 @@
 
 //   const normalizedSponsorBonus = roundForCurrency(sponsorBonus, inputBonusCurrency);
 //   const normalizedRefereeBonus = roundForCurrency(refereeBonus, inputBonusCurrency);
+
+//   if (!treasuryUser) {
+//     throw Object.assign(new Error("TREASURY_USER_ID_REQUIRED"), {
+//       code: "TREASURY_USER_ID_REQUIRED",
+//     });
+//   }
 
 //   if (!sponsorId) {
 //     throw Object.assign(new Error("SPONSOR_ID_REQUIRED"), {
@@ -638,7 +715,8 @@
 //   );
 
 //   logReferral("transferReferralBonus.start", {
-//     treasurySystemType,
+//     treasuryUserId: treasuryUser,
+//     treasurySystemType: systemType,
 //     treasuryCurrency: treasuryCur,
 //     sponsorId: String(sponsorId),
 //     refereeId: String(refereeId),
@@ -656,7 +734,8 @@
 //       ok: true,
 //       skipped: true,
 //       code: "NO_POSITIVE_BONUS",
-//       treasurySystemType,
+//       treasuryUserId: treasuryUser,
+//       treasurySystemType: systemType,
 //       treasuryCurrency: treasuryCur,
 //       treasuryDebitTotal: 0,
 //       sponsor: {
@@ -690,7 +769,8 @@
 //   try {
 //     await session.withTransaction(async () => {
 //       await debitReferralTreasury({
-//         treasurySystemType,
+//         treasuryUserId: treasuryUser,
+//         treasurySystemType: systemType,
 //         treasuryCurrency: treasuryCur,
 //         amount: treasuryDebitTotal,
 //         session,
@@ -727,7 +807,8 @@
 
 //       result = {
 //         ok: true,
-//         treasurySystemType,
+//         treasuryUserId: treasuryUser,
+//         treasurySystemType: systemType,
 //         treasuryCurrency: treasuryCur,
 //         bonusInputCurrency: inputBonusCurrency,
 //         treasuryDebitTotal,
@@ -780,6 +861,12 @@
 // module.exports = {
 //   transferReferralBonus,
 // };
+
+
+
+
+
+
 
 
 
@@ -1202,7 +1289,12 @@ async function convertMoney({ amount, fromCurrency, toCurrency }) {
   if (!(converted >= 0)) {
     throw Object.assign(new Error("FX_CONVERSION_FAILED"), {
       code: "FX_CONVERSION_FAILED",
-      details: { amount: amt, fromCurrency: from, toCurrency: to, fxResponse: res },
+      details: {
+        amount: amt,
+        fromCurrency: from,
+        toCurrency: to,
+        fxResponse: res,
+      },
     });
   }
 
@@ -1222,7 +1314,10 @@ async function buildMovement({
   creditedCurrency,
   treasuryCurrency,
 }) {
-  const nominalAmount = roundForCurrency(nominalBonusAmount, nominalBonusCurrency);
+  const nominalAmount = roundForCurrency(
+    nominalBonusAmount,
+    nominalBonusCurrency
+  );
   const nominalCur = normalizeCurrency(nominalBonusCurrency);
   const creditedCur = normalizeCurrency(creditedCurrency || nominalCur);
   const treasuryCur = normalizeCurrency(treasuryCurrency || "CAD");
@@ -1320,6 +1415,7 @@ async function debitSystemWalletStrict({
       reason,
       reference,
       metadata,
+      historyMetadata: metadata,
     }
   );
 }
@@ -1397,8 +1493,7 @@ async function debitReferralTreasury({
     });
   }
 
-  const availableBefore =
-    decimalToNumber(wallet.availableAmount) || decimalToNumber(wallet.amount);
+  const availableBefore = Number(wallet?.balances?.[cur] || 0);
 
   if (availableBefore < amt) {
     throw Object.assign(new Error("REFERRAL_TREASURY_INSUFFICIENT_FUNDS"), {
@@ -1438,8 +1533,8 @@ async function debitReferralTreasury({
     systemType,
     currency: cur,
     amount: amt,
-    balance: decimalToNumber(updated?.amount),
-    availableBalance: decimalToNumber(updated?.availableAmount),
+    balance: Number(updated?.balances?.[cur] || 0),
+    availableBalance: Number(updated?.balances?.[cur] || 0),
   };
 }
 
@@ -1463,8 +1558,14 @@ async function transferReferralBonus({
   const sponsorCur = normalizeCurrency(sponsorCurrency || inputBonusCurrency);
   const refereeCur = normalizeCurrency(refereeCurrency || inputBonusCurrency);
 
-  const normalizedSponsorBonus = roundForCurrency(sponsorBonus, inputBonusCurrency);
-  const normalizedRefereeBonus = roundForCurrency(refereeBonus, inputBonusCurrency);
+  const normalizedSponsorBonus = roundForCurrency(
+    sponsorBonus,
+    inputBonusCurrency
+  );
+  const normalizedRefereeBonus = roundForCurrency(
+    refereeBonus,
+    inputBonusCurrency
+  );
 
   if (!treasuryUser) {
     throw Object.assign(new Error("TREASURY_USER_ID_REQUIRED"), {
@@ -1499,7 +1600,8 @@ async function transferReferralBonus({
   });
 
   const treasuryDebitTotal = roundForCurrency(
-    sponsorMovement.treasuryDebitedAmount + refereeMovement.treasuryDebitedAmount,
+    sponsorMovement.treasuryDebitedAmount +
+      refereeMovement.treasuryDebitedAmount,
     treasuryCur
   );
 
