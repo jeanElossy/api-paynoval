@@ -11,6 +11,7 @@ module.exports = function buildTxSystemBalanceModel(conn) {
   if (conn.models[modelName]) {
     return conn.models[modelName];
   }
+  
 
   const SYSTEM_TYPES = [
     "REFERRAL_TREASURY",

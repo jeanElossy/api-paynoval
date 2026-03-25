@@ -17,6 +17,7 @@ function toFixedAmount(amount, currency = "CAD") {
   return mongoose.Types.Decimal128.fromString(n.toFixed(decimals));
 }
 
+
 module.exports = (conn = mongoose) => {
   if (conn.models.TxWalletBalance) return conn.models.TxWalletBalance;
 
