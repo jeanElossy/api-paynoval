@@ -97,7 +97,19 @@ router.post(
     .trim()
     .isLength({ min: 3, max: 4 }),
 
-  body("adminUserId")
+  body("treasuryUserId")
+    .optional()
+    .isString()
+    .trim()
+    .notEmpty(),
+
+  body("treasurySystemType")
+    .optional()
+    .isString()
+    .trim()
+    .notEmpty(),
+
+  body("treasuryLabel")
     .optional()
     .isString()
     .trim(),
@@ -117,6 +129,21 @@ router.post(
     .isString()
     .trim()
     .isLength({ min: 3, max: 4 }),
+
+  body("feeDebit.baseAmount")
+    .optional()
+    .isFloat({ min: 0 })
+    .toFloat(),
+
+  body("feeDebit.baseCurrencyCode")
+    .optional()
+    .isString()
+    .trim()
+    .isLength({ min: 3, max: 4 }),
+
+  body("meta")
+    .optional()
+    .isObject(),
 
   checkValidation,
   settleCagnotteVaultWithdrawal

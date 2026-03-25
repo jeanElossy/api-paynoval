@@ -52,16 +52,26 @@ router.post(
 
   body("reference").exists().isString().trim().isLength({ min: 8, max: 200 }),
   body("idempotencyKey").exists().isString().trim().isLength({ min: 8, max: 200 }),
+
   body("cagnotteId").exists().isString().trim().notEmpty(),
   body("vaultId").exists().isString().trim().notEmpty(),
   body("initiatedByUserId").exists().isString().trim().notEmpty(),
-  body("adminUserId").exists().isString().trim().notEmpty(),
+
+  body("treasuryUserId").optional().isString().trim().notEmpty(),
+  body("treasurySystemType").optional().isString().trim().notEmpty(),
+  body("treasuryLabel").optional().isString().trim(),
 
   body("feeCredit.amount").exists().isFloat({ gt: 0 }).toFloat(),
   body("feeCredit.currency").exists().isString().trim().isLength({ min: 3, max: 4 }),
 
   body("feeCredit.baseAmount").optional().isFloat({ min: 0 }).toFloat(),
-  body("feeCredit.baseCurrencyCode").optional().isString().trim().isLength({ min: 3, max: 4 }),
+  body("feeCredit.baseCurrencyCode")
+    .optional()
+    .isString()
+    .trim()
+    .isLength({ min: 3, max: 4 }),
+
+  body("meta").optional().isObject(),
 
   checkValidation,
   settleCagnotteClosureFees

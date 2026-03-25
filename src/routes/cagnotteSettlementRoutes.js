@@ -2,7 +2,9 @@
 
 const express = require("express");
 const { body, validationResult } = require("express-validator");
-const { settleCagnotteParticipation } = require("../controllers/cagnotteSettlementController");
+const {
+  settleCagnotteParticipation,
+} = require("../controllers/cagnotteSettlementController");
 
 const router = express.Router();
 
@@ -50,7 +52,8 @@ router.post(
   body("reference").exists().isString().trim().isLength({ min: 8, max: 200 }),
   body("idempotencyKey").exists().isString().trim().isLength({ min: 8, max: 200 }),
   body("userId").exists().isString().trim().notEmpty(),
-  body("adminUserId").exists().isString().trim().notEmpty(),
+  body("treasuryUserId").optional().isString().trim().notEmpty(),
+  body("treasurySystemType").optional().isString().trim().notEmpty(),
   body("payer.amount").exists().isFloat({ gt: 0 }).toFloat(),
   body("payer.currency").exists().isString().trim().isLength({ min: 3, max: 4 }),
   body("feeCredit.amount").optional().isFloat({ min: 0 }).toFloat(),
