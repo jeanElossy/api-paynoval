@@ -425,8 +425,8 @@ function getStaticCancellationFee(sourceCurrency) {
       amount: 300,
       type: "fixed",
       percent: 0,
-      feeId: "STATIC_CANCEL_300",
-      source: "static_rule",
+      feeId: null,
+      source: "STATIC_CANCEL_300",
     };
   }
 
@@ -435,8 +435,8 @@ function getStaticCancellationFee(sourceCurrency) {
       amount: 2.99,
       type: "fixed",
       percent: 0,
-      feeId: "STATIC_CANCEL_2_99",
-      source: "static_rule",
+      feeId: null,
+      source: "STATIC_CANCEL_2_99",
     };
   }
 
@@ -444,8 +444,8 @@ function getStaticCancellationFee(sourceCurrency) {
     amount: 0,
     type: "fixed",
     percent: 0,
-    feeId: "STATIC_CANCEL_0",
-    source: "static_rule",
+    feeId: null,
+    source: "STATIC_CANCEL_0",
   };
 }
 
@@ -600,7 +600,7 @@ async function cancelController(req, res, next) {
     const cancellationFee = round2(staticFee.amount);
     const cancellationFeeType = staticFee.type || "fixed";
     const cancellationFeePercent = Number(staticFee.percent || 0) || 0;
-    const cancellationFeeId = staticFee.feeId || null;
+    const cancellationFeeId = null;
     const cancellationFeeSource = staticFee.source || "static_rule";
 
     if (cancellationFee > grossSource) {
