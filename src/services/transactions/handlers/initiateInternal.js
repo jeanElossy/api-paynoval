@@ -21,6 +21,9 @@
 //   extractPricingBundle,
 // } = require("../shared/pricing");
 
+// const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+// const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
 // function norm(v) {
 //   return String(v || "").trim().toLowerCase();
 // }
@@ -76,13 +79,6 @@
 //   return v ? "***" : undefined;
 // }
 
-// function normalizeCountryLoose(v) {
-//   return String(v || "")
-//     .trim()
-//     .toUpperCase()
-//     .replace(/\s+/g, " ");
-// }
-
 // function resolveCountryForSource(body = {}) {
 //   return body.fromCountry || body.sourceCountry || body.country || "";
 // }
@@ -135,6 +131,22 @@
 //     recipientInfo: body?.recipientInfo,
 //     meta: body?.meta,
 //     metadata: body?.metadata,
+//   };
+// }
+
+// function resolveFeesTreasurySeed() {
+//   const treasurySystemType = String(
+//     runtime.normalizeTreasurySystemType
+//       ? runtime.normalizeTreasurySystemType(DEFAULT_FEES_TREASURY_SYSTEM_TYPE)
+//       : DEFAULT_FEES_TREASURY_SYSTEM_TYPE
+//   )
+//     .trim()
+//     .toUpperCase();
+
+//   return {
+//     treasuryUserId: null,
+//     treasurySystemType,
+//     treasuryLabel: DEFAULT_FEES_TREASURY_LABEL,
 //   };
 // }
 
@@ -371,7 +383,7 @@
 //       fee,
 //       netFrom,
 //       netTo,
-//       adminRevenue,
+//       treasuryRevenue,
 //     } = extractPricingBundle(pricingPayload, pricingInput);
 
 //     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
@@ -392,9 +404,6 @@
 //     const netFromStd = round2(netFrom);
 //     const amountTargetStd = round2(netTo);
 //     const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
-//     const adminRevenueStd = Number.isFinite(Number(adminRevenue))
-//       ? round2(Number(adminRevenue))
-//       : 0;
 
 //     if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
 //       throw createError(500, "Taux appliqué invalide");
@@ -403,6 +412,7 @@
 //     const reference = await generateTransactionRef();
 //     const securityAnswerHash = sha256Hex(aRaw);
 //     const amlSnapshot = req.aml || null;
+//     const treasurySeed = resolveFeesTreasurySeed();
 
 //     const safeRecipientInfo = isPlainObject(recipientInfo) ? recipientInfo : {};
 //     const recipientName =
@@ -493,9 +503,12 @@
 //       feeActual: null,
 //       feeId: null,
 
-//       adminRevenue: adminRevenueStd,
-//       adminRevenueCredited: false,
-//       adminRevenueCreditedAt: null,
+//       treasuryRevenue,
+//       treasuryRevenueCredited: false,
+//       treasuryRevenueCreditedAt: null,
+//       treasuryUserId: treasurySeed.treasuryUserId,
+//       treasurySystemType: treasurySeed.treasurySystemType,
+//       treasuryLabel: treasurySeed.treasuryLabel,
 
 //       securityQuestion: q,
 //       securityAnswerHash,
@@ -594,9 +607,9 @@
 //         feeRevenue: pricingSnapshot?.result?.feeRevenue ?? null,
 //         fxRevenue: pricingSnapshot?.result?.fxRevenue ?? null,
 //       },
-//       adminRevenue: adminRevenueStd,
+//       treasuryRevenue,
 //       fundsReserved: true,
-//       adminCreditedAtInitiate: false,
+//       treasuryCreditedAtInitiate: false,
 //     });
 //   } catch (err) {
 //     safeLog("error", "[TX INTERNAL] failed", {
@@ -615,8 +628,6 @@
 // }
 
 // module.exports = { initiateInternal };
-
-
 
 
 
@@ -644,8 +655,68 @@ const {
   extractPricingBundle,
 } = require("../shared/pricing");
 
+const {
+  normalizeCurrency,
+  validateInternalPaynovalCorridor,
+} = require("./corridorValidation");
+
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
+/**
+ * Champs nécessaires pour que corridorValidation.js puisse vérifier :
+ * - pays/devise réels
+ * - compte actif ou bloqué
+ * - compte système interdit
+ * - visibilité transfert
+ * - KYC/KYB statut
+ */
+const USER_CORRIDOR_SELECT = [
+  "_id",
+  "fullName",
+  "email",
+  "phone",
+
+  "country",
+  "countryCode",
+  "selectedCountry",
+  "residenceCountry",
+  "registrationCountry",
+  "nationality",
+
+  "currency",
+  "currencyCode",
+  "defaultCurrency",
+  "managedCurrency",
+
+  "userType",
+  "role",
+  "isBusiness",
+  "isSystem",
+  "systemType",
+
+  "accountStatus",
+  "status",
+  "staffStatus",
+
+  "isBlocked",
+  "isLoginDisabled",
+  "hiddenFromTransfers",
+  "hiddenFromUserSearch",
+  "hiddenFromUserApp",
+
+  "kycStatus",
+  "kybStatus",
+
+  "kyc",
+  "kyb",
+  "profile",
+  "address",
+  "wallet",
+
+  "isDeleted",
+  "deletedAt",
+].join(" ");
 
 function norm(v) {
   return String(v || "").trim().toLowerCase();
@@ -667,13 +738,17 @@ function safeLog(level, message, meta = {}) {
   try {
     const payload = isPlainObject(meta) ? meta : {};
     const logger = runtime.logger;
+
     if (logger && typeof logger[level] === "function") {
       logger[level](message, payload);
       return;
     }
+
     const line = `${message} ${JSON.stringify(payload)}`;
+
     if (level === "error") return console.error(line);
     if (level === "warn") return console.warn(line);
+
     console.log(line);
   } catch {
     console.log(message);
@@ -703,11 +778,17 @@ function maskSecret(v) {
 }
 
 function resolveCountryForSource(body = {}) {
-  return body.fromCountry || body.sourceCountry || body.country || "";
+  return body.fromCountry || body.sourceCountry || "";
 }
 
 function resolveCountryForTarget(body = {}) {
-  return body.toCountry || body.destinationCountry || body.targetCountry || body.country || "";
+  return (
+    body.toCountry ||
+    body.destinationCountry ||
+    body.targetCountry ||
+    body.country ||
+    ""
+  );
 }
 
 function getEffectivePricingId(body = {}) {
@@ -812,7 +893,6 @@ async function initiateInternal(req, res, next) {
       securityCode,
       destination,
       funds,
-      country,
       metadata = {},
       meta = {},
     } = body;
@@ -836,11 +916,13 @@ async function initiateInternal(req, res, next) {
     }
 
     const authHeader = String(req.headers?.authorization || "").trim();
+
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       throw createError(401, "Token manquant");
     }
 
     const senderId = String(req.user?.id || req.user?._id || "").trim();
+
     if (!senderId) {
       throw createError(401, "Utilisateur non authentifié");
     }
@@ -855,6 +937,7 @@ async function initiateInternal(req, res, next) {
 
     const q = sanitize(securityQuestion || question || "");
     const aRaw = sanitize(securityAnswer || securityCode || "");
+
     if (!q || !aRaw) {
       throw createError(400, "securityQuestion + securityAnswer requis");
     }
@@ -863,15 +946,8 @@ async function initiateInternal(req, res, next) {
       throw createError(400, "Description trop longue");
     }
 
-    const sourceCountryRaw = resolveCountryForSource(body);
-    const targetCountryRaw = resolveCountryForTarget(body);
-    const effectiveCountry = targetCountryRaw || sourceCountryRaw || country || "";
-
-    if (!effectiveCountry || !String(effectiveCountry).trim()) {
-      throw createError(400, "country requis");
-    }
-
     const amt = toFloat(amount ?? body.amountSource);
+
     if (!Number.isFinite(amt) || amt <= 0) {
       throw createError(400, "Montant invalide");
     }
@@ -894,13 +970,20 @@ async function initiateInternal(req, res, next) {
     const sessOpts = runtime.maybeSessionOpts(session);
     const activeSession = sessOpts?.session || null;
 
-    let senderQuery = User.findById(senderId).select("fullName email");
-    let receiverQuery = User.findOne({ email: cleanEmail }).select("_id fullName email");
+    let senderQuery = User.findById(senderId).select(USER_CORRIDOR_SELECT);
+
+    let receiverQuery = User.findOne({
+      email: cleanEmail,
+      isDeleted: { $ne: true },
+    }).select(USER_CORRIDOR_SELECT);
 
     senderQuery = safeSessionChain(senderQuery, activeSession).lean();
     receiverQuery = safeSessionChain(receiverQuery, activeSession).lean();
 
-    const [senderUser, receiver] = await Promise.all([senderQuery, receiverQuery]);
+    const [senderUser, receiver] = await Promise.all([
+      senderQuery,
+      receiverQuery,
+    ]);
 
     if (!senderUser) {
       throw createError(403, "Utilisateur invalide");
@@ -914,14 +997,17 @@ async function initiateInternal(req, res, next) {
       throw createError(400, "Auto-transfert impossible");
     }
 
-    const currencySourceISO =
+    const sourceCountryRaw = resolveCountryForSource(body);
+    const targetCountryRaw = resolveCountryForTarget(body);
+
+    let currencySourceISO =
       normCur(
         body.senderCurrencyCode ||
           body.currencySource ||
           body.fromCurrency ||
           body.senderCurrencySymbol ||
           body.currency,
-        sourceCountryRaw || effectiveCountry
+        sourceCountryRaw
       ) ||
       upperSanitized(
         body.senderCurrencyCode ||
@@ -931,13 +1017,13 @@ async function initiateInternal(req, res, next) {
           body.currency
       );
 
-    const currencyTargetISO =
+    let currencyTargetISO =
       normCur(
         body.localCurrencyCode ||
           body.currencyTarget ||
           body.toCurrency ||
           body.localCurrencySymbol,
-        targetCountryRaw || effectiveCountry
+        targetCountryRaw
       ) ||
       upperSanitized(
         body.localCurrencyCode ||
@@ -945,6 +1031,24 @@ async function initiateInternal(req, res, next) {
           body.toCurrency ||
           body.localCurrencySymbol
       );
+
+    currencySourceISO = normalizeCurrency(currencySourceISO);
+    currencyTargetISO = normalizeCurrency(currencyTargetISO);
+
+    const corridorLock = validateInternalPaynovalCorridor({
+      sender: senderUser,
+      receiver,
+      sourceCountry: sourceCountryRaw,
+      targetCountry: targetCountryRaw,
+      currencySource: currencySourceISO,
+      currencyTarget: currencyTargetISO,
+    });
+
+    currencySourceISO = corridorLock.currencySource;
+    currencyTargetISO = corridorLock.currencyTarget;
+
+    const lockedSourceCountry = corridorLock.sourceCountry;
+    const lockedTargetCountry = corridorLock.targetCountry;
 
     if (!currencySourceISO) {
       throw createError(400, "Devise source introuvable");
@@ -958,6 +1062,19 @@ async function initiateInternal(req, res, next) {
     req.body.localCurrencyCode = currencyTargetISO;
     req.body.senderCurrencySymbol = currencySourceISO;
     req.body.localCurrencySymbol = currencyTargetISO;
+
+    req.body.currencySource = currencySourceISO;
+    req.body.currencyTarget = currencyTargetISO;
+    req.body.fromCurrency = currencySourceISO;
+    req.body.toCurrency = currencyTargetISO;
+
+    req.body.fromCountry = lockedSourceCountry;
+    req.body.sourceCountry = lockedSourceCountry;
+    req.body.toCountry = lockedTargetCountry;
+    req.body.destinationCountry = lockedTargetCountry;
+    req.body.targetCountry = lockedTargetCountry;
+    req.body.country = lockedTargetCountry;
+
     req.body.funds = "paynoval";
     req.body.destination = "paynoval";
     req.body.provider = "paynoval";
@@ -967,6 +1084,7 @@ async function initiateInternal(req, res, next) {
 
     const pricingInput = pickBodyPricingInput({
       ...body,
+      ...req.body,
       amount: amt,
       funds: "paynoval",
       destination: "paynoval",
@@ -975,14 +1093,15 @@ async function initiateInternal(req, res, next) {
       txType: body.txType || "TRANSFER",
       fromCurrency: currencySourceISO,
       toCurrency: currencyTargetISO,
-      fromCountry: sourceCountryRaw || effectiveCountry,
-      toCountry: targetCountryRaw || effectiveCountry,
+      fromCountry: lockedSourceCountry,
+      toCountry: lockedTargetCountry,
       pricingId: body.pricingId || undefined,
       quoteId: body.quoteId || undefined,
       effectivePricingId: effectivePricingId || undefined,
     });
 
     let pricingPayload;
+
     try {
       pricingPayload = await fetchPricingQuoteFromGateway({
         authHeader,
@@ -997,6 +1116,7 @@ async function initiateInternal(req, res, next) {
         responseData: e?.response?.data || null,
         message: e?.message || "unknown_error",
       });
+
       throw createError(502, "Service pricing indisponible");
     }
 
@@ -1012,12 +1132,15 @@ async function initiateInternal(req, res, next) {
     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
       throw createError(500, "grossFrom pricing invalide");
     }
+
     if (!Number.isFinite(fee) || fee < 0) {
       throw createError(500, "fee pricing invalide");
     }
+
     if (!Number.isFinite(netFrom) || netFrom < 0) {
       throw createError(500, "netFrom pricing invalide");
     }
+
     if (!Number.isFinite(netTo) || netTo <= 0) {
       throw createError(500, "netTo pricing invalide");
     }
@@ -1038,6 +1161,7 @@ async function initiateInternal(req, res, next) {
     const treasurySeed = resolveFeesTreasurySeed();
 
     const safeRecipientInfo = isPlainObject(recipientInfo) ? recipientInfo : {};
+
     const recipientName =
       sanitize(
         safeRecipientInfo.name ||
@@ -1057,7 +1181,16 @@ async function initiateInternal(req, res, next) {
       pricingId: body?.pricingId || null,
       quoteId: body?.quoteId || null,
       effectivePricingId: effectivePricingId || null,
+      corridorLock: corridorLock.snapshot,
     });
+
+    const txMetadata = {
+      provider: "paynoval",
+      method: "INTERNAL",
+      txType: body.txType || "TRANSFER",
+      rail: "internal",
+      corridorLock: corridorLock.snapshot,
+    };
 
     const txDoc = {
       userId: senderUser._id,
@@ -1087,7 +1220,7 @@ async function initiateInternal(req, res, next) {
       funds: "paynoval",
       provider: "paynoval",
       operator: body.operator || null,
-      country: sanitize(effectiveCountry),
+      country: sanitize(lockedTargetCountry),
 
       amount: dec2(amountSourceStd),
       transactionFees: dec2(feeSourceStd),
@@ -1143,12 +1276,7 @@ async function initiateInternal(req, res, next) {
       description: sanitize(description),
       orderId: body.orderId || null,
 
-      metadata: {
-        provider: "paynoval",
-        method: "INTERNAL",
-        txType: body.txType || "TRANSFER",
-        rail: "internal",
-      },
+      metadata: txMetadata,
       meta: txMeta,
 
       status: "pending",
@@ -1183,6 +1311,7 @@ async function initiateInternal(req, res, next) {
     tx.fundsReserved = true;
     tx.fundsReservedAt = new Date();
     tx.providerStatus = "FUNDS_RESERVED";
+
     await tx.save(sessOpts);
 
     logTransaction({
@@ -1196,6 +1325,7 @@ async function initiateInternal(req, res, next) {
         transactionId: String(tx._id),
         reference: tx.reference,
         flow: tx.flow,
+        corridorLock: corridorLock.snapshot,
       },
       flagged: false,
       flagReason: "",
@@ -1233,10 +1363,13 @@ async function initiateInternal(req, res, next) {
       treasuryRevenue,
       fundsReserved: true,
       treasuryCreditedAtInitiate: false,
+      corridorLock: corridorLock.snapshot,
     });
   } catch (err) {
     safeLog("error", "[TX INTERNAL] failed", {
       message: err?.message,
+      code: err?.code || null,
+      details: err?.details || null,
       status: err?.status || err?.statusCode || 500,
       stack: err?.stack,
       body: buildDebugBody(req.body || {}),

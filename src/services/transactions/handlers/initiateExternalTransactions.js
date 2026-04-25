@@ -12,12 +12,11 @@
 //   generateTransactionRef,
 //   reserveSenderFunds,
 //   normalizePricingSnapshot,
+//   normalizeTreasurySystemType,
 //   startTxSession,
 //   maybeSessionOpts,
 //   canUseSharedSession,
 // } = require("../shared/runtime");
-
-
 
 // const { notifyTransactionEvent } = require("../transactionNotificationService");
 
@@ -54,12 +53,27 @@
 
 // const { submitExternalExecution } = require("./submitExternalExecution");
 
+// const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
+// const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+
 // function ensureBearer(req) {
 //   const authHeader = req.headers.authorization;
 //   if (!authHeader || !authHeader.startsWith("Bearer ")) {
 //     throw createError(401, "Token manquant");
 //   }
 //   return authHeader;
+// }
+
+// function resolveFeesTreasurySeed() {
+//   const treasurySystemType = normalizeTreasurySystemType
+//     ? normalizeTreasurySystemType(DEFAULT_FEES_TREASURY_SYSTEM_TYPE)
+//     : DEFAULT_FEES_TREASURY_SYSTEM_TYPE;
+
+//   return {
+//     treasuryUserId: null,
+//     treasurySystemType,
+//     treasuryLabel: DEFAULT_FEES_TREASURY_LABEL,
+//   };
 // }
 
 // function pickExternalDisplayName(body = {}) {
@@ -419,6 +433,7 @@
 //     const reference = sanitize(body.reference) || (await generateTransactionRef());
 //     const securityAnswerHash = sha256Hex(aRaw);
 //     const amlSnapshot = req.aml || null;
+//     const treasurySeed = resolveFeesTreasurySeed();
 
 //     const txMeta = {
 //       ...((meta && typeof meta === "object") ? meta : {}),
@@ -516,9 +531,9 @@
 //           treasuryRevenue: pricingCtx.treasuryRevenue,
 //           treasuryRevenueCredited: false,
 //           treasuryRevenueCreditedAt: null,
-//           treasuryUserId: null,
-//           treasurySystemType: "FEES_TREASURY",
-//           treasuryLabel: "PayNoval Fees Treasury",
+//           treasuryUserId: treasurySeed.treasuryUserId,
+//           treasurySystemType: treasurySeed.treasurySystemType,
+//           treasuryLabel: treasurySeed.treasuryLabel,
 //           securityQuestion: q,
 //           securityAnswerHash,
 //           securityCode: securityAnswerHash,
@@ -728,6 +743,7 @@
 
 //     const reference = sanitize(body.reference) || (await generateTransactionRef());
 //     const amlSnapshot = req.aml || null;
+//     const treasurySeed = resolveFeesTreasurySeed();
 
 //     const txMeta = {
 //       ...((meta && typeof meta === "object") ? meta : {}),
@@ -831,9 +847,9 @@
 //           treasuryRevenue: pricingCtx.treasuryRevenue,
 //           treasuryRevenueCredited: false,
 //           treasuryRevenueCreditedAt: null,
-//           treasuryUserId: null,
-//           treasurySystemType: "FEES_TREASURY",
-//           treasuryLabel: "PayNoval Fees Treasury",
+//           treasuryUserId: treasurySeed.treasuryUserId,
+//           treasurySystemType: treasurySeed.treasurySystemType,
+//           treasuryLabel: treasurySeed.treasuryLabel,
 //           securityQuestion: null,
 //           securityAnswerHash: null,
 //           securityCode: null,
@@ -944,6 +960,7 @@
 
 
 
+
 "use strict";
 
 const createError = require("http-errors");
@@ -997,16 +1014,79 @@ const {
   maskPan,
 } = require("./flowHelpers");
 
+const {
+  normalizeCurrency,
+  validateOutboundExternalCorridor,
+  validateInboundExternalCorridor,
+} = require("./corridorValidation");
+
 const { submitExternalExecution } = require("./submitExternalExecution");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
 
+/**
+ * Champs nécessaires pour que corridorValidation.js puisse vérifier :
+ * - pays/devise réels
+ * - compte actif ou bloqué
+ * - compte système interdit
+ * - visibilité transfert
+ * - KYC/KYB statut
+ */
+const USER_CORRIDOR_SELECT = [
+  "_id",
+  "fullName",
+  "email",
+  "phone",
+
+  "country",
+  "countryCode",
+  "selectedCountry",
+  "residenceCountry",
+  "registrationCountry",
+  "nationality",
+
+  "currency",
+  "currencyCode",
+  "defaultCurrency",
+  "managedCurrency",
+
+  "userType",
+  "role",
+  "isBusiness",
+  "isSystem",
+  "systemType",
+
+  "accountStatus",
+  "status",
+  "staffStatus",
+
+  "isBlocked",
+  "isLoginDisabled",
+  "hiddenFromTransfers",
+  "hiddenFromUserSearch",
+  "hiddenFromUserApp",
+
+  "kycStatus",
+  "kybStatus",
+
+  "kyc",
+  "kyb",
+  "profile",
+  "address",
+  "wallet",
+
+  "isDeleted",
+  "deletedAt",
+].join(" ");
+
 function ensureBearer(req) {
   const authHeader = req.headers.authorization;
+
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     throw createError(401, "Token manquant");
   }
+
   return authHeader;
 }
 
@@ -1054,11 +1134,13 @@ function pickExternalRecipientEmail(body = {}) {
     "";
 
   if (!isEmailLike(email)) return null;
+
   return String(email).trim().toLowerCase();
 }
 
 function normalizeMethodForPricing(body = {}, provider = "") {
   const method = String(body.method || "").trim().toUpperCase();
+
   if (method) return method;
 
   const methodType = String(body.methodType || "").trim().toLowerCase();
@@ -1068,22 +1150,31 @@ function normalizeMethodForPricing(body = {}, provider = "") {
   if (methodType === "visa" || methodType === "card") return "VISA";
 
   if (
-    ["mobilemoney", "mobile_money", "momo", "mobilemoneyaccount", "mobile_money_account"].includes(
-      methodType
-    )
+    [
+      "mobilemoney",
+      "mobile_money",
+      "momo",
+      "mobilemoneyaccount",
+      "mobile_money_account",
+    ].includes(methodType)
   ) {
     return "MOBILE_MONEY";
   }
 
   if (provider) return String(provider).trim().toUpperCase();
+
   return "MOBILE_MONEY";
 }
 
 function normalizeTxTypeForPricing(body = {}) {
-  const txType = String(body.txType || body.transactionType || "").trim().toUpperCase();
+  const txType = String(body.txType || body.transactionType || "")
+    .trim()
+    .toUpperCase();
+
   if (txType) return txType;
 
   const action = String(body.action || "").trim().toLowerCase();
+
   if (action === "deposit") return "DEPOSIT";
   if (action === "withdraw") return "WITHDRAW";
 
@@ -1213,20 +1304,27 @@ async function buildPricingContext({
   currencyTargetISO,
 }) {
   const authHeader = ensureBearer(req);
+  const effectiveBody = { ...body, ...req.body };
 
   const pricingInput = pickBodyPricingInput({
-    ...req.body,
+    ...effectiveBody,
     amount,
     fromCurrency: currencySourceISO,
     toCurrency: currencyTargetISO,
     provider,
-    method: normalizeMethodForPricing(body, provider),
-    txType: normalizeTxTypeForPricing(body),
-    fromCountry: body.fromCountry || body.sourceCountry || country,
-    toCountry: body.toCountry || body.targetCountry || body.destinationCountry || country,
+    method: normalizeMethodForPricing(effectiveBody, provider),
+    txType: normalizeTxTypeForPricing(effectiveBody),
+    fromCountry:
+      effectiveBody.fromCountry || effectiveBody.sourceCountry || country,
+    toCountry:
+      effectiveBody.toCountry ||
+      effectiveBody.targetCountry ||
+      effectiveBody.destinationCountry ||
+      country,
   });
 
   let pricingPayload;
+
   try {
     pricingPayload = await fetchPricingQuoteFromGateway({
       authHeader,
@@ -1239,6 +1337,7 @@ async function buildPricingContext({
       responseData: e.response?.data,
       message: e.message,
     });
+
     throw createError(502, "Service pricing indisponible");
   }
 
@@ -1254,9 +1353,15 @@ async function buildPricingContext({
   if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
     throw createError(500, "grossFrom pricing invalide");
   }
+
+  if (!Number.isFinite(fee) || fee < 0) {
+    throw createError(500, "fee pricing invalide");
+  }
+
   if (!Number.isFinite(netFrom) || netFrom < 0) {
     throw createError(500, "netFrom pricing invalide");
   }
+
   if (!Number.isFinite(netTo) || netTo <= 0) {
     throw createError(500, "netTo pricing invalide");
   }
@@ -1265,6 +1370,10 @@ async function buildPricingContext({
   const feeSourceStd = round2(fee);
   const amountTargetStd = round2(netTo);
   const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
+
+  if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
+    throw createError(500, "Taux appliqué invalide");
+  }
 
   return {
     pricingInput,
@@ -1276,6 +1385,14 @@ async function buildPricingContext({
     rateUsed,
     treasuryRevenue,
   };
+}
+
+function safeResolveFlow(body) {
+  try {
+    return resolveExternalFlow(body || {});
+  } catch {
+    return null;
+  }
 }
 
 async function initiateOutboundExternal(req, res, next) {
@@ -1309,13 +1426,20 @@ async function initiateOutboundExternal(req, res, next) {
 
     const q = sanitize(securityQuestion || question || "");
     const aRaw = sanitize(securityAnswer || securityCode || "");
+
     if (!q || !aRaw) {
       throw createError(400, "securityQuestion + securityAnswer requis");
     }
 
-    const senderId = req.user.id;
+    const senderId = String(req.user?.id || req.user?._id || "").trim();
+
+    if (!senderId) {
+      throw createError(401, "Utilisateur non authentifié");
+    }
+
     const amt = toFloat(amount ?? body.amountSource);
-    if (!amt || Number.isNaN(amt) || amt <= 0) {
+
+    if (!Number.isFinite(amt) || amt <= 0) {
       throw createError(400, "Montant invalide");
     }
 
@@ -1324,7 +1448,7 @@ async function initiateOutboundExternal(req, res, next) {
     const sessOpts = maybeSessionOpts(session);
 
     const senderUser = await User.findById(senderId)
-      .select("fullName email")
+      .select(USER_CORRIDOR_SELECT)
       .lean()
       .session(sessOpts.session || null);
 
@@ -1334,12 +1458,52 @@ async function initiateOutboundExternal(req, res, next) {
 
     const provider = resolveProviderForFlow(flow, body);
     const externalRecipientMeta = buildRecipientExternalMeta(flow, body);
-    const { country: resolvedCountry, fromCountry, toCountry } = resolveCountries(body, country);
-    const { currencySourceISO, currencyTargetISO } = resolveCurrencies({
+
+    const {
+      country: resolvedCountry,
+      fromCountry,
+      toCountry,
+    } = resolveCountries(body, country);
+
+    let { currencySourceISO, currencyTargetISO } = resolveCurrencies({
       body,
       normCur,
       country: resolvedCountry,
     });
+
+    currencySourceISO = normalizeCurrency(currencySourceISO);
+    currencyTargetISO = normalizeCurrency(currencyTargetISO);
+
+    const requestedSourceCountry = body.fromCountry || body.sourceCountry || "";
+    const requestedTargetCountry =
+      body.toCountry ||
+      body.destinationCountry ||
+      body.targetCountry ||
+      body.country ||
+      toCountry ||
+      resolvedCountry ||
+      "";
+
+    const corridorLock = validateOutboundExternalCorridor({
+      flow,
+      body,
+      senderUser,
+      fromCountry: requestedSourceCountry || fromCountry || "",
+      toCountry: requestedTargetCountry,
+      currencySource: currencySourceISO,
+      currencyTarget: currencyTargetISO,
+    });
+
+    currencySourceISO = corridorLock.lockedSourceCurrency;
+    currencyTargetISO = corridorLock.lockedTargetCurrency;
+
+    if (!currencySourceISO) {
+      throw createError(400, "Devise source introuvable");
+    }
+
+    if (!currencyTargetISO) {
+      throw createError(400, "Devise destination introuvable");
+    }
 
     await validationService.detectBasicFraud({
       sender: senderId,
@@ -1357,11 +1521,19 @@ async function initiateOutboundExternal(req, res, next) {
     req.body.localCurrencyCode = currencyTargetISO;
     req.body.senderCurrencySymbol = currencySourceISO;
     req.body.localCurrencySymbol = currencyTargetISO;
-    req.body.fromCountry = fromCountry;
-    req.body.toCountry = toCountry;
-    req.body.sourceCountry = fromCountry;
-    req.body.targetCountry = toCountry;
-    req.body.country = resolvedCountry;
+
+    req.body.currencySource = currencySourceISO;
+    req.body.currencyTarget = currencyTargetISO;
+    req.body.fromCurrency = currencySourceISO;
+    req.body.toCurrency = currencyTargetISO;
+
+    req.body.fromCountry = corridorLock.lockedSourceCountry;
+    req.body.toCountry = corridorLock.lockedTargetCountry;
+    req.body.sourceCountry = corridorLock.lockedSourceCountry;
+    req.body.targetCountry = corridorLock.lockedTargetCountry;
+    req.body.destinationCountry = corridorLock.lockedTargetCountry;
+    req.body.country = corridorLock.lockedTargetCountry;
+
     req.body.description = sanitize(description);
     req.body.securityQuestion = q;
     req.body.securityAnswer = aRaw;
@@ -1370,7 +1542,7 @@ async function initiateOutboundExternal(req, res, next) {
       req,
       body,
       amount: amt,
-      country: resolvedCountry,
+      country: req.body.country,
       provider,
       currencySourceISO,
       currencyTargetISO,
@@ -1385,13 +1557,14 @@ async function initiateOutboundExternal(req, res, next) {
       ...((meta && typeof meta === "object") ? meta : {}),
       ...buildExternalMeta({
         senderUser,
-        body,
+        body: req.body,
         extra: {
           entry: "external_payout.pending",
           requestOrigin: "tx-core",
           externalRecipient: externalRecipientMeta,
           description: sanitize(description),
           securityQuestion: q,
+          corridorLock: corridorLock.snapshot,
           effectivePricingId:
             body.effectivePricingId ||
             body.pricingLockId ||
@@ -1407,64 +1580,88 @@ async function initiateOutboundExternal(req, res, next) {
       ...buildExternalMetadata({
         flow,
         provider,
-        body,
+        body: req.body,
         extra: {
           providerReference: pickExternalRef(body),
           externalRecipient: externalRecipientMeta,
+          corridorLock: corridorLock.snapshot,
         },
       }),
+      corridorLock: corridorLock.snapshot,
     };
+
+    const destinationValue =
+      flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
+        ? "mobilemoney"
+        : flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT
+        ? "bank"
+        : "visa_direct";
 
     const [tx] = await Transaction.create(
       [
         {
           userId: senderUser._id,
           internalImported: false,
+
           flow,
           operationKind: "transfer",
           initiatedBy: "user",
           context: "external_payout",
           contextId: null,
+
           reference,
           idempotencyKey: body.idempotencyKey || null,
+
           sender: senderUser._id,
           receiver: null,
+
           senderName: senderUser.fullName,
           senderEmail: senderUser.email,
           nameDestinataire: pickExternalDisplayName(body),
           recipientEmail: pickExternalRecipientEmail(body),
-          destination:
-            flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
-              ? "mobilemoney"
-              : flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT
-              ? "bank"
-              : "visa_direct",
+
+          destination: destinationValue,
           funds: "paynoval",
           provider,
           operator: body.operator || body.operatorName || txMetadata?.provider || null,
-          country: sanitize(resolvedCountry),
+          country: sanitize(corridorLock.lockedTargetCountry),
+
           amount: dec2(pricingCtx.amountSourceStd),
           transactionFees: dec2(pricingCtx.feeSourceStd),
           netAmount: dec2(pricingCtx.netFrom),
           exchangeRate: dec2(pricingCtx.rateUsed),
           localAmount: dec2(pricingCtx.amountTargetStd),
+
           senderCurrencySymbol: currencySourceISO,
           localCurrencySymbol: currencyTargetISO,
+
           amountSource: dec2(pricingCtx.amountSourceStd),
           amountTarget: dec2(pricingCtx.amountTargetStd),
           feeSource: dec2(pricingCtx.feeSourceStd),
           fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
           currencySource: currencySourceISO,
           currencyTarget: currencyTargetISO,
+
           money: {
-            source: { amount: pricingCtx.amountSourceStd, currency: currencySourceISO },
-            feeSource: { amount: pricingCtx.feeSourceStd, currency: currencySourceISO },
-            target: { amount: pricingCtx.amountTargetStd, currency: currencyTargetISO },
+            source: {
+              amount: pricingCtx.amountSourceStd,
+              currency: currencySourceISO,
+            },
+            feeSource: {
+              amount: pricingCtx.feeSourceStd,
+              currency: currencySourceISO,
+            },
+            target: {
+              amount: pricingCtx.amountTargetStd,
+              currency: currencyTargetISO,
+            },
             fxRateSourceToTarget: pricingCtx.rateUsed,
           },
+
           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
           pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
           pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+
           feeSnapshot: {
             fee: pricingCtx.feeSourceStd,
             netAfterFees: pricingCtx.netFrom,
@@ -1474,24 +1671,31 @@ async function initiateOutboundExternal(req, res, next) {
           },
           feeActual: null,
           feeId: null,
+
           treasuryRevenue: pricingCtx.treasuryRevenue,
           treasuryRevenueCredited: false,
           treasuryRevenueCreditedAt: null,
           treasuryUserId: treasurySeed.treasuryUserId,
           treasurySystemType: treasurySeed.treasurySystemType,
           treasuryLabel: treasurySeed.treasuryLabel,
+
           securityQuestion: q,
           securityAnswerHash,
           securityCode: securityAnswerHash,
+
           amlSnapshot,
           amlStatus: amlSnapshot?.status || "passed",
+
           description: sanitize(description),
           orderId: body.orderId || null,
+
           metadata: txMetadata,
           meta: txMeta,
+
           status: "pending",
           providerReference: pickExternalRef(body),
           providerStatus: "PENDING_USER_CONFIRMATION",
+
           fundsReserved: false,
           fundsReservedAt: null,
           fundsCaptured: false,
@@ -1521,6 +1725,7 @@ async function initiateOutboundExternal(req, res, next) {
     tx.fundsReserved = true;
     tx.fundsReservedAt = new Date();
     tx.providerStatus = "FUNDS_RESERVED";
+
     await tx.save(sessOpts);
 
     logTransaction({
@@ -1539,6 +1744,7 @@ async function initiateOutboundExternal(req, res, next) {
         transactionId: tx._id.toString(),
         reference: tx.reference,
         flow,
+        corridorLock: corridorLock.snapshot,
       },
       flagged: false,
       flagReason: "",
@@ -1549,9 +1755,11 @@ async function initiateOutboundExternal(req, res, next) {
     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
     if (canUseSharedSession()) await session.commitTransaction();
+
     session.endSession();
 
     let execution = null;
+
     try {
       execution = await submitExternalExecution({
         req,
@@ -1573,7 +1781,8 @@ async function initiateOutboundExternal(req, res, next) {
       flow: tx.flow,
       status: execution?.status || tx.status,
       providerStatus: execution?.providerStatus || tx.providerStatus,
-      providerReference: execution?.providerReference || tx.providerReference || null,
+      providerReference:
+        execution?.providerReference || tx.providerReference || null,
       securityQuestion: q,
       pricing: {
         feeSource: pricingCtx.feeSourceStd,
@@ -1590,11 +1799,21 @@ async function initiateOutboundExternal(req, res, next) {
       fundsReserved: true,
       treasuryCreditedAtInitiate: false,
       externalRecipient: redactSensitiveFields(externalRecipientMeta),
+      corridorLock: corridorLock.snapshot,
     });
   } catch (err) {
+    logger.error("[TX-CORE][OUTBOUND] initiate failed", {
+      message: err.message,
+      code: err.code || null,
+      details: err.details || null,
+      status: err.status || err.statusCode || 500,
+      flow: safeResolveFlow(req.body),
+    });
+
     try {
       if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
+
     session.endSession();
     next(err);
   }
@@ -1625,9 +1844,15 @@ async function initiateInboundExternal(req, res, next) {
       throw createError(400, "Description trop longue");
     }
 
-    const receiverId = req.user.id;
+    const receiverId = String(req.user?.id || req.user?._id || "").trim();
+
+    if (!receiverId) {
+      throw createError(401, "Utilisateur non authentifié");
+    }
+
     const amt = toFloat(amount ?? body.amountSource);
-    if (!amt || Number.isNaN(amt) || amt <= 0) {
+
+    if (!Number.isFinite(amt) || amt <= 0) {
       throw createError(400, "Montant invalide");
     }
 
@@ -1636,7 +1861,7 @@ async function initiateInboundExternal(req, res, next) {
     const sessOpts = maybeSessionOpts(session);
 
     const receiverUser = await User.findById(receiverId)
-      .select("fullName email")
+      .select(USER_CORRIDOR_SELECT)
       .lean()
       .session(sessOpts.session || null);
 
@@ -1646,12 +1871,56 @@ async function initiateInboundExternal(req, res, next) {
 
     const provider = resolveProviderForFlow(flow, body);
     const externalSourceMeta = buildRecipientExternalMeta(flow, body);
-    const { country: resolvedCountry, fromCountry, toCountry } = resolveCountries(body, country);
-    const { currencySourceISO, currencyTargetISO } = resolveCurrencies({
+
+    const {
+      country: resolvedCountry,
+      fromCountry,
+      toCountry,
+    } = resolveCountries(body, country);
+
+    let { currencySourceISO, currencyTargetISO } = resolveCurrencies({
       body,
       normCur,
       country: resolvedCountry,
     });
+
+    currencySourceISO = normalizeCurrency(currencySourceISO);
+    currencyTargetISO = normalizeCurrency(currencyTargetISO);
+
+    const requestedSourceCountry =
+      body.fromCountry ||
+      body.sourceCountry ||
+      body.country ||
+      fromCountry ||
+      resolvedCountry ||
+      "";
+
+    const requestedTargetCountry =
+      body.toCountry ||
+      body.destinationCountry ||
+      body.targetCountry ||
+      "";
+
+    const corridorLock = validateInboundExternalCorridor({
+      flow,
+      body,
+      receiverUser,
+      fromCountry: requestedSourceCountry,
+      toCountry: requestedTargetCountry || toCountry || "",
+      currencySource: currencySourceISO,
+      currencyTarget: currencyTargetISO,
+    });
+
+    currencySourceISO = corridorLock.lockedSourceCurrency;
+    currencyTargetISO = corridorLock.lockedTargetCurrency;
+
+    if (!currencySourceISO) {
+      throw createError(400, "Devise source introuvable");
+    }
+
+    if (!currencyTargetISO) {
+      throw createError(400, "Devise destination introuvable");
+    }
 
     await validationService.detectBasicFraud({
       sender:
@@ -1670,18 +1939,26 @@ async function initiateInboundExternal(req, res, next) {
     req.body.localCurrencyCode = currencyTargetISO;
     req.body.senderCurrencySymbol = currencySourceISO;
     req.body.localCurrencySymbol = currencyTargetISO;
-    req.body.fromCountry = fromCountry;
-    req.body.toCountry = toCountry;
-    req.body.sourceCountry = fromCountry;
-    req.body.targetCountry = toCountry;
-    req.body.country = resolvedCountry;
+
+    req.body.currencySource = currencySourceISO;
+    req.body.currencyTarget = currencyTargetISO;
+    req.body.fromCurrency = currencySourceISO;
+    req.body.toCurrency = currencyTargetISO;
+
+    req.body.fromCountry = corridorLock.lockedSourceCountry;
+    req.body.toCountry = corridorLock.lockedTargetCountry;
+    req.body.sourceCountry = corridorLock.lockedSourceCountry;
+    req.body.targetCountry = corridorLock.lockedTargetCountry;
+    req.body.destinationCountry = corridorLock.lockedTargetCountry;
+    req.body.country = corridorLock.lockedTargetCountry;
+
     req.body.description = sanitize(description);
 
     const pricingCtx = await buildPricingContext({
       req,
       body,
       amount: amt,
-      country: resolvedCountry,
+      country: req.body.country,
       provider,
       currencySourceISO,
       currencyTargetISO,
@@ -1695,12 +1972,13 @@ async function initiateInboundExternal(req, res, next) {
       ...((meta && typeof meta === "object") ? meta : {}),
       ...buildExternalMeta({
         receiverUser,
-        body,
+        body: req.body,
         extra: {
           entry: "external_collection.pending",
           requestOrigin: "tx-core",
           externalSource: externalSourceMeta,
           description: sanitize(description),
+          corridorLock: corridorLock.snapshot,
           effectivePricingId:
             body.effectivePricingId ||
             body.pricingLockId ||
@@ -1716,28 +1994,43 @@ async function initiateInboundExternal(req, res, next) {
       ...buildExternalMetadata({
         flow,
         provider,
-        body,
+        body: req.body,
         extra: {
           providerReference: pickExternalRef(body),
           externalSource: externalSourceMeta,
+          corridorLock: corridorLock.snapshot,
         },
       }),
+      corridorLock: corridorLock.snapshot,
     };
+
+    const fundsValue =
+      flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
+        ? "mobilemoney"
+        : flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
+        ? "bank"
+        : provider === "visa_direct"
+        ? "visa_direct"
+        : "stripe";
 
     const [tx] = await Transaction.create(
       [
         {
           userId: receiverUser._id,
           internalImported: false,
+
           flow,
           operationKind: "transfer",
           initiatedBy: "user",
           context: "external_collection",
           contextId: null,
+
           reference,
           idempotencyKey: body.idempotencyKey || null,
+
           sender: null,
           receiver: receiverUser._id,
+
           senderName: sanitize(
             body.senderName ||
               body.accountHolder ||
@@ -1747,40 +2040,49 @@ async function initiateInboundExternal(req, res, next) {
           senderEmail: null,
           nameDestinataire: receiverUser.fullName,
           recipientEmail: receiverUser.email,
+
           destination: "paynoval",
-          funds:
-            flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
-              ? "mobilemoney"
-              : flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
-              ? "bank"
-              : provider === "visa_direct"
-              ? "visa_direct"
-              : "stripe",
+          funds: fundsValue,
           provider,
           operator: body.operator || body.operatorName || txMetadata?.provider || null,
-          country: sanitize(resolvedCountry),
+          country: sanitize(corridorLock.lockedTargetCountry),
+
           amount: dec2(pricingCtx.amountSourceStd),
           transactionFees: dec2(pricingCtx.feeSourceStd),
           netAmount: dec2(pricingCtx.netFrom),
           exchangeRate: dec2(pricingCtx.rateUsed),
           localAmount: dec2(pricingCtx.amountTargetStd),
+
           senderCurrencySymbol: currencySourceISO,
           localCurrencySymbol: currencyTargetISO,
+
           amountSource: dec2(pricingCtx.amountSourceStd),
           amountTarget: dec2(pricingCtx.amountTargetStd),
           feeSource: dec2(pricingCtx.feeSourceStd),
           fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
           currencySource: currencySourceISO,
           currencyTarget: currencyTargetISO,
+
           money: {
-            source: { amount: pricingCtx.amountSourceStd, currency: currencySourceISO },
-            feeSource: { amount: pricingCtx.feeSourceStd, currency: currencySourceISO },
-            target: { amount: pricingCtx.amountTargetStd, currency: currencyTargetISO },
+            source: {
+              amount: pricingCtx.amountSourceStd,
+              currency: currencySourceISO,
+            },
+            feeSource: {
+              amount: pricingCtx.feeSourceStd,
+              currency: currencySourceISO,
+            },
+            target: {
+              amount: pricingCtx.amountTargetStd,
+              currency: currencyTargetISO,
+            },
             fxRateSourceToTarget: pricingCtx.rateUsed,
           },
+
           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
           pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
           pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+
           feeSnapshot: {
             fee: pricingCtx.feeSourceStd,
             netAfterFees: pricingCtx.netFrom,
@@ -1790,24 +2092,31 @@ async function initiateInboundExternal(req, res, next) {
           },
           feeActual: null,
           feeId: null,
+
           treasuryRevenue: pricingCtx.treasuryRevenue,
           treasuryRevenueCredited: false,
           treasuryRevenueCreditedAt: null,
           treasuryUserId: treasurySeed.treasuryUserId,
           treasurySystemType: treasurySeed.treasurySystemType,
           treasuryLabel: treasurySeed.treasuryLabel,
+
           securityQuestion: null,
           securityAnswerHash: null,
           securityCode: null,
+
           amlSnapshot,
           amlStatus: amlSnapshot?.status || "passed",
+
           description: sanitize(description),
           orderId: body.orderId || null,
+
           metadata: txMetadata,
           meta: txMeta,
+
           status: "processing",
           providerReference: pickExternalRef(body),
           providerStatus: "AWAITING_PROVIDER_PAYMENT",
+
           fundsReserved: false,
           fundsReservedAt: null,
           fundsCaptured: false,
@@ -1837,6 +2146,7 @@ async function initiateInboundExternal(req, res, next) {
         transactionId: tx._id.toString(),
         reference: tx.reference,
         flow,
+        corridorLock: corridorLock.snapshot,
       },
       flagged: false,
       flagReason: "",
@@ -1847,9 +2157,11 @@ async function initiateInboundExternal(req, res, next) {
     await notifyTransactionEvent(tx, "processing", session, currencyTargetISO);
 
     if (canUseSharedSession()) await session.commitTransaction();
+
     session.endSession();
 
     let execution = null;
+
     try {
       execution = await submitExternalExecution({
         req,
@@ -1871,7 +2183,8 @@ async function initiateInboundExternal(req, res, next) {
       flow: tx.flow,
       status: execution?.status || tx.status,
       providerStatus: execution?.providerStatus || tx.providerStatus,
-      providerReference: execution?.providerReference || tx.providerReference || null,
+      providerReference:
+        execution?.providerReference || tx.providerReference || null,
       pricing: {
         feeSource: pricingCtx.feeSourceStd,
         feeSourceCurrency: currencySourceISO,
@@ -1885,12 +2198,22 @@ async function initiateInboundExternal(req, res, next) {
       },
       treasuryRevenue: pricingCtx.treasuryRevenue,
       externalSource: redactSensitiveFields(externalSourceMeta),
+      corridorLock: corridorLock.snapshot,
       message: "Demande créée. En attente de confirmation provider.",
     });
   } catch (err) {
+    logger.error("[TX-CORE][INBOUND] initiate failed", {
+      message: err.message,
+      code: err.code || null,
+      details: err.details || null,
+      status: err.status || err.statusCode || 500,
+      flow: safeResolveFlow(req.body),
+    });
+
     try {
       if (canUseSharedSession()) await session.abortTransaction();
     } catch {}
+
     session.endSession();
     next(err);
   }
@@ -1900,4 +2223,3 @@ module.exports = {
   initiateOutboundExternal,
   initiateInboundExternal,
 };
-
