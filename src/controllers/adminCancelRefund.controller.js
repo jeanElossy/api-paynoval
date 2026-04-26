@@ -7,7 +7,7 @@ const createError = require("http-errors");
 const {
   startTxSession,
   canUseSharedSession,
-} = require("../shared/runtime");
+} = require("../services/transactions/shared/runtime");
 
 const {
   processAdminCancelRefund,
