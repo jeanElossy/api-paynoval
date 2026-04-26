@@ -31,12 +31,27 @@ function safeCompare(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
-/**
- * Sécurité interne.
- * Seul le backend principal doit appeler ces routes.
- */
 function requireInternalToken(req, _res, next) {
   const expectedToken = getExpectedInternalToken();
+
+  const receivedToken = String(
+    req.headers["x-internal-token"] ||
+      req.headers["x-paynoval-internal-token"] ||
+      req.headers["authorization"]?.replace(/^Bearer\s+/i, "") ||
+      ""
+  ).trim();
+
+  console.log(
+    "[TX-CORE][INTERNAL ADMIN TX][AUTH] Vérification token",
+    JSON.stringify({
+      path: req.originalUrl,
+      method: req.method,
+      expectedTokenPresent: !!expectedToken,
+      expectedTokenLength: expectedToken.length,
+      receivedTokenPresent: !!receivedToken,
+      receivedTokenLength: receivedToken.length,
+    })
+  );
 
   if (!expectedToken) {
     return next(
@@ -47,32 +62,37 @@ function requireInternalToken(req, _res, next) {
     );
   }
 
-  const receivedToken = String(
-    req.headers["x-internal-token"] ||
-      req.headers["x-paynoval-internal-token"] ||
-      req.headers["authorization"]?.replace(/^Bearer\s+/i, "") ||
-      ""
-  ).trim();
-
   if (!receivedToken || !safeCompare(receivedToken, expectedToken)) {
+    console.warn(
+      "[TX-CORE][INTERNAL ADMIN TX][AUTH] Token interne invalide",
+      JSON.stringify({
+        path: req.originalUrl,
+        method: req.method,
+        receivedTokenPresent: !!receivedToken,
+        receivedTokenLength: receivedToken.length,
+      })
+    );
+
     return next(createError(401, "Token interne invalide"));
   }
+
+  console.log(
+    "[TX-CORE][INTERNAL ADMIN TX][AUTH] Token interne OK",
+    JSON.stringify({
+      path: req.originalUrl,
+      method: req.method,
+    })
+  );
 
   return next();
 }
 
-/**
- * GET /api/v1/internal/admin/transactions
- */
 router.get(
   "/internal/admin/transactions",
   requireInternalToken,
   listInternalAdminTransactions
 );
 
-/**
- * GET /api/v1/internal/admin/transactions/:id
- */
 router.get(
   "/internal/admin/transactions/:id",
   requireInternalToken,

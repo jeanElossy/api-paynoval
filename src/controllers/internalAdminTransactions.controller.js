@@ -52,11 +52,6 @@ function buildSearchQuery(search) {
   ];
 }
 
-/**
- * GET /api/v1/internal/admin/transactions
- *
- * Route interne tx-core utilisée par le backend principal.
- */
 async function listInternalAdminTransactions(req, res, next) {
   try {
     const {
@@ -100,6 +95,18 @@ async function listInternalAdminTransactions(req, res, next) {
       query.archived = { $ne: true };
     }
 
+    console.log(
+      "[TX-CORE][INTERNAL ADMIN TX][LIST] Requête reçue",
+      JSON.stringify({
+        originalUrl: req.originalUrl,
+        query: req.query,
+        mongoQuery: query,
+        dbName: Transaction.db?.name,
+        collection: Transaction.collection?.name,
+        modelName: Transaction.modelName,
+      })
+    );
+
     const total = await Transaction.countDocuments(query);
 
     const txs = await Transaction.find(query)
@@ -107,6 +114,18 @@ async function listInternalAdminTransactions(req, res, next) {
       .skip((safePage - 1) * safeLimit)
       .limit(safeLimit)
       .lean();
+
+    console.log(
+      "[TX-CORE][INTERNAL ADMIN TX][LIST] Résultat Mongo",
+      JSON.stringify({
+        total,
+        returned: txs.length,
+        page: safePage,
+        limit: safeLimit,
+        dbName: Transaction.db?.name,
+        collection: Transaction.collection?.name,
+      })
+    );
 
     const payload = {
       success: true,
@@ -136,15 +155,18 @@ async function listInternalAdminTransactions(req, res, next) {
 
     return res.status(200).json(payload);
   } catch (error) {
+    console.error(
+      "[TX-CORE][INTERNAL ADMIN TX][LIST] Erreur",
+      JSON.stringify({
+        message: error?.message,
+        stack: error?.stack,
+      })
+    );
+
     next(error);
   }
 }
 
-/**
- * GET /api/v1/internal/admin/transactions/:id
- *
- * Récupération par _id, reference, providerReference ou meta.reference.
- */
 async function getInternalAdminTransactionById(req, res, next) {
   try {
     const { id } = req.params;
@@ -154,6 +176,16 @@ async function getInternalAdminTransactionById(req, res, next) {
     }
 
     const cleanId = String(id).trim();
+
+    console.log(
+      "[TX-CORE][INTERNAL ADMIN TX][DETAIL] Requête reçue",
+      JSON.stringify({
+        originalUrl: req.originalUrl,
+        id: cleanId,
+        dbName: Transaction.db?.name,
+        collection: Transaction.collection?.name,
+      })
+    );
 
     let tx = null;
 
@@ -173,6 +205,14 @@ async function getInternalAdminTransactionById(req, res, next) {
       }).lean();
     }
 
+    console.log(
+      "[TX-CORE][INTERNAL ADMIN TX][DETAIL] Résultat Mongo",
+      JSON.stringify({
+        found: !!tx,
+        txId: tx?._id || null,
+      })
+    );
+
     if (!tx) {
       throw createError(404, "Transaction introuvable");
     }
@@ -185,6 +225,14 @@ async function getInternalAdminTransactionById(req, res, next) {
       },
     });
   } catch (error) {
+    console.error(
+      "[TX-CORE][INTERNAL ADMIN TX][DETAIL] Erreur",
+      JSON.stringify({
+        message: error?.message,
+        stack: error?.stack,
+      })
+    );
+
     next(error);
   }
 }

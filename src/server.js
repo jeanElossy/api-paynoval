@@ -1119,6 +1119,10 @@ async function bootstrap() {
     app.use("/api/v1", internalCancelRefundRoutes);
     app.use("/api/v1", internalAdminTransactionsRoutes);
 
+    logger.info(
+      "🔐 Internal admin transactions: /api/v1/internal/admin/transactions"
+    );
+
     // Public / user.
     app.use("/api/v1/transactions", transactionRoutes);
     
