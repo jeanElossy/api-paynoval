@@ -1100,6 +1100,8 @@ async function bootstrap() {
     const cagnotteVaultSettlementRoutes = require("./routes/cagnotteVaultSettlementRoutes");
     const cagnotteClosureFeesRoutes = require("./routes/cagnotteClosureFeesRoutes");
 
+    const internalAdminTransactionsRoutes = require("./routes/internalAdminTransactions.routes");
+
     // Webhooks AVANT sanitizers.
     app.use("/webhooks/providers", providerWebhookRoutes);
 
@@ -1115,9 +1117,11 @@ async function bootstrap() {
      * POST /api/v1/internal/transactions/:transactionId/cancel-refund
      */
     app.use("/api/v1", internalCancelRefundRoutes);
+    app.use("/api/v1", internalAdminTransactionsRoutes);
 
     // Public / user.
     app.use("/api/v1/transactions", transactionRoutes);
+    
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);
 
