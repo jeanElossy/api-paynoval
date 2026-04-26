@@ -14,10 +14,10 @@ const {
   normalizeTreasurySystemType,
   maybeSessionOpts,
   assertTransition,
-} = require("../shared/runtime");
+} = require("../services/transactions/shared/runtime");
 
-const { notifyTransactionEvent } = require("../transactionNotificationService");
-const { sanitize, toFloat, round2 } = require("../shared/helpers");
+const { notifyTransactionEvent } = require("../services/transactions/transactionNotificationService");
+const { sanitize, toFloat, round2 } = require("../services/transactions/shared/helpers");
 
 const TxRefundRequestFactory = require("../models/TxRefundRequest");
 
