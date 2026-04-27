@@ -1,4 +1,4 @@
-// File: services/transactionAutoCancelService.js
+// File: src/services/transactionAutoCancelService.js
 "use strict";
 
 const os = require("os");
@@ -21,7 +21,22 @@ const {
   getAutoCancelReason,
 } = require("./transactions/shared/autoCancelPolicy");
 
-const { notifyTransactionEvent } = require("./transactions/transactionNotificationService");
+const notificationService = (() => {
+  try {
+    return require("./transactions/transactionNotificationService");
+  } catch (err) {
+    logger.warn?.("[TX AUTO CANCEL] transactionNotificationService introuvable", {
+      message: err?.message || err,
+    });
+
+    return {};
+  }
+})();
+
+const notifyTransactionEvent =
+  typeof notificationService.notifyTransactionEvent === "function"
+    ? notificationService.notifyTransactionEvent
+    : async () => null;
 
 const AUTO_CANCEL_BATCH_SIZE = Math.max(
   1,
@@ -44,8 +59,8 @@ const AUTO_CANCELLABLE_MONGO_STATUSES = Array.from(
       ? Array.from(AUTO_CANCELLABLE_STATUSES)
       : []),
 
-    // Statuts réellement présents / possibles dans ton modèle Transaction
     "pending",
+    "pendingreview",
     "pending_review",
     "pendingValidation",
     "pending_validation",
@@ -164,7 +179,7 @@ function isLocalAutoCancellableStatus(status) {
 
   if (isAutoCancellableStatus(normalized)) return true;
 
-  return normalized === "pending_review";
+  return normalized === "pending_review" || normalized === "pendingreview";
 }
 
 function isTxEligibleForAutoCancel(tx = {}) {
@@ -177,19 +192,15 @@ function isTxEligibleForAutoCancel(tx = {}) {
   if (tx.fundsCaptured === true) return false;
   if (tx.beneficiaryCredited === true) return false;
 
-  if (
-    status === "confirmed" ||
-    status === "completed" ||
-    status === "cancelled" ||
-    status === "canceled" ||
-    status === "failed" ||
-    status === "refunded" ||
-    status === "reversed"
-  ) {
-    return false;
-  }
-
-  return true;
+  return ![
+    "confirmed",
+    "completed",
+    "cancelled",
+    "canceled",
+    "failed",
+    "refunded",
+    "reversed",
+  ].includes(status);
 }
 
 function buildExpiredQuery() {
@@ -201,7 +212,6 @@ function buildExpiredQuery() {
 
   return {
     status: { $in: AUTO_CANCELLABLE_MONGO_STATUSES },
-
     beneficiaryCredited: { $ne: true },
     fundsCaptured: { $ne: true },
     autoCancelledAt: null,
@@ -288,6 +298,16 @@ async function clearAutoCancelLock(tx, workerId, extraSet = {}) {
   );
 }
 
+function isReserveInsufficientError(err) {
+  const message = String(err?.message || err || "").toLowerCase();
+
+  return (
+    message.includes("réserve insuffisante") ||
+    message.includes("reserve insuffisante") ||
+    message.includes("insufficient reserve")
+  );
+}
+
 async function releaseReservedFundsIfNeeded(tx, session) {
   const TxWalletBalance = getWalletBalanceModel();
 
@@ -366,20 +386,42 @@ async function releaseReservedFundsIfNeeded(tx, session) {
       ? TxWalletBalance.releaseReserveForAutoCancel.bind(TxWalletBalance)
       : TxWalletBalance.releaseReserve.bind(TxWalletBalance);
 
-  await releaseFn(senderId, currency, amountToRelease, getSessionOptions(session));
+  try {
+    await releaseFn(
+      senderId,
+      currency,
+      amountToRelease,
+      getSessionOptions(session)
+    );
 
-  return {
-    released: true,
-    reason:
-      amountToRelease < expectedAmount
-        ? "PARTIAL_RESERVE_RELEASED"
-        : "RESERVE_RELEASED",
-    senderId,
-    currency,
-    expectedAmount,
-    actualReserved,
-    amount: amountToRelease,
-  };
+    return {
+      released: true,
+      reason:
+        amountToRelease < expectedAmount
+          ? "PARTIAL_RESERVE_RELEASED"
+          : "RESERVE_RELEASED",
+      senderId,
+      currency,
+      expectedAmount,
+      actualReserved,
+      amount: amountToRelease,
+    };
+  } catch (err) {
+    if (isReserveInsufficientError(err)) {
+      return {
+        released: false,
+        reason: "RESERVE_RELEASE_FAILED_INCONSISTENT_WALLET",
+        senderId,
+        currency,
+        expectedAmount,
+        actualReserved,
+        amountAttempted: amountToRelease,
+        error: err?.message || String(err),
+      };
+    }
+
+    throw err;
+  }
 }
 
 async function markFailure(tx, err) {
@@ -504,13 +546,18 @@ async function cancelLockedTransaction(lockedTx, workerId) {
         .catch(() => {});
     }
 
-    if (typeof notifyTransactionEvent === "function") {
+    try {
       await notifyTransactionEvent(
         tx,
         "cancelled",
         useSession ? session : null,
         resolveReservedCurrency(tx)
       );
+    } catch (notifyErr) {
+      logger.warn?.("[TX AUTO CANCEL] notification auto-cancel ignorée", {
+        transactionId: String(tx._id),
+        err: notifyErr?.message || notifyErr,
+      });
     }
 
     if (useSession) {

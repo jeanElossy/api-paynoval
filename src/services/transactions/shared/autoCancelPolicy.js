@@ -1,4 +1,4 @@
-// File: services/shared/autoCancelPolicy.js
+// File: src/services/transactions/shared/autoCancelPolicy.js
 "use strict";
 
 const DEFAULT_AUTO_CANCEL_DAYS = 7;
@@ -18,6 +18,8 @@ const FINAL_STATUSES = new Set([
 
 const AUTO_CANCELLABLE_STATUSES = new Set([
   "pending",
+  "pendingreview",
+  "pending_review",
   "pendingvalidation",
   "pending_validation",
   "initiated",
