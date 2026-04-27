@@ -307,12 +307,58 @@ async function releaseReservedFundsIfNeeded(tx, session) {
 
   const senderId = resolveSenderId(tx);
   const currency = resolveReservedCurrency(tx);
-  const amount = resolveReservedAmount(tx);
+  const expectedAmount = resolveReservedAmount(tx);
 
-  if (!senderId || !currency || !(amount > 0)) {
-    throw new Error(
-      "Impossible de libérer la réserve : sender/devise/montant invalide"
-    );
+  if (!senderId || !currency || !(expectedAmount > 0)) {
+    return {
+      released: false,
+      reason: "INVALID_RESERVE_INPUT",
+      senderId,
+      currency,
+      expectedAmount,
+    };
+  }
+
+  const wallet =
+    typeof TxWalletBalance.findWallet === "function"
+      ? await TxWalletBalance.findWallet(
+          senderId,
+          currency,
+          getSessionOptions(session)
+        )
+      : await TxWalletBalance.findOne(
+          {
+            user: senderId,
+            currency,
+          },
+          null,
+          getSessionOptions(session)
+        );
+
+  const actualReserved = toNumber(wallet?.reservedAmount || 0);
+
+  if (!wallet || actualReserved <= 0) {
+    return {
+      released: false,
+      reason: "RESERVE_NOT_AVAILABLE_OR_ALREADY_RELEASED",
+      senderId,
+      currency,
+      expectedAmount,
+      actualReserved: 0,
+    };
+  }
+
+  const amountToRelease = Math.min(expectedAmount, actualReserved);
+
+  if (!(amountToRelease > 0)) {
+    return {
+      released: false,
+      reason: "NO_POSITIVE_RESERVE_TO_RELEASE",
+      senderId,
+      currency,
+      expectedAmount,
+      actualReserved,
+    };
   }
 
   const releaseFn =
@@ -320,13 +366,19 @@ async function releaseReservedFundsIfNeeded(tx, session) {
       ? TxWalletBalance.releaseReserveForAutoCancel.bind(TxWalletBalance)
       : TxWalletBalance.releaseReserve.bind(TxWalletBalance);
 
-  await releaseFn(senderId, currency, amount, getSessionOptions(session));
+  await releaseFn(senderId, currency, amountToRelease, getSessionOptions(session));
 
   return {
     released: true,
+    reason:
+      amountToRelease < expectedAmount
+        ? "PARTIAL_RESERVE_RELEASED"
+        : "RESERVE_RELEASED",
     senderId,
     currency,
-    amount,
+    expectedAmount,
+    actualReserved,
+    amount: amountToRelease,
   };
 }
 
