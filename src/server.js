@@ -45,7 +45,9 @@
 // function timingSafeEqualStr(a, b) {
 //   const aa = Buffer.from(String(a || "").trim(), "utf8");
 //   const bb = Buffer.from(String(b || "").trim(), "utf8");
+
 //   if (aa.length !== bb.length) return false;
+
 //   return crypto.timingSafeEqual(aa, bb);
 // }
 
@@ -73,11 +75,20 @@
 //       legacy
 //   ).trim();
 
-//   return { legacy, gateway, principal, txCore };
+//   return {
+//     legacy,
+//     gateway,
+//     principal,
+//     txCore,
+//   };
 // }
 
 // function getHeaderInternalToken(req) {
-//   const raw = req.headers["x-internal-token"] || "";
+//   const raw =
+//     req.headers["x-internal-token"] ||
+//     req.headers["x-paynoval-internal-token"] ||
+//     "";
+
 //   return Array.isArray(raw) ? raw[0] : raw;
 // }
 
@@ -86,6 +97,7 @@
 //   if (!got) return false;
 
 //   const { gateway, principal, legacy, txCore } = getInternalTokens();
+
 //   const expected = [gateway, principal, legacy, txCore]
 //     .map((x) => String(x || "").trim())
 //     .filter(Boolean);
@@ -99,11 +111,16 @@
 // // Sentry
 // // ─────────────────────────────────────────────────────────────
 // let sentry = null;
+
 // if (process.env.SENTRY_DSN) {
 //   const Sentry = tryRequire("@sentry/node");
+
 //   if (Sentry) {
 //     sentry = Sentry;
-//     sentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 1.0 });
+//     sentry.init({
+//       dsn: process.env.SENTRY_DSN,
+//       tracesSampleRate: 1.0,
+//     });
 //   } else {
 //     logger.warn("[sentry] @sentry/node non installé — Sentry désactivé");
 //   }
@@ -119,14 +136,19 @@
 //   process.env.OPENAPI_SPEC_PATH || path.join(__dirname, "../docs/openapi.yaml");
 
 // let openapiSpec = {};
+
 // try {
 //   const raw = fs.readFileSync(OPENAPI_PATH, "utf8");
 //   openapiSpec = yaml.load(raw);
 // } catch (e) {
 //   logger.error(`[Swagger] Load error ${OPENAPI_PATH}: ${e.message}`);
+
 //   openapiSpec = {
 //     openapi: "3.0.0",
-//     info: { title: "Docs indisponibles", version: "0.0.0" },
+//     info: {
+//       title: "Docs indisponibles",
+//       version: "0.0.0",
+//     },
 //   };
 // }
 
@@ -150,6 +172,7 @@
 
 // if (config.env === "production") {
 //   const sslify = tryRequire("express-sslify");
+
 //   if (sslify?.HTTPS) {
 //     app.use(sslify.HTTPS({ trustProtoHeader: true }));
 //   } else {
@@ -164,7 +187,11 @@
 // // ─────────────────────────────────────────────────────────────
 // const mergeToList = (value) => {
 //   if (!value) return [];
-//   if (Array.isArray(value)) return value.filter(Boolean);
+
+//   if (Array.isArray(value)) {
+//     return value.filter(Boolean);
+//   }
+
 //   return String(value)
 //     .split(",")
 //     .map((s) => s.trim())
@@ -189,37 +216,52 @@
 //     origin(origin, cb) {
 //       if (!origin) return cb(null, true);
 //       if (hasWildcard) return cb(null, true);
+
 //       return cb(null, allowedOrigins.includes(origin));
 //     },
 //     credentials: true,
 //     allowedHeaders: [
 //       "Authorization",
 //       "Content-Type",
+
 //       "X-Request-Id",
 //       "x-request-id",
+
 //       "Idempotency-Key",
+//       "idempotency-key",
 //       "x-idempotency-key",
+
 //       "x-internal-token",
+//       "x-paynoval-internal-token",
 //       "x-service-name",
 //       "x-user-id",
 //       "x-device-id",
 //       "x-session-id",
+
 //       "x-provider",
 //       "x-rail",
+
 //       "x-signature",
 //       "x-timestamp",
+
 //       "x-wave-signature",
 //       "x-wave-timestamp",
+
 //       "x-orange-signature",
 //       "x-orange-timestamp",
+
 //       "x-mtn-signature",
 //       "x-mtn-timestamp",
+
 //       "x-moov-signature",
 //       "x-moov-timestamp",
+
 //       "x-bank-signature",
 //       "x-bank-timestamp",
+
 //       "stripe-signature",
 //       "x-stripe-signature",
+
 //       "x-visa-signature",
 //       "x-visa-timestamp",
 //     ],
@@ -234,7 +276,9 @@
 
 // app.use(
 //   morgan("combined", {
-//     stream: { write: (msg) => logger.info(msg.trim()) },
+//     stream: {
+//       write: (msg) => logger.info(msg.trim()),
+//     },
 //   })
 // );
 
@@ -261,7 +305,10 @@
 // // Health / Root
 // // ─────────────────────────────────────────────────────────────
 // app.get("/health", (_req, res) =>
-//   res.json({ status: "UP", timestamp: new Date().toISOString() })
+//   res.json({
+//     status: "UP",
+//     timestamp: new Date().toISOString(),
+//   })
 // );
 
 // app.get("/", (_req, res) =>
@@ -272,6 +319,7 @@
 // // Swagger UI
 // // ─────────────────────────────────────────────────────────────
 // const docsGuards = [];
+
 // if (config.env === "production") {
 //   docsGuards.push(protect, requireRole(["admin", "developer", "superadmin"]));
 // }
@@ -312,7 +360,10 @@
 //     res.setHeader("Content-Type", "text/yaml; charset=utf-8");
 //     res.send(fs.readFileSync(OPENAPI_PATH, "utf8"));
 //   } catch (_e) {
-//     res.status(500).json({ success: false, error: "Spec YAML introuvable" });
+//     res.status(500).json({
+//       success: false,
+//       error: "Spec YAML introuvable",
+//     });
 //   }
 // });
 
@@ -320,7 +371,7 @@
 
 // // ─────────────────────────────────────────────────────────────
 // // Sanitizers
-// // IMPORTANT:
+// // IMPORTANT :
 // // - Les webhooks providers doivent rester AVANT les sanitizers
 // // ─────────────────────────────────────────────────────────────
 // function mountSanitizers() {
@@ -333,7 +384,9 @@
 // // Rate limit global
 // // ─────────────────────────────────────────────────────────────
 // let globalRateLimiter;
-// let RedisStore, Redis, redisClient;
+// let RedisStore;
+// let Redis;
+// let redisClient;
 
 // try {
 //   ({ RedisStore } = require("rate-limit-redis"));
@@ -362,7 +415,12 @@
 //       return true;
 //     }
 
-//     // ✅ settlements internes critiques
+//     // Appels internes fiables : backend principal, gateway, tx-core interne.
+//     if (isTrustedInternalCall(req)) {
+//       return true;
+//     }
+
+//     // Settlements internes critiques.
 //     if (
 //       req.path === "/api/v1/cagnotte/participation/settle" ||
 //       req.path === "/api/v1/cagnotte/vault-withdrawals/settle" ||
@@ -370,8 +428,6 @@
 //     ) {
 //       return true;
 //     }
-
-//     if (isTrustedInternalCall(req)) return true;
 
 //     return false;
 //   },
@@ -398,15 +454,21 @@
 //   }
 // }
 
-// // ✅ Debug temporaire pour confirmer les appels internes
+// // Debug interne temporaire.
 // app.use((req, _res, next) => {
-//   if (req.path.startsWith("/api/v1/cagnotte")) {
+//   if (
+//     req.path.startsWith("/api/v1/cagnotte") ||
+//     req.path.startsWith("/api/v1/internal")
+//   ) {
 //     logger.info("[TX CORE][internal-check]", {
 //       path: req.path,
-//       internalTokenPresent: !!req.headers["x-internal-token"],
+//       internalTokenPresent:
+//         !!req.headers["x-internal-token"] ||
+//         !!req.headers["x-paynoval-internal-token"],
 //       trusted: isTrustedInternalCall(req),
 //     });
 //   }
+
 //   next();
 // });
 
@@ -438,7 +500,11 @@
 //   : (_req, _res, next) => next();
 
 // app.use(
-//   ["/api/v1/auth/login", "/api/v1/payments/confirm", "/api/v1/transactions/confirm"],
+//   [
+//     "/api/v1/auth/login",
+//     "/api/v1/payments/confirm",
+//     "/api/v1/transactions/confirm",
+//   ],
 //   authSlow,
 //   authLimiter
 // );
@@ -453,41 +519,51 @@
 //     const transactionRoutes = require("./routes/transactionsRoutes");
 //     const notificationRoutes = require("./routes/notificationRoutes");
 //     const payRoutes = require("./routes/pay");
-//     const adminTransactionRoutes = require("./routes/admin/transactions.admin.routes");
+
 //     const internalPaymentsRoutes = require("./routes/internalPaymentsRoutes");
 //     const internalTxRoutes = require("./routes/internalTransactions.routes");
+//     const internalReferralRoutes = require("./routes/internalReferralRoutes");
+//     const internalCancelRefundRoutes = require("./routes/internalCancelRefund.routes");
+
 //     const cagnotteSettlementRoutes = require("./routes/cagnotteSettlementRoutes");
 //     const cagnotteVaultSettlementRoutes = require("./routes/cagnotteVaultSettlementRoutes");
 //     const cagnotteClosureFeesRoutes = require("./routes/cagnotteClosureFeesRoutes");
 
-//     const internalReferralRoutes = require("./routes/internalReferralRoutes");
+//     const internalAdminTransactionsRoutes = require("./routes/internalAdminTransactions.routes");
 
-//     // Webhooks AVANT sanitizers
+//     // Webhooks AVANT sanitizers.
 //     app.use("/webhooks/providers", providerWebhookRoutes);
 
-//     // Sanitizers APRÈS webhooks
+//     // Sanitizers APRÈS webhooks.
 //     mountSanitizers();
 
-//     // Admin
-//     app.use(
-//       "/api/v1/admin/transactions",
-//       protect,
-//       requireRole(["admin", "superadmin"]),
-//       adminTransactionRoutes
+//     /**
+//      * IMPORTANT :
+//      * Les routes admin back-office doivent rester dans le backend principal.
+//      * tx-core expose seulement des routes internes sécurisées pour les opérations financières.
+//      *
+//      * Endpoint ajouté :
+//      * POST /api/v1/internal/transactions/:transactionId/cancel-refund
+//      */
+//     app.use("/api/v1", internalCancelRefundRoutes);
+//     app.use("/api/v1", internalAdminTransactionsRoutes);
+
+//     logger.info(
+//       "🔐 Internal admin transactions: /api/v1/internal/admin/transactions"
 //     );
 
-//     // Public / user
+//     // Public / user.
 //     app.use("/api/v1/transactions", transactionRoutes);
+    
 //     app.use("/api/v1/notifications", protect, notificationRoutes);
 //     app.use("/api/v1/pay", protect, payRoutes);
 
-//     // Internal
+//     // Internal.
 //     app.use("/api/v1/internal", internalTxRoutes);
 //     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
-
 //     app.use("/api/v1/internal/referral", internalReferralRoutes);
 
-//     // Cagnotte settlements
+//     // Cagnotte settlements.
 //     app.use("/api/v1/cagnotte", cagnotteSettlementRoutes);
 //     app.use("/api/v1/cagnotte", cagnotteVaultSettlementRoutes);
 //     app.use("/api/v1/cagnotte", cagnotteClosureFeesRoutes);
@@ -500,7 +576,10 @@
 //     );
 
 //     app.use((_req, res) =>
-//       res.status(404).json({ success: false, error: "Ressource non trouvée" })
+//       res.status(404).json({
+//         success: false,
+//         error: "Ressource non trouvée",
+//       })
 //     );
 
 //     if (sentry && sentry.Handlers?.errorHandler) {
@@ -511,8 +590,9 @@
 
 //     server = app.listen(config.port, () => {
 //       logger.info(`🚀 Service démarré sur ${config.port} (${config.env})`);
-//       logger.info(`📘 Docs: /docs  —  Spec: /openapi.yaml /openapi.json`);
+//       logger.info("📘 Docs: /docs  —  Spec: /openapi.yaml /openapi.json");
 //       logger.info("🔐 Webhooks providers: /webhooks/providers/:rail/:provider");
+//       logger.info("🔐 Internal cancel/refund: /api/v1/internal/transactions/:transactionId/cancel-refund");
 //       logger.info("💰 Cagnotte TX settlement: /api/v1/cagnotte/participation/settle");
 //       logger.info("💰 Cagnotte close TX settlement: /api/v1/cagnotte/closure-fees/settle");
 //       logger.info(
@@ -549,7 +629,9 @@
 //     }
 
 //     try {
-//       if (redisClient) await redisClient.quit();
+//       if (redisClient) {
+//         await redisClient.quit();
+//       }
 //     } catch (_) {}
 
 //     process.exit(0);
@@ -561,8 +643,6 @@
 
 // process.on("SIGTERM", () => graceful("SIGTERM"));
 // process.on("SIGINT", () => graceful("SIGINT"));
-
-
 
 
 
@@ -986,12 +1066,10 @@ const baseRateLimitConfig = {
       return true;
     }
 
-    // Appels internes fiables : backend principal, gateway, tx-core interne.
     if (isTrustedInternalCall(req)) {
       return true;
     }
 
-    // Settlements internes critiques.
     if (
       req.path === "/api/v1/cagnotte/participation/settle" ||
       req.path === "/api/v1/cagnotte/vault-withdrawals/settle" ||
@@ -1080,7 +1158,58 @@ app.use(
   authLimiter
 );
 
+// ─────────────────────────────────────────────────────────────
+// Worker auto-cancel transactions
+// ─────────────────────────────────────────────────────────────
 let server = null;
+let autoCancelWorker = null;
+
+function startAutoCancelWorker() {
+  if (process.env.TX_AUTO_CANCEL_WORKER === "false") {
+    logger.warn("⏱️ Auto-cancel TX worker désactivé par TX_AUTO_CANCEL_WORKER=false");
+    return null;
+  }
+
+  try {
+    const {
+      startTransactionAutoCancelWorker,
+    } = require("./services/transactionAutoCancelService");
+
+    if (typeof startTransactionAutoCancelWorker !== "function") {
+      throw new Error(
+        "startTransactionAutoCancelWorker introuvable dans services/transactionAutoCancelService"
+      );
+    }
+
+    const worker = startTransactionAutoCancelWorker({
+      intervalMs: Number(process.env.TX_AUTO_CANCEL_INTERVAL_MS || 300000),
+      batchSize: Number(process.env.TX_AUTO_CANCEL_BATCH_SIZE || 50),
+    });
+
+    logger.info("⏱️ Auto-cancel TX worker activé", {
+      intervalMs: Number(process.env.TX_AUTO_CANCEL_INTERVAL_MS || 300000),
+      batchSize: Number(process.env.TX_AUTO_CANCEL_BATCH_SIZE || 50),
+      afterDays: Number(process.env.TX_AUTO_CANCEL_AFTER_DAYS || 7),
+    });
+
+    return worker;
+  } catch (err) {
+    logger.error("❌ Impossible de démarrer le worker auto-cancel TX", {
+      message: err?.message || err,
+      stack: err?.stack || "",
+    });
+
+    const required =
+      String(process.env.TX_AUTO_CANCEL_REQUIRED || "true").toLowerCase() !==
+      "false";
+
+    if (required) {
+      throw err;
+    }
+
+    return null;
+  }
+}
 
 async function bootstrap() {
   try {
@@ -1113,7 +1242,7 @@ async function bootstrap() {
      * Les routes admin back-office doivent rester dans le backend principal.
      * tx-core expose seulement des routes internes sécurisées pour les opérations financières.
      *
-     * Endpoint ajouté :
+     * Endpoint :
      * POST /api/v1/internal/transactions/:transactionId/cancel-refund
      */
     app.use("/api/v1", internalCancelRefundRoutes);
@@ -1125,7 +1254,7 @@ async function bootstrap() {
 
     // Public / user.
     app.use("/api/v1/transactions", transactionRoutes);
-    
+
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);
 
@@ -1146,6 +1275,9 @@ async function bootstrap() {
       })
     );
 
+    // Démarrage du worker après la connexion DB et le montage des routes.
+    autoCancelWorker = startAutoCancelWorker();
+
     app.use((_req, res) =>
       res.status(404).json({
         success: false,
@@ -1163,9 +1295,15 @@ async function bootstrap() {
       logger.info(`🚀 Service démarré sur ${config.port} (${config.env})`);
       logger.info("📘 Docs: /docs  —  Spec: /openapi.yaml /openapi.json");
       logger.info("🔐 Webhooks providers: /webhooks/providers/:rail/:provider");
-      logger.info("🔐 Internal cancel/refund: /api/v1/internal/transactions/:transactionId/cancel-refund");
-      logger.info("💰 Cagnotte TX settlement: /api/v1/cagnotte/participation/settle");
-      logger.info("💰 Cagnotte close TX settlement: /api/v1/cagnotte/closure-fees/settle");
+      logger.info(
+        "🔐 Internal cancel/refund: /api/v1/internal/transactions/:transactionId/cancel-refund"
+      );
+      logger.info(
+        "💰 Cagnotte TX settlement: /api/v1/cagnotte/participation/settle"
+      );
+      logger.info(
+        "💰 Cagnotte close TX settlement: /api/v1/cagnotte/closure-fees/settle"
+      );
       logger.info(
         "🏦 Cagnotte Vault TX settlement: /api/v1/cagnotte/vault-withdrawals/settle"
       );
@@ -1193,6 +1331,15 @@ process.on("uncaughtException", (err) => {
 const graceful = async (signal) => {
   try {
     logger.info(`[${signal}] Arrêt en cours…`);
+
+    try {
+      autoCancelWorker?.stop?.();
+      logger.info("⏱️ Auto-cancel TX worker arrêté");
+    } catch (err) {
+      logger.warn("Erreur arrêt auto-cancel TX worker", {
+        message: err?.message || err,
+      });
+    }
 
     if (server) {
       await new Promise((resolve) => server.close(resolve));

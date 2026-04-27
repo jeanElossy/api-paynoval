@@ -377,9 +377,6 @@
 
 
 
-
-
-
 "use strict";
 
 const createError = require("http-errors");
@@ -715,6 +712,31 @@ async function assertCurrentProfilesStillMatchCorridor({ tx, lock, session }) {
   }
 }
 
+function isAlreadyAutoCancelledOrFinal(tx) {
+  const status = String(tx?.status || "").trim().toLowerCase();
+
+  return (
+    !!tx?.autoCancelledAt ||
+    tx?.providerStatus === "AUTO_CANCELLED_EXPIRED" ||
+    ["cancelled", "canceled", "failed", "refunded", "reversed"].includes(status)
+  );
+}
+
+function isExpiredBeforeConfirmation(tx, now = new Date()) {
+  if (!tx?.autoCancelAt) return false;
+
+  const autoCancelDate = new Date(tx.autoCancelAt);
+  if (!Number.isFinite(autoCancelDate.getTime())) return false;
+  if (autoCancelDate > now) return false;
+
+  return (
+    !tx.confirmedAt &&
+    !tx.executedAt &&
+    tx.fundsCaptured !== true &&
+    tx.beneficiaryCredited !== true
+  );
+}
+
 async function endQuietly(session) {
   try {
     if (session) session.endSession();
@@ -796,10 +818,18 @@ async function confirmController(req, res, next) {
         "+fundsReserved",
         "+fundsCaptured",
         "+beneficiaryCredited",
+        "+reserveReleased",
 
         "+reference",
         "+confirmedAt",
         "+executedAt",
+
+        "+autoCancelAt",
+        "+autoCancelledAt",
+        "+autoCancelReason",
+        "+autoCancelLockAt",
+        "+autoCancelWorkerId",
+        "+lastAutoCancelError",
 
         "+metadata",
         "+meta",
@@ -811,6 +841,20 @@ async function confirmController(req, res, next) {
     }
 
     const now = new Date();
+
+    if (isAlreadyAutoCancelledOrFinal(tx)) {
+      throw createError(
+        410,
+        "Cette transaction a déjà été annulée automatiquement ou n’est plus confirmable."
+      );
+    }
+
+    if (isExpiredBeforeConfirmation(tx, now)) {
+      throw createError(
+        410,
+        "Cette transaction a expiré. Elle sera annulée automatiquement."
+      );
+    }
 
     if (tx.lockedUntil && tx.lockedUntil > now) {
       throw createError(
@@ -1036,6 +1080,7 @@ async function confirmController(req, res, next) {
         treasuryUserId: tx.treasuryUserId || null,
         treasurySystemType: tx.treasurySystemType || null,
         treasuryLabel: tx.treasuryLabel || null,
+        autoCancelAt: tx.autoCancelAt || null,
         corridorLock,
         referralSync,
       });
@@ -1065,6 +1110,7 @@ async function confirmController(req, res, next) {
       fundsCaptured: !!tx.fundsCaptured,
       beneficiaryCredited: !!tx.beneficiaryCredited,
       treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
+      autoCancelAt: tx.autoCancelAt || null,
       corridorLock,
       message: "Transaction confirmée côté utilisateur et en attente du provider.",
     });

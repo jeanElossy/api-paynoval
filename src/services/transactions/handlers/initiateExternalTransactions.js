@@ -960,7 +960,6 @@
 
 
 
-
 "use strict";
 
 const createError = require("http-errors");
@@ -1024,15 +1023,8 @@ const { submitExternalExecution } = require("./submitExternalExecution");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
 
-/**
- * Champs nécessaires pour que corridorValidation.js puisse vérifier :
- * - pays/devise réels
- * - compte actif ou bloqué
- * - compte système interdit
- * - visibilité transfert
- * - KYC/KYB statut
- */
 const USER_CORRIDOR_SELECT = [
   "_id",
   "fullName",
@@ -1079,6 +1071,68 @@ const USER_CORRIDOR_SELECT = [
   "isDeleted",
   "deletedAt",
 ].join(" ");
+
+function normalizeStatus(status) {
+  return String(status || "")
+    .trim()
+    .replace(/\s+/g, "_")
+    .toLowerCase();
+}
+
+function getAutoCancelAfterDays() {
+  const raw = Number(
+    process.env.TX_AUTO_CANCEL_AFTER_DAYS || DEFAULT_AUTO_CANCEL_AFTER_DAYS
+  );
+
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return DEFAULT_AUTO_CANCEL_AFTER_DAYS;
+  }
+
+  return Math.max(1, Math.floor(raw));
+}
+
+function buildAutoCancelAt(fromDate = new Date()) {
+  const base = fromDate instanceof Date ? fromDate : new Date();
+  const days = getAutoCancelAfterDays();
+
+  return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function isAutoCancellableStatus(status) {
+  const s = normalizeStatus(status);
+
+  return [
+    "pending",
+    "pendingvalidation",
+    "pending_validation",
+    "initiated",
+    "awaiting_validation",
+    "awaiting_confirmation",
+    "processing",
+  ].includes(s);
+}
+
+function buildAutoCancelFields(status = "pending") {
+  if (!isAutoCancellableStatus(status)) {
+    return {
+      autoCancelAt: null,
+      autoCancelledAt: null,
+      autoCancelReason: "",
+      autoCancelLockAt: null,
+      autoCancelWorkerId: "",
+      lastAutoCancelError: "",
+    };
+  }
+
+  return {
+    autoCancelAt: buildAutoCancelAt(),
+    autoCancelledAt: null,
+    autoCancelReason: "",
+    autoCancelLockAt: null,
+    autoCancelWorkerId: "",
+    lastAutoCancelError: "",
+  };
+}
 
 function ensureBearer(req) {
   const authHeader = req.headers.authorization;
@@ -1552,6 +1606,7 @@ async function initiateOutboundExternal(req, res, next) {
     const securityAnswerHash = sha256Hex(aRaw);
     const amlSnapshot = req.aml || null;
     const treasurySeed = resolveFeesTreasurySeed();
+    const autoCancelFields = buildAutoCancelFields("pending");
 
     const txMeta = {
       ...((meta && typeof meta === "object") ? meta : {}),
@@ -1571,6 +1626,8 @@ async function initiateOutboundExternal(req, res, next) {
             body.pricingId ||
             body.quoteId ||
             null,
+          autoCancelAt: autoCancelFields.autoCancelAt,
+          autoCancelAfterDays: getAutoCancelAfterDays(),
         },
       }),
     };
@@ -1585,9 +1642,13 @@ async function initiateOutboundExternal(req, res, next) {
           providerReference: pickExternalRef(body),
           externalRecipient: externalRecipientMeta,
           corridorLock: corridorLock.snapshot,
+          autoCancelAt: autoCancelFields.autoCancelAt,
+          autoCancelAfterDays: getAutoCancelAfterDays(),
         },
       }),
       corridorLock: corridorLock.snapshot,
+      autoCancelAt: autoCancelFields.autoCancelAt,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
     };
 
     const destinationValue =
@@ -1623,7 +1684,8 @@ async function initiateOutboundExternal(req, res, next) {
           destination: destinationValue,
           funds: "paynoval",
           provider,
-          operator: body.operator || body.operatorName || txMetadata?.provider || null,
+          operator:
+            body.operator || body.operatorName || txMetadata?.provider || null,
           country: sanitize(corridorLock.lockedTargetCountry),
 
           amount: dec2(pricingCtx.amountSourceStd),
@@ -1659,8 +1721,10 @@ async function initiateOutboundExternal(req, res, next) {
           },
 
           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-          pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
-          pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+          pricingRuleApplied:
+            pricingCtx.pricingSnapshot?.ruleApplied || null,
+          pricingFxRuleApplied:
+            pricingCtx.pricingSnapshot?.fxRuleApplied || null,
 
           feeSnapshot: {
             fee: pricingCtx.feeSourceStd,
@@ -1695,6 +1759,8 @@ async function initiateOutboundExternal(req, res, next) {
           status: "pending",
           providerReference: pickExternalRef(body),
           providerStatus: "PENDING_USER_CONFIRMATION",
+
+          ...autoCancelFields,
 
           fundsReserved: false,
           fundsReservedAt: null,
@@ -1745,6 +1811,7 @@ async function initiateOutboundExternal(req, res, next) {
         reference: tx.reference,
         flow,
         corridorLock: corridorLock.snapshot,
+        autoCancelAt: tx.autoCancelAt || null,
       },
       flagged: false,
       flagReason: "",
@@ -1784,6 +1851,8 @@ async function initiateOutboundExternal(req, res, next) {
       providerReference:
         execution?.providerReference || tx.providerReference || null,
       securityQuestion: q,
+      autoCancelAt: tx.autoCancelAt || null,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
       pricing: {
         feeSource: pricingCtx.feeSourceStd,
         feeSourceCurrency: currencySourceISO,
@@ -1832,13 +1901,7 @@ async function initiateInboundExternal(req, res, next) {
       throw createError(400, "Flow collection externe invalide");
     }
 
-    const {
-      amount,
-      description = "",
-      country,
-      metadata = {},
-      meta = {},
-    } = body;
+    const { amount, description = "", country, metadata = {}, meta = {} } = body;
 
     if (description && description.length > MAX_DESC_LENGTH) {
       throw createError(400, "Description trop longue");
@@ -1967,6 +2030,7 @@ async function initiateInboundExternal(req, res, next) {
     const reference = sanitize(body.reference) || (await generateTransactionRef());
     const amlSnapshot = req.aml || null;
     const treasurySeed = resolveFeesTreasurySeed();
+    const autoCancelFields = buildAutoCancelFields("processing");
 
     const txMeta = {
       ...((meta && typeof meta === "object") ? meta : {}),
@@ -1985,6 +2049,8 @@ async function initiateInboundExternal(req, res, next) {
             body.pricingId ||
             body.quoteId ||
             null,
+          autoCancelAt: autoCancelFields.autoCancelAt,
+          autoCancelAfterDays: getAutoCancelAfterDays(),
         },
       }),
     };
@@ -1999,9 +2065,13 @@ async function initiateInboundExternal(req, res, next) {
           providerReference: pickExternalRef(body),
           externalSource: externalSourceMeta,
           corridorLock: corridorLock.snapshot,
+          autoCancelAt: autoCancelFields.autoCancelAt,
+          autoCancelAfterDays: getAutoCancelAfterDays(),
         },
       }),
       corridorLock: corridorLock.snapshot,
+      autoCancelAt: autoCancelFields.autoCancelAt,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
     };
 
     const fundsValue =
@@ -2044,7 +2114,8 @@ async function initiateInboundExternal(req, res, next) {
           destination: "paynoval",
           funds: fundsValue,
           provider,
-          operator: body.operator || body.operatorName || txMetadata?.provider || null,
+          operator:
+            body.operator || body.operatorName || txMetadata?.provider || null,
           country: sanitize(corridorLock.lockedTargetCountry),
 
           amount: dec2(pricingCtx.amountSourceStd),
@@ -2080,8 +2151,10 @@ async function initiateInboundExternal(req, res, next) {
           },
 
           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-          pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
-          pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+          pricingRuleApplied:
+            pricingCtx.pricingSnapshot?.ruleApplied || null,
+          pricingFxRuleApplied:
+            pricingCtx.pricingSnapshot?.fxRuleApplied || null,
 
           feeSnapshot: {
             fee: pricingCtx.feeSourceStd,
@@ -2117,6 +2190,8 @@ async function initiateInboundExternal(req, res, next) {
           providerReference: pickExternalRef(body),
           providerStatus: "AWAITING_PROVIDER_PAYMENT",
 
+          ...autoCancelFields,
+
           fundsReserved: false,
           fundsReservedAt: null,
           fundsCaptured: false,
@@ -2147,6 +2222,7 @@ async function initiateInboundExternal(req, res, next) {
         reference: tx.reference,
         flow,
         corridorLock: corridorLock.snapshot,
+        autoCancelAt: tx.autoCancelAt || null,
       },
       flagged: false,
       flagReason: "",
@@ -2185,6 +2261,8 @@ async function initiateInboundExternal(req, res, next) {
       providerStatus: execution?.providerStatus || tx.providerStatus,
       providerReference:
         execution?.providerReference || tx.providerReference || null,
+      autoCancelAt: tx.autoCancelAt || null,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
       pricing: {
         feeSource: pricingCtx.feeSourceStd,
         feeSourceCurrency: currencySourceISO,

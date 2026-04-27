@@ -632,6 +632,8 @@
 
 
 
+
+
 "use strict";
 
 const createError = require("http-errors");
@@ -662,15 +664,8 @@ const {
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
 
-/**
- * Champs nécessaires pour que corridorValidation.js puisse vérifier :
- * - pays/devise réels
- * - compte actif ou bloqué
- * - compte système interdit
- * - visibilité transfert
- * - KYC/KYB statut
- */
 const USER_CORRIDOR_SELECT = [
   "_id",
   "fullName",
@@ -732,6 +727,68 @@ function isPlainObject(v) {
 
 function buildSafeMeta(...parts) {
   return Object.assign({}, ...parts.map((p) => (isPlainObject(p) ? p : {})));
+}
+
+function normalizeStatus(status) {
+  return String(status || "")
+    .trim()
+    .replace(/\s+/g, "_")
+    .toLowerCase();
+}
+
+function getAutoCancelAfterDays() {
+  const raw = Number(
+    process.env.TX_AUTO_CANCEL_AFTER_DAYS || DEFAULT_AUTO_CANCEL_AFTER_DAYS
+  );
+
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return DEFAULT_AUTO_CANCEL_AFTER_DAYS;
+  }
+
+  return Math.max(1, Math.floor(raw));
+}
+
+function buildAutoCancelAt(fromDate = new Date()) {
+  const base = fromDate instanceof Date ? fromDate : new Date();
+  const days = getAutoCancelAfterDays();
+
+  return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function isAutoCancellableStatus(status) {
+  const s = normalizeStatus(status);
+
+  return [
+    "pending",
+    "pendingvalidation",
+    "pending_validation",
+    "initiated",
+    "awaiting_validation",
+    "awaiting_confirmation",
+    "processing",
+  ].includes(s);
+}
+
+function buildAutoCancelFields(status = "pending") {
+  if (!isAutoCancellableStatus(status)) {
+    return {
+      autoCancelAt: null,
+      autoCancelledAt: null,
+      autoCancelReason: "",
+      autoCancelLockAt: null,
+      autoCancelWorkerId: "",
+      lastAutoCancelError: "",
+    };
+  }
+
+  return {
+    autoCancelAt: buildAutoCancelAt(),
+    autoCancelledAt: null,
+    autoCancelReason: "",
+    autoCancelLockAt: null,
+    autoCancelWorkerId: "",
+    lastAutoCancelError: "",
+  };
 }
 
 function safeLog(level, message, meta = {}) {
@@ -1172,6 +1229,8 @@ async function initiateInternal(req, res, next) {
       receiver.fullName ||
       cleanEmail;
 
+    const autoCancelFields = buildAutoCancelFields("pending");
+
     const txMeta = buildSafeMeta(meta, metadata, {
       entry: "transfer.pending",
       ownerUserId: senderUser._id,
@@ -1182,6 +1241,8 @@ async function initiateInternal(req, res, next) {
       quoteId: body?.quoteId || null,
       effectivePricingId: effectivePricingId || null,
       corridorLock: corridorLock.snapshot,
+      autoCancelAt: autoCancelFields.autoCancelAt,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
     });
 
     const txMetadata = {
@@ -1190,6 +1251,8 @@ async function initiateInternal(req, res, next) {
       txType: body.txType || "TRANSFER",
       rail: "internal",
       corridorLock: corridorLock.snapshot,
+      autoCancelAt: autoCancelFields.autoCancelAt,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
     };
 
     const txDoc = {
@@ -1282,6 +1345,8 @@ async function initiateInternal(req, res, next) {
       status: "pending",
       providerStatus: "FUNDS_RESERVED_PENDING_CONFIRMATION",
 
+      ...autoCancelFields,
+
       fundsReserved: false,
       fundsReservedAt: null,
       fundsCaptured: false,
@@ -1326,6 +1391,7 @@ async function initiateInternal(req, res, next) {
         reference: tx.reference,
         flow: tx.flow,
         corridorLock: corridorLock.snapshot,
+        autoCancelAt: tx.autoCancelAt || null,
       },
       flagged: false,
       flagReason: "",
@@ -1349,6 +1415,8 @@ async function initiateInternal(req, res, next) {
       status: tx.status,
       providerStatus: tx.providerStatus,
       securityQuestion: q,
+      autoCancelAt: tx.autoCancelAt || null,
+      autoCancelAfterDays: getAutoCancelAfterDays(),
       pricing: {
         feeSource: feeSourceStd,
         feeSourceCurrency: currencySourceISO,

@@ -39,7 +39,6 @@
 //   null,
 // ];
 
-
 // const RAILS = [
 //   "paynoval",
 //   "stripe",
@@ -701,7 +700,9 @@
 // transactionSchema.index({ provider: 1, providerStatus: 1, createdAt: -1 });
 // transactionSchema.index({ providerReference: 1 }, { sparse: true });
 // transactionSchema.index({ treasuryRevenueCredited: 1, createdAt: -1 });
-// transactionSchema.index({ treasuryUserId: 1, treasurySystemType: 1, createdAt: -1 });
+// transactionSchema.index(
+//   { treasuryUserId: 1, treasurySystemType: 1, createdAt: -1 }
+// );
 // transactionSchema.index({ archived: 1, createdAt: -1 });
 
 // transactionSchema.index(
@@ -737,6 +738,16 @@
 //   }
 // );
 
+// transactionSchema.index(
+//   { verificationToken: 1 },
+//   {
+//     unique: true,
+//     partialFilterExpression: {
+//       verificationToken: { $exists: true, $type: "string" },
+//     },
+//   }
+// );
+
 // transactionSchema.set("toJSON", {
 //   transform(_doc, ret) {
 //     ret.id = ret._id;
@@ -755,7 +766,8 @@
 //     if (ret.money && typeof ret.money === "object") {
 //       const m = { ...ret.money };
 //       if (m.source?.amount != null) m.source.amount = Number(m.source.amount);
-//       if (m.feeSource?.amount != null) m.feeSource.amount = Number(m.feeSource.amount);
+//       if (m.feeSource?.amount != null)
+//         m.feeSource.amount = Number(m.feeSource.amount);
 //       if (m.target?.amount != null) m.target.amount = Number(m.target.amount);
 //       if (m.fxRateSourceToTarget != null) {
 //         m.fxRateSourceToTarget = Number(m.fxRateSourceToTarget);
@@ -776,8 +788,27 @@
 // });
 
 // transactionSchema.pre("validate", function (next) {
-//   if (this.isNew && !this.verificationToken) {
-//     this.verificationToken = crypto.randomBytes(32).toString("hex");
+//   const systemReferralTx =
+//     this.initiatedBy === "system" ||
+//     this.context === "referral_bonus" ||
+//     this.type === "referral_bonus" ||
+//     this.operationKind === "bonus";
+
+//   const mustHaveVerificationToken =
+//     requiresSecurityChallenge(this.flow) &&
+//     !this.internalImported &&
+//     !systemReferralTx;
+
+//   if (this.isNew) {
+//     if (mustHaveVerificationToken) {
+//       if (!this.verificationToken) {
+//         this.verificationToken = crypto.randomBytes(32).toString("hex");
+//       }
+//     } else {
+//       this.verificationToken = undefined;
+//     }
+//   } else if (!mustHaveVerificationToken) {
+//     this.verificationToken = undefined;
 //   }
 
 //   if (typeof this.reference === "string") {
@@ -793,10 +824,14 @@
 //   }
 
 //   if (this.currency != null) this.currency = normCurrency(this.currency);
-//   if (this.currencySource != null) this.currencySource = normCurrency(this.currencySource);
-//   if (this.currencyTarget != null) this.currencyTarget = normCurrency(this.currencyTarget);
-//   if (this.senderCurrencySymbol != null) this.senderCurrencySymbol = normCurrency(this.senderCurrencySymbol);
-//   if (this.localCurrencySymbol != null) this.localCurrencySymbol = normCurrency(this.localCurrencySymbol);
+//   if (this.currencySource != null)
+//     this.currencySource = normCurrency(this.currencySource);
+//   if (this.currencyTarget != null)
+//     this.currencyTarget = normCurrency(this.currencyTarget);
+//   if (this.senderCurrencySymbol != null)
+//     this.senderCurrencySymbol = normCurrency(this.senderCurrencySymbol);
+//   if (this.localCurrencySymbol != null)
+//     this.localCurrencySymbol = normCurrency(this.localCurrencySymbol);
 
 //   if (typeof this.treasurySystemType === "string") {
 //     const t = this.treasurySystemType.trim().toUpperCase();
@@ -830,15 +865,17 @@
 
 //     if (this.netAmount == null) {
 //       try {
-//         this.netAmount = mongoose.Types.Decimal128.fromString(String(this.amount || "0.00"));
+//         this.netAmount = mongoose.Types.Decimal128.fromString(
+//           String(this.amount || "0.00")
+//         );
 //       } catch {}
 //     }
 //   }
 
-//   if (!requiresSecurityChallenge(this.flow)) {
-//     this.securityQuestion = this.securityQuestion || null;
-//     this.securityAnswerHash = this.securityAnswerHash || null;
-//     this.securityCode = this.securityCode || null;
+//   if (!requiresSecurityChallenge(this.flow) || systemReferralTx) {
+//     this.securityQuestion = null;
+//     this.securityAnswerHash = null;
+//     this.securityCode = null;
 //   }
 
 //   this.metadata = normalizeMixedObject(this.metadata);
@@ -870,6 +907,12 @@
 
 // module.exports = (conn = mongoose) =>
 //   conn.models.Transaction || conn.model("Transaction", transactionSchema);
+
+
+
+
+
+
 
 
 
@@ -1156,7 +1199,8 @@ const transactionSchema = new mongoose.Schema(
       default: mongoose.Types.Decimal128.fromString("0.00"),
       validate: {
         validator: (v) => parseFloat(v.toString()) >= 0,
-        message: (props) => `Les frais doivent être ≥ 0.00, reçus ${props.value}`,
+        message: (props) =>
+          `Les frais doivent être ≥ 0.00, reçus ${props.value}`,
       },
     },
 
@@ -1340,6 +1384,44 @@ const transactionSchema = new mongoose.Schema(
     lockedUntil: {
       type: Date,
       default: null,
+    },
+
+    autoCancelAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    autoCancelledAt: {
+      type: Date,
+      default: null,
+    },
+
+    autoCancelReason: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 500,
+    },
+
+    autoCancelLockAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    autoCancelWorkerId: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 160,
+    },
+
+    lastAutoCancelError: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 2000,
     },
 
     amlSnapshot: {
@@ -1582,6 +1664,17 @@ transactionSchema.index(
 );
 transactionSchema.index({ archived: 1, createdAt: -1 });
 
+transactionSchema.index({
+  status: 1,
+  autoCancelAt: 1,
+  autoCancelLockAt: 1,
+});
+
+transactionSchema.index({
+  autoCancelledAt: 1,
+  status: 1,
+});
+
 transactionSchema.index(
   { sender: 1, idempotencyKey: 1 },
   {
@@ -1643,8 +1736,9 @@ transactionSchema.set("toJSON", {
     if (ret.money && typeof ret.money === "object") {
       const m = { ...ret.money };
       if (m.source?.amount != null) m.source.amount = Number(m.source.amount);
-      if (m.feeSource?.amount != null)
+      if (m.feeSource?.amount != null) {
         m.feeSource.amount = Number(m.feeSource.amount);
+      }
       if (m.target?.amount != null) m.target.amount = Number(m.target.amount);
       if (m.fxRateSourceToTarget != null) {
         m.fxRateSourceToTarget = Number(m.fxRateSourceToTarget);
@@ -1701,14 +1795,18 @@ transactionSchema.pre("validate", function (next) {
   }
 
   if (this.currency != null) this.currency = normCurrency(this.currency);
-  if (this.currencySource != null)
+  if (this.currencySource != null) {
     this.currencySource = normCurrency(this.currencySource);
-  if (this.currencyTarget != null)
+  }
+  if (this.currencyTarget != null) {
     this.currencyTarget = normCurrency(this.currencyTarget);
-  if (this.senderCurrencySymbol != null)
+  }
+  if (this.senderCurrencySymbol != null) {
     this.senderCurrencySymbol = normCurrency(this.senderCurrencySymbol);
-  if (this.localCurrencySymbol != null)
+  }
+  if (this.localCurrencySymbol != null) {
     this.localCurrencySymbol = normCurrency(this.localCurrencySymbol);
+  }
 
   if (typeof this.treasurySystemType === "string") {
     const t = this.treasurySystemType.trim().toUpperCase();

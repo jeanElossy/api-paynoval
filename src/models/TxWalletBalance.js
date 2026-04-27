@@ -296,6 +296,9 @@
 
 
 
+
+
+
 // File: models/TxWalletBalance.js
 
 "use strict";
@@ -305,7 +308,12 @@ const logger = require("../utils/logger");
 
 function normCurrency(v) {
   const s = String(v || "").trim().toUpperCase();
+
   if (!s) return "CAD";
+  if (s === "FCFA" || s === "CFA") return "XOF";
+  if (s === "$CAD") return "CAD";
+  if (s === "$USD") return "USD";
+
   return s;
 }
 
@@ -314,8 +322,40 @@ function currencyDecimals(currency = "CAD") {
 }
 
 function normalizeNumber(amount) {
-  const n = Number(amount || 0);
-  return Number.isFinite(n) ? n : 0;
+  if (amount == null) return 0;
+
+  if (typeof amount === "number") {
+    return Number.isFinite(amount) ? amount : 0;
+  }
+
+  if (typeof amount === "string") {
+    const n = Number(amount);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  if (typeof amount === "object") {
+    if (typeof amount.$numberDecimal === "string") {
+      const n = Number(amount.$numberDecimal);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    if (typeof amount.$numberInt === "string") {
+      const n = Number(amount.$numberInt);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    if (typeof amount.$numberLong === "string") {
+      const n = Number(amount.$numberLong);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    if (typeof amount.toString === "function") {
+      const n = Number(amount.toString());
+      return Number.isFinite(n) ? n : 0;
+    }
+  }
+
+  return 0;
 }
 
 function roundCurrencyAmount(amount, currency = "CAD") {
@@ -327,6 +367,27 @@ function toFixedAmount(amount, currency = "CAD") {
   const n = normalizeNumber(amount);
   const decimals = currencyDecimals(currency);
   return mongoose.Types.Decimal128.fromString(n.toFixed(decimals));
+}
+
+function ensurePositiveAmount(amount, currency, label) {
+  const n = roundCurrencyAmount(amount, currency);
+
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`${label} doit être positif`);
+  }
+
+  return n;
+}
+
+function safeLogInfo(message) {
+  try {
+    if (logger && typeof logger.info === "function") {
+      logger.info(message);
+      return;
+    }
+
+    console.log(message);
+  } catch {}
 }
 
 module.exports = (conn = mongoose) => {
@@ -392,6 +453,7 @@ module.exports = (conn = mongoose) => {
   );
 
   balanceSchema.index({ user: 1, currency: 1 }, { unique: true });
+  balanceSchema.index({ user: 1, currency: 1, status: 1 });
 
   balanceSchema.pre("validate", function (next) {
     this.currency = normCurrency(this.currency);
@@ -399,12 +461,16 @@ module.exports = (conn = mongoose) => {
     const amount = normalizeNumber(this.amount?.toString?.() || 0);
     const reserved = normalizeNumber(this.reservedAmount?.toString?.() || 0);
 
-    const safeAmount = roundCurrencyAmount(amount, this.currency);
-    const safeReserved = roundCurrencyAmount(reserved, this.currency);
-    const available = Math.max(0, safeAmount - safeReserved);
+    const safeAmount = Math.max(0, roundCurrencyAmount(amount, this.currency));
+    const safeReserved = Math.max(
+      0,
+      roundCurrencyAmount(reserved, this.currency)
+    );
+    const safeReservedFinal = Math.min(safeReserved, safeAmount);
+    const available = Math.max(0, safeAmount - safeReservedFinal);
 
     this.amount = toFixedAmount(safeAmount, this.currency);
-    this.reservedAmount = toFixedAmount(safeReserved, this.currency);
+    this.reservedAmount = toFixedAmount(safeReservedFinal, this.currency);
     this.availableAmount = toFixedAmount(available, this.currency);
 
     next();
@@ -415,8 +481,13 @@ module.exports = (conn = mongoose) => {
     currency,
     opts = {}
   ) {
+    const cur = normCurrency(currency);
+
     return this.findOne(
-      { user: userId, currency: normCurrency(currency) },
+      {
+        user: userId,
+        currency: cur,
+      },
       null,
       opts
     );
@@ -430,7 +501,10 @@ module.exports = (conn = mongoose) => {
     const cur = normCurrency(currency);
 
     return this.findOneAndUpdate(
-      { user: userId, currency: cur },
+      {
+        user: userId,
+        currency: cur,
+      },
       {
         $setOnInsert: {
           user: userId,
@@ -457,26 +531,33 @@ module.exports = (conn = mongoose) => {
     opts = {}
   ) {
     const cur = normCurrency(currency);
-    const n = roundCurrencyAmount(amount, cur);
-
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error("Le montant à créditer doit être positif");
-    }
+    const n = ensurePositiveAmount(amount, cur, "Le montant à créditer");
 
     await this.ensureWallet(userId, cur, opts);
 
     const doc = await this.findOneAndUpdate(
-      { user: userId, currency: cur, status: "active" },
+      {
+        user: userId,
+        currency: cur,
+        status: "active",
+      },
       {
         $inc: {
           amount: n,
           availableAmount: n,
         },
       },
-      { new: true, ...opts }
+      {
+        new: true,
+        ...opts,
+      }
     );
 
-    logger.info(
+    if (!doc) {
+      throw new Error(`Wallet actif introuvable pour ${cur}`);
+    }
+
+    safeLogInfo(
       `[TxWalletBalance.credit] user=${userId} currency=${cur} amount=${n}`
     );
 
@@ -490,11 +571,7 @@ module.exports = (conn = mongoose) => {
     opts = {}
   ) {
     const cur = normCurrency(currency);
-    const n = roundCurrencyAmount(amount, cur);
-
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error("Le montant à débiter doit être positif");
-    }
+    const n = ensurePositiveAmount(amount, cur, "Le montant à débiter");
 
     await this.ensureWallet(userId, cur, opts);
 
@@ -512,12 +589,17 @@ module.exports = (conn = mongoose) => {
           availableAmount: -n,
         },
       },
-      { new: true, ...opts }
+      {
+        new: true,
+        ...opts,
+      }
     );
 
-    if (!doc) throw new Error(`Solde insuffisant pour ${cur}`);
+    if (!doc) {
+      throw new Error(`Solde insuffisant pour ${cur}`);
+    }
 
-    logger.info(
+    safeLogInfo(
       `[TxWalletBalance.debit] user=${userId} currency=${cur} amount=${n}`
     );
 
@@ -531,11 +613,7 @@ module.exports = (conn = mongoose) => {
     opts = {}
   ) {
     const cur = normCurrency(currency);
-    const n = roundCurrencyAmount(amount, cur);
-
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error("Le montant à réserver doit être positif");
-    }
+    const n = ensurePositiveAmount(amount, cur, "Le montant à réserver");
 
     await this.ensureWallet(userId, cur, opts);
 
@@ -552,14 +630,17 @@ module.exports = (conn = mongoose) => {
           availableAmount: -n,
         },
       },
-      { new: true, ...opts }
+      {
+        new: true,
+        ...opts,
+      }
     );
 
     if (!doc) {
       throw new Error(`Fonds disponibles insuffisants pour réserve ${cur}`);
     }
 
-    logger.info(
+    safeLogInfo(
       `[TxWalletBalance.reserve] user=${userId} currency=${cur} amount=${n}`
     );
 
@@ -573,11 +654,7 @@ module.exports = (conn = mongoose) => {
     opts = {}
   ) {
     const cur = normCurrency(currency);
-    const n = roundCurrencyAmount(amount, cur);
-
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error("Le montant à libérer doit être positif");
-    }
+    const n = ensurePositiveAmount(amount, cur, "Le montant à libérer");
 
     const doc = await this.findOneAndUpdate(
       {
@@ -592,13 +669,35 @@ module.exports = (conn = mongoose) => {
           availableAmount: n,
         },
       },
-      { new: true, ...opts }
+      {
+        new: true,
+        ...opts,
+      }
     );
 
-    if (!doc) throw new Error(`Réserve insuffisante pour ${cur}`);
+    if (!doc) {
+      throw new Error(`Réserve insuffisante pour ${cur}`);
+    }
 
-    logger.info(
+    safeLogInfo(
       `[TxWalletBalance.releaseReserve] user=${userId} currency=${cur} amount=${n}`
+    );
+
+    return doc;
+  };
+
+  balanceSchema.statics.releaseReserveForAutoCancel = async function (
+    userId,
+    currency,
+    amount,
+    opts = {}
+  ) {
+    const doc = await this.releaseReserve(userId, currency, amount, opts);
+
+    safeLogInfo(
+      `[TxWalletBalance.releaseReserveForAutoCancel] user=${userId} currency=${normCurrency(
+        currency
+      )} amount=${roundCurrencyAmount(amount, currency)}`
     );
 
     return doc;
@@ -611,11 +710,7 @@ module.exports = (conn = mongoose) => {
     opts = {}
   ) {
     const cur = normCurrency(currency);
-    const n = roundCurrencyAmount(amount, cur);
-
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error("Le montant à capturer doit être positif");
-    }
+    const n = ensurePositiveAmount(amount, cur, "Le montant à capturer");
 
     const doc = await this.findOneAndUpdate(
       {
@@ -631,12 +726,17 @@ module.exports = (conn = mongoose) => {
           amount: -n,
         },
       },
-      { new: true, ...opts }
+      {
+        new: true,
+        ...opts,
+      }
     );
 
-    if (!doc) throw new Error(`Réserve insuffisante pour capture ${cur}`);
+    if (!doc) {
+      throw new Error(`Réserve insuffisante pour capture ${cur}`);
+    }
 
-    logger.info(
+    safeLogInfo(
       `[TxWalletBalance.captureReserve] user=${userId} currency=${cur} amount=${n}`
     );
 
@@ -711,11 +811,26 @@ module.exports = (conn = mongoose) => {
       );
     }
 
-    logger.info(
+    safeLogInfo(
       `[TxWalletBalance.cancelReservedWithFee] user=${userId} currency=${cur} refund=${refundAmount} fee=${feeAmount} totalReserved=${totalReservedAmount}`
     );
 
     return doc;
+  };
+
+  balanceSchema.methods.toSafeJSON = function () {
+    return {
+      id: this._id,
+      user: this.user,
+      currency: this.currency,
+      amount: Number(this.amount?.toString?.() || 0),
+      reservedAmount: Number(this.reservedAmount?.toString?.() || 0),
+      availableAmount: Number(this.availableAmount?.toString?.() || 0),
+      status: this.status,
+      metadata: this.metadata,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+    };
   };
 
   balanceSchema.set("toJSON", {
