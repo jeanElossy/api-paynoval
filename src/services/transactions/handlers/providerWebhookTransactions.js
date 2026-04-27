@@ -11,4 +11,4 @@
  * - des webhooks qui passent par une ancienne logique non sécurisée.
  */
 
-module.exports = require("../../controllers/externalSettlementController");
+module.exports = require("../../../controllers/externalSettlementController");
