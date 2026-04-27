@@ -9,7 +9,7 @@ try {
   logger = require("../utils/logger");
 } catch {}
 
-const runtime = require("../services/transactions/shared/runtime");
+const runtime = require("./transactions/shared/runtime");
 const TxWalletBalanceFactory = require("../models/TxWalletBalance");
 
 const {
@@ -19,9 +19,9 @@ const {
   isAutoCancellableStatus,
   getAutoCancelAfterDays,
   getAutoCancelReason,
-} = require("../services/transactions/shared/autoCancelPolicy");
+} = require("./transactions/shared/autoCancelPolicy");
 
-const { notifyTransactionEvent } = require("./transactionNotificationService");
+const { notifyTransactionEvent } = require("./transactions/transactionNotificationService");
 
 const AUTO_CANCEL_BATCH_SIZE = Math.max(
   1,
