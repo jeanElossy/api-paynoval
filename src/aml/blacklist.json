@@ -1,5 +1,8 @@
 {
-  "emails": ["scam@mail.com", "fraude@pay.com"],
-  "ibans": ["FR7630006000011234567890189", "DE89370400440532013000"],
-  "phones": ["+2250700000000", "+2250100000000"]
+  "emails": [],
+  "ibans": [],
+  "phones": [],
+  "userIds": [],
+  "countries": [],
+  "names": []
 }

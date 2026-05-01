@@ -21,8 +21,61 @@
 //   extractPricingBundle,
 // } = require("../shared/pricing");
 
+// const {
+//   normalizeCurrency,
+//   validateInternalPaynovalCorridor,
+// } = require("./corridorValidation");
+
 // const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 // const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+// const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
+
+// const USER_CORRIDOR_SELECT = [
+//   "_id",
+//   "fullName",
+//   "email",
+//   "phone",
+
+//   "country",
+//   "countryCode",
+//   "selectedCountry",
+//   "residenceCountry",
+//   "registrationCountry",
+//   "nationality",
+
+//   "currency",
+//   "currencyCode",
+//   "defaultCurrency",
+//   "managedCurrency",
+
+//   "userType",
+//   "role",
+//   "isBusiness",
+//   "isSystem",
+//   "systemType",
+
+//   "accountStatus",
+//   "status",
+//   "staffStatus",
+
+//   "isBlocked",
+//   "isLoginDisabled",
+//   "hiddenFromTransfers",
+//   "hiddenFromUserSearch",
+//   "hiddenFromUserApp",
+
+//   "kycStatus",
+//   "kybStatus",
+
+//   "kyc",
+//   "kyb",
+//   "profile",
+//   "address",
+//   "wallet",
+
+//   "isDeleted",
+//   "deletedAt",
+// ].join(" ");
 
 // function norm(v) {
 //   return String(v || "").trim().toLowerCase();
@@ -40,17 +93,83 @@
 //   return Object.assign({}, ...parts.map((p) => (isPlainObject(p) ? p : {})));
 // }
 
+// function normalizeStatus(status) {
+//   return String(status || "")
+//     .trim()
+//     .replace(/\s+/g, "_")
+//     .toLowerCase();
+// }
+
+// function getAutoCancelAfterDays() {
+//   const raw = Number(
+//     process.env.TX_AUTO_CANCEL_AFTER_DAYS || DEFAULT_AUTO_CANCEL_AFTER_DAYS
+//   );
+
+//   if (!Number.isFinite(raw) || raw <= 0) {
+//     return DEFAULT_AUTO_CANCEL_AFTER_DAYS;
+//   }
+
+//   return Math.max(1, Math.floor(raw));
+// }
+
+// function buildAutoCancelAt(fromDate = new Date()) {
+//   const base = fromDate instanceof Date ? fromDate : new Date();
+//   const days = getAutoCancelAfterDays();
+
+//   return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+// }
+
+// function isAutoCancellableStatus(status) {
+//   const s = normalizeStatus(status);
+
+//   return [
+//     "pending",
+//     "pendingvalidation",
+//     "pending_validation",
+//     "initiated",
+//     "awaiting_validation",
+//     "awaiting_confirmation",
+//     "processing",
+//   ].includes(s);
+// }
+
+// function buildAutoCancelFields(status = "pending") {
+//   if (!isAutoCancellableStatus(status)) {
+//     return {
+//       autoCancelAt: null,
+//       autoCancelledAt: null,
+//       autoCancelReason: "",
+//       autoCancelLockAt: null,
+//       autoCancelWorkerId: "",
+//       lastAutoCancelError: "",
+//     };
+//   }
+
+//   return {
+//     autoCancelAt: buildAutoCancelAt(),
+//     autoCancelledAt: null,
+//     autoCancelReason: "",
+//     autoCancelLockAt: null,
+//     autoCancelWorkerId: "",
+//     lastAutoCancelError: "",
+//   };
+// }
+
 // function safeLog(level, message, meta = {}) {
 //   try {
 //     const payload = isPlainObject(meta) ? meta : {};
 //     const logger = runtime.logger;
+
 //     if (logger && typeof logger[level] === "function") {
 //       logger[level](message, payload);
 //       return;
 //     }
+
 //     const line = `${message} ${JSON.stringify(payload)}`;
+
 //     if (level === "error") return console.error(line);
 //     if (level === "warn") return console.warn(line);
+
 //     console.log(line);
 //   } catch {
 //     console.log(message);
@@ -80,11 +199,17 @@
 // }
 
 // function resolveCountryForSource(body = {}) {
-//   return body.fromCountry || body.sourceCountry || body.country || "";
+//   return body.fromCountry || body.sourceCountry || "";
 // }
 
 // function resolveCountryForTarget(body = {}) {
-//   return body.toCountry || body.destinationCountry || body.targetCountry || body.country || "";
+//   return (
+//     body.toCountry ||
+//     body.destinationCountry ||
+//     body.targetCountry ||
+//     body.country ||
+//     ""
+//   );
 // }
 
 // function getEffectivePricingId(body = {}) {
@@ -189,7 +314,6 @@
 //       securityCode,
 //       destination,
 //       funds,
-//       country,
 //       metadata = {},
 //       meta = {},
 //     } = body;
@@ -213,11 +337,13 @@
 //     }
 
 //     const authHeader = String(req.headers?.authorization || "").trim();
+
 //     if (!authHeader || !authHeader.startsWith("Bearer ")) {
 //       throw createError(401, "Token manquant");
 //     }
 
 //     const senderId = String(req.user?.id || req.user?._id || "").trim();
+
 //     if (!senderId) {
 //       throw createError(401, "Utilisateur non authentifié");
 //     }
@@ -232,6 +358,7 @@
 
 //     const q = sanitize(securityQuestion || question || "");
 //     const aRaw = sanitize(securityAnswer || securityCode || "");
+
 //     if (!q || !aRaw) {
 //       throw createError(400, "securityQuestion + securityAnswer requis");
 //     }
@@ -240,15 +367,8 @@
 //       throw createError(400, "Description trop longue");
 //     }
 
-//     const sourceCountryRaw = resolveCountryForSource(body);
-//     const targetCountryRaw = resolveCountryForTarget(body);
-//     const effectiveCountry = targetCountryRaw || sourceCountryRaw || country || "";
-
-//     if (!effectiveCountry || !String(effectiveCountry).trim()) {
-//       throw createError(400, "country requis");
-//     }
-
 //     const amt = toFloat(amount ?? body.amountSource);
+
 //     if (!Number.isFinite(amt) || amt <= 0) {
 //       throw createError(400, "Montant invalide");
 //     }
@@ -271,13 +391,20 @@
 //     const sessOpts = runtime.maybeSessionOpts(session);
 //     const activeSession = sessOpts?.session || null;
 
-//     let senderQuery = User.findById(senderId).select("fullName email");
-//     let receiverQuery = User.findOne({ email: cleanEmail }).select("_id fullName email");
+//     let senderQuery = User.findById(senderId).select(USER_CORRIDOR_SELECT);
+
+//     let receiverQuery = User.findOne({
+//       email: cleanEmail,
+//       isDeleted: { $ne: true },
+//     }).select(USER_CORRIDOR_SELECT);
 
 //     senderQuery = safeSessionChain(senderQuery, activeSession).lean();
 //     receiverQuery = safeSessionChain(receiverQuery, activeSession).lean();
 
-//     const [senderUser, receiver] = await Promise.all([senderQuery, receiverQuery]);
+//     const [senderUser, receiver] = await Promise.all([
+//       senderQuery,
+//       receiverQuery,
+//     ]);
 
 //     if (!senderUser) {
 //       throw createError(403, "Utilisateur invalide");
@@ -291,14 +418,17 @@
 //       throw createError(400, "Auto-transfert impossible");
 //     }
 
-//     const currencySourceISO =
+//     const sourceCountryRaw = resolveCountryForSource(body);
+//     const targetCountryRaw = resolveCountryForTarget(body);
+
+//     let currencySourceISO =
 //       normCur(
 //         body.senderCurrencyCode ||
 //           body.currencySource ||
 //           body.fromCurrency ||
 //           body.senderCurrencySymbol ||
 //           body.currency,
-//         sourceCountryRaw || effectiveCountry
+//         sourceCountryRaw
 //       ) ||
 //       upperSanitized(
 //         body.senderCurrencyCode ||
@@ -308,13 +438,13 @@
 //           body.currency
 //       );
 
-//     const currencyTargetISO =
+//     let currencyTargetISO =
 //       normCur(
 //         body.localCurrencyCode ||
 //           body.currencyTarget ||
 //           body.toCurrency ||
 //           body.localCurrencySymbol,
-//         targetCountryRaw || effectiveCountry
+//         targetCountryRaw
 //       ) ||
 //       upperSanitized(
 //         body.localCurrencyCode ||
@@ -322,6 +452,24 @@
 //           body.toCurrency ||
 //           body.localCurrencySymbol
 //       );
+
+//     currencySourceISO = normalizeCurrency(currencySourceISO);
+//     currencyTargetISO = normalizeCurrency(currencyTargetISO);
+
+//     const corridorLock = validateInternalPaynovalCorridor({
+//       sender: senderUser,
+//       receiver,
+//       sourceCountry: sourceCountryRaw,
+//       targetCountry: targetCountryRaw,
+//       currencySource: currencySourceISO,
+//       currencyTarget: currencyTargetISO,
+//     });
+
+//     currencySourceISO = corridorLock.currencySource;
+//     currencyTargetISO = corridorLock.currencyTarget;
+
+//     const lockedSourceCountry = corridorLock.sourceCountry;
+//     const lockedTargetCountry = corridorLock.targetCountry;
 
 //     if (!currencySourceISO) {
 //       throw createError(400, "Devise source introuvable");
@@ -335,6 +483,19 @@
 //     req.body.localCurrencyCode = currencyTargetISO;
 //     req.body.senderCurrencySymbol = currencySourceISO;
 //     req.body.localCurrencySymbol = currencyTargetISO;
+
+//     req.body.currencySource = currencySourceISO;
+//     req.body.currencyTarget = currencyTargetISO;
+//     req.body.fromCurrency = currencySourceISO;
+//     req.body.toCurrency = currencyTargetISO;
+
+//     req.body.fromCountry = lockedSourceCountry;
+//     req.body.sourceCountry = lockedSourceCountry;
+//     req.body.toCountry = lockedTargetCountry;
+//     req.body.destinationCountry = lockedTargetCountry;
+//     req.body.targetCountry = lockedTargetCountry;
+//     req.body.country = lockedTargetCountry;
+
 //     req.body.funds = "paynoval";
 //     req.body.destination = "paynoval";
 //     req.body.provider = "paynoval";
@@ -344,6 +505,7 @@
 
 //     const pricingInput = pickBodyPricingInput({
 //       ...body,
+//       ...req.body,
 //       amount: amt,
 //       funds: "paynoval",
 //       destination: "paynoval",
@@ -352,14 +514,15 @@
 //       txType: body.txType || "TRANSFER",
 //       fromCurrency: currencySourceISO,
 //       toCurrency: currencyTargetISO,
-//       fromCountry: sourceCountryRaw || effectiveCountry,
-//       toCountry: targetCountryRaw || effectiveCountry,
+//       fromCountry: lockedSourceCountry,
+//       toCountry: lockedTargetCountry,
 //       pricingId: body.pricingId || undefined,
 //       quoteId: body.quoteId || undefined,
 //       effectivePricingId: effectivePricingId || undefined,
 //     });
 
 //     let pricingPayload;
+
 //     try {
 //       pricingPayload = await fetchPricingQuoteFromGateway({
 //         authHeader,
@@ -374,6 +537,7 @@
 //         responseData: e?.response?.data || null,
 //         message: e?.message || "unknown_error",
 //       });
+
 //       throw createError(502, "Service pricing indisponible");
 //     }
 
@@ -389,12 +553,15 @@
 //     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
 //       throw createError(500, "grossFrom pricing invalide");
 //     }
+
 //     if (!Number.isFinite(fee) || fee < 0) {
 //       throw createError(500, "fee pricing invalide");
 //     }
+
 //     if (!Number.isFinite(netFrom) || netFrom < 0) {
 //       throw createError(500, "netFrom pricing invalide");
 //     }
+
 //     if (!Number.isFinite(netTo) || netTo <= 0) {
 //       throw createError(500, "netTo pricing invalide");
 //     }
@@ -415,6 +582,7 @@
 //     const treasurySeed = resolveFeesTreasurySeed();
 
 //     const safeRecipientInfo = isPlainObject(recipientInfo) ? recipientInfo : {};
+
 //     const recipientName =
 //       sanitize(
 //         safeRecipientInfo.name ||
@@ -425,6 +593,8 @@
 //       receiver.fullName ||
 //       cleanEmail;
 
+//     const autoCancelFields = buildAutoCancelFields("pending");
+
 //     const txMeta = buildSafeMeta(meta, metadata, {
 //       entry: "transfer.pending",
 //       ownerUserId: senderUser._id,
@@ -434,7 +604,20 @@
 //       pricingId: body?.pricingId || null,
 //       quoteId: body?.quoteId || null,
 //       effectivePricingId: effectivePricingId || null,
+//       corridorLock: corridorLock.snapshot,
+//       autoCancelAt: autoCancelFields.autoCancelAt,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
 //     });
+
+//     const txMetadata = {
+//       provider: "paynoval",
+//       method: "INTERNAL",
+//       txType: body.txType || "TRANSFER",
+//       rail: "internal",
+//       corridorLock: corridorLock.snapshot,
+//       autoCancelAt: autoCancelFields.autoCancelAt,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
+//     };
 
 //     const txDoc = {
 //       userId: senderUser._id,
@@ -464,7 +647,7 @@
 //       funds: "paynoval",
 //       provider: "paynoval",
 //       operator: body.operator || null,
-//       country: sanitize(effectiveCountry),
+//       country: sanitize(lockedTargetCountry),
 
 //       amount: dec2(amountSourceStd),
 //       transactionFees: dec2(feeSourceStd),
@@ -520,16 +703,13 @@
 //       description: sanitize(description),
 //       orderId: body.orderId || null,
 
-//       metadata: {
-//         provider: "paynoval",
-//         method: "INTERNAL",
-//         txType: body.txType || "TRANSFER",
-//         rail: "internal",
-//       },
+//       metadata: txMetadata,
 //       meta: txMeta,
 
 //       status: "pending",
 //       providerStatus: "FUNDS_RESERVED_PENDING_CONFIRMATION",
+
+//       ...autoCancelFields,
 
 //       fundsReserved: false,
 //       fundsReservedAt: null,
@@ -560,6 +740,7 @@
 //     tx.fundsReserved = true;
 //     tx.fundsReservedAt = new Date();
 //     tx.providerStatus = "FUNDS_RESERVED";
+
 //     await tx.save(sessOpts);
 
 //     logTransaction({
@@ -573,6 +754,8 @@
 //         transactionId: String(tx._id),
 //         reference: tx.reference,
 //         flow: tx.flow,
+//         corridorLock: corridorLock.snapshot,
+//         autoCancelAt: tx.autoCancelAt || null,
 //       },
 //       flagged: false,
 //       flagReason: "",
@@ -596,6 +779,8 @@
 //       status: tx.status,
 //       providerStatus: tx.providerStatus,
 //       securityQuestion: q,
+//       autoCancelAt: tx.autoCancelAt || null,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
 //       pricing: {
 //         feeSource: feeSourceStd,
 //         feeSourceCurrency: currencySourceISO,
@@ -610,10 +795,13 @@
 //       treasuryRevenue,
 //       fundsReserved: true,
 //       treasuryCreditedAtInitiate: false,
+//       corridorLock: corridorLock.snapshot,
 //     });
 //   } catch (err) {
 //     safeLog("error", "[TX INTERNAL] failed", {
 //       message: err?.message,
+//       code: err?.code || null,
+//       details: err?.details || null,
 //       status: err?.status || err?.statusCode || 500,
 //       stack: err?.stack,
 //       body: buildDebugBody(req.body || {}),
@@ -628,6 +816,7 @@
 // }
 
 // module.exports = { initiateInternal };
+
 
 
 
@@ -662,6 +851,12 @@ const {
   validateInternalPaynovalCorridor,
 } = require("./corridorValidation");
 
+const {
+  assertUserCanTransact,
+  buildEligibilitySnapshot,
+  mergeEligibilityMetadata,
+} = require("../shared/transactionEligibility");
+
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
 const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
@@ -671,6 +866,18 @@ const USER_CORRIDOR_SELECT = [
   "fullName",
   "email",
   "phone",
+  "phoneNumber",
+
+  "emailVerified",
+  "isEmailVerified",
+  "emailVerifiedAt",
+  "emailVerification",
+  "verifications",
+
+  "phoneVerified",
+  "isPhoneVerified",
+  "phoneVerifiedAt",
+  "phoneVerification",
 
   "country",
   "countryCode",
@@ -685,6 +892,8 @@ const USER_CORRIDOR_SELECT = [
   "managedCurrency",
 
   "userType",
+  "type",
+  "accountType",
   "role",
   "isBusiness",
   "isSystem",
@@ -695,19 +904,30 @@ const USER_CORRIDOR_SELECT = [
   "staffStatus",
 
   "isBlocked",
+  "blocked",
   "isLoginDisabled",
   "hiddenFromTransfers",
   "hiddenFromUserSearch",
   "hiddenFromUserApp",
+  "frozenUntil",
 
   "kycStatus",
+  "kycLevel",
   "kybStatus",
+  "businessStatus",
+  "businessKYBLevel",
 
   "kyc",
   "kyb",
+  "business",
   "profile",
   "address",
   "wallet",
+
+  "kycVerified",
+  "isKycVerified",
+  "kybVerified",
+  "isKybVerified",
 
   "isDeleted",
   "deletedAt",
@@ -1054,6 +1274,26 @@ async function initiateInternal(req, res, next) {
       throw createError(400, "Auto-transfert impossible");
     }
 
+    const senderEligibility = assertUserCanTransact(senderUser, {
+      roleLabel: "expéditeur",
+      codePrefix: "SENDER",
+    });
+
+    const receiverEligibility = assertUserCanTransact(receiver, {
+      roleLabel: "destinataire",
+      codePrefix: "RECEIVER",
+    });
+
+    const eligibilitySnapshot = {
+      requester:
+        req.transactionEligibility?.user ||
+        senderEligibility.snapshot ||
+        buildEligibilitySnapshot(senderUser),
+      sender: senderEligibility.snapshot || buildEligibilitySnapshot(senderUser),
+      receiver:
+        receiverEligibility.snapshot || buildEligibilitySnapshot(receiver),
+    };
+
     const sourceCountryRaw = resolveCountryForSource(body);
     const targetCountryRaw = resolveCountryForTarget(body);
 
@@ -1231,7 +1471,7 @@ async function initiateInternal(req, res, next) {
 
     const autoCancelFields = buildAutoCancelFields("pending");
 
-    const txMeta = buildSafeMeta(meta, metadata, {
+    const txMetaBase = buildSafeMeta(meta, metadata, {
       entry: "transfer.pending",
       ownerUserId: senderUser._id,
       receiverUserId: receiver._id,
@@ -1245,7 +1485,9 @@ async function initiateInternal(req, res, next) {
       autoCancelAfterDays: getAutoCancelAfterDays(),
     });
 
-    const txMetadata = {
+    const txMeta = mergeEligibilityMetadata(txMetaBase, eligibilitySnapshot);
+
+    const txMetadataBase = buildSafeMeta(metadata, {
       provider: "paynoval",
       method: "INTERNAL",
       txType: body.txType || "TRANSFER",
@@ -1253,7 +1495,12 @@ async function initiateInternal(req, res, next) {
       corridorLock: corridorLock.snapshot,
       autoCancelAt: autoCancelFields.autoCancelAt,
       autoCancelAfterDays: getAutoCancelAfterDays(),
-    };
+    });
+
+    const txMetadata = mergeEligibilityMetadata(
+      txMetadataBase,
+      eligibilitySnapshot
+    );
 
     const txDoc = {
       userId: senderUser._id,
@@ -1392,6 +1639,22 @@ async function initiateInternal(req, res, next) {
         flow: tx.flow,
         corridorLock: corridorLock.snapshot,
         autoCancelAt: tx.autoCancelAt || null,
+        eligibility: {
+          sender: {
+            emailVerified: eligibilitySnapshot.sender.emailVerified,
+            phoneVerified: eligibilitySnapshot.sender.phoneVerified,
+            kycVerified: eligibilitySnapshot.sender.kycVerified,
+            kybVerified: eligibilitySnapshot.sender.kybVerified,
+            accountStatus: eligibilitySnapshot.sender.accountStatus,
+          },
+          receiver: {
+            emailVerified: eligibilitySnapshot.receiver.emailVerified,
+            phoneVerified: eligibilitySnapshot.receiver.phoneVerified,
+            kycVerified: eligibilitySnapshot.receiver.kycVerified,
+            kybVerified: eligibilitySnapshot.receiver.kybVerified,
+            accountStatus: eligibilitySnapshot.receiver.accountStatus,
+          },
+        },
       },
       flagged: false,
       flagReason: "",

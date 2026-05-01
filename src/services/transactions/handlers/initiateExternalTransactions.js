@@ -51,16 +51,134 @@
 //   maskPan,
 // } = require("./flowHelpers");
 
+// const {
+//   normalizeCurrency,
+//   validateOutboundExternalCorridor,
+//   validateInboundExternalCorridor,
+// } = require("./corridorValidation");
+
 // const { submitExternalExecution } = require("./submitExternalExecution");
 
 // const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 // const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
+// const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
+
+// const USER_CORRIDOR_SELECT = [
+//   "_id",
+//   "fullName",
+//   "email",
+//   "phone",
+
+//   "country",
+//   "countryCode",
+//   "selectedCountry",
+//   "residenceCountry",
+//   "registrationCountry",
+//   "nationality",
+
+//   "currency",
+//   "currencyCode",
+//   "defaultCurrency",
+//   "managedCurrency",
+
+//   "userType",
+//   "role",
+//   "isBusiness",
+//   "isSystem",
+//   "systemType",
+
+//   "accountStatus",
+//   "status",
+//   "staffStatus",
+
+//   "isBlocked",
+//   "isLoginDisabled",
+//   "hiddenFromTransfers",
+//   "hiddenFromUserSearch",
+//   "hiddenFromUserApp",
+
+//   "kycStatus",
+//   "kybStatus",
+
+//   "kyc",
+//   "kyb",
+//   "profile",
+//   "address",
+//   "wallet",
+
+//   "isDeleted",
+//   "deletedAt",
+// ].join(" ");
+
+// function normalizeStatus(status) {
+//   return String(status || "")
+//     .trim()
+//     .replace(/\s+/g, "_")
+//     .toLowerCase();
+// }
+
+// function getAutoCancelAfterDays() {
+//   const raw = Number(
+//     process.env.TX_AUTO_CANCEL_AFTER_DAYS || DEFAULT_AUTO_CANCEL_AFTER_DAYS
+//   );
+
+//   if (!Number.isFinite(raw) || raw <= 0) {
+//     return DEFAULT_AUTO_CANCEL_AFTER_DAYS;
+//   }
+
+//   return Math.max(1, Math.floor(raw));
+// }
+
+// function buildAutoCancelAt(fromDate = new Date()) {
+//   const base = fromDate instanceof Date ? fromDate : new Date();
+//   const days = getAutoCancelAfterDays();
+
+//   return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+// }
+
+// function isAutoCancellableStatus(status) {
+//   const s = normalizeStatus(status);
+
+//   return [
+//     "pending",
+//     "pendingvalidation",
+//     "pending_validation",
+//     "initiated",
+//     "awaiting_validation",
+//     "awaiting_confirmation",
+//     "processing",
+//   ].includes(s);
+// }
+
+// function buildAutoCancelFields(status = "pending") {
+//   if (!isAutoCancellableStatus(status)) {
+//     return {
+//       autoCancelAt: null,
+//       autoCancelledAt: null,
+//       autoCancelReason: "",
+//       autoCancelLockAt: null,
+//       autoCancelWorkerId: "",
+//       lastAutoCancelError: "",
+//     };
+//   }
+
+//   return {
+//     autoCancelAt: buildAutoCancelAt(),
+//     autoCancelledAt: null,
+//     autoCancelReason: "",
+//     autoCancelLockAt: null,
+//     autoCancelWorkerId: "",
+//     lastAutoCancelError: "",
+//   };
+// }
 
 // function ensureBearer(req) {
 //   const authHeader = req.headers.authorization;
+
 //   if (!authHeader || !authHeader.startsWith("Bearer ")) {
 //     throw createError(401, "Token manquant");
 //   }
+
 //   return authHeader;
 // }
 
@@ -108,11 +226,13 @@
 //     "";
 
 //   if (!isEmailLike(email)) return null;
+
 //   return String(email).trim().toLowerCase();
 // }
 
 // function normalizeMethodForPricing(body = {}, provider = "") {
 //   const method = String(body.method || "").trim().toUpperCase();
+
 //   if (method) return method;
 
 //   const methodType = String(body.methodType || "").trim().toLowerCase();
@@ -122,22 +242,31 @@
 //   if (methodType === "visa" || methodType === "card") return "VISA";
 
 //   if (
-//     ["mobilemoney", "mobile_money", "momo", "mobilemoneyaccount", "mobile_money_account"].includes(
-//       methodType
-//     )
+//     [
+//       "mobilemoney",
+//       "mobile_money",
+//       "momo",
+//       "mobilemoneyaccount",
+//       "mobile_money_account",
+//     ].includes(methodType)
 //   ) {
 //     return "MOBILE_MONEY";
 //   }
 
 //   if (provider) return String(provider).trim().toUpperCase();
+
 //   return "MOBILE_MONEY";
 // }
 
 // function normalizeTxTypeForPricing(body = {}) {
-//   const txType = String(body.txType || body.transactionType || "").trim().toUpperCase();
+//   const txType = String(body.txType || body.transactionType || "")
+//     .trim()
+//     .toUpperCase();
+
 //   if (txType) return txType;
 
 //   const action = String(body.action || "").trim().toLowerCase();
+
 //   if (action === "deposit") return "DEPOSIT";
 //   if (action === "withdraw") return "WITHDRAW";
 
@@ -267,20 +396,27 @@
 //   currencyTargetISO,
 // }) {
 //   const authHeader = ensureBearer(req);
+//   const effectiveBody = { ...body, ...req.body };
 
 //   const pricingInput = pickBodyPricingInput({
-//     ...req.body,
+//     ...effectiveBody,
 //     amount,
 //     fromCurrency: currencySourceISO,
 //     toCurrency: currencyTargetISO,
 //     provider,
-//     method: normalizeMethodForPricing(body, provider),
-//     txType: normalizeTxTypeForPricing(body),
-//     fromCountry: body.fromCountry || body.sourceCountry || country,
-//     toCountry: body.toCountry || body.targetCountry || body.destinationCountry || country,
+//     method: normalizeMethodForPricing(effectiveBody, provider),
+//     txType: normalizeTxTypeForPricing(effectiveBody),
+//     fromCountry:
+//       effectiveBody.fromCountry || effectiveBody.sourceCountry || country,
+//     toCountry:
+//       effectiveBody.toCountry ||
+//       effectiveBody.targetCountry ||
+//       effectiveBody.destinationCountry ||
+//       country,
 //   });
 
 //   let pricingPayload;
+
 //   try {
 //     pricingPayload = await fetchPricingQuoteFromGateway({
 //       authHeader,
@@ -293,6 +429,7 @@
 //       responseData: e.response?.data,
 //       message: e.message,
 //     });
+
 //     throw createError(502, "Service pricing indisponible");
 //   }
 
@@ -308,9 +445,15 @@
 //   if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
 //     throw createError(500, "grossFrom pricing invalide");
 //   }
+
+//   if (!Number.isFinite(fee) || fee < 0) {
+//     throw createError(500, "fee pricing invalide");
+//   }
+
 //   if (!Number.isFinite(netFrom) || netFrom < 0) {
 //     throw createError(500, "netFrom pricing invalide");
 //   }
+
 //   if (!Number.isFinite(netTo) || netTo <= 0) {
 //     throw createError(500, "netTo pricing invalide");
 //   }
@@ -319,6 +462,10 @@
 //   const feeSourceStd = round2(fee);
 //   const amountTargetStd = round2(netTo);
 //   const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
+
+//   if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
+//     throw createError(500, "Taux appliqué invalide");
+//   }
 
 //   return {
 //     pricingInput,
@@ -330,6 +477,14 @@
 //     rateUsed,
 //     treasuryRevenue,
 //   };
+// }
+
+// function safeResolveFlow(body) {
+//   try {
+//     return resolveExternalFlow(body || {});
+//   } catch {
+//     return null;
+//   }
 // }
 
 // async function initiateOutboundExternal(req, res, next) {
@@ -363,13 +518,20 @@
 
 //     const q = sanitize(securityQuestion || question || "");
 //     const aRaw = sanitize(securityAnswer || securityCode || "");
+
 //     if (!q || !aRaw) {
 //       throw createError(400, "securityQuestion + securityAnswer requis");
 //     }
 
-//     const senderId = req.user.id;
+//     const senderId = String(req.user?.id || req.user?._id || "").trim();
+
+//     if (!senderId) {
+//       throw createError(401, "Utilisateur non authentifié");
+//     }
+
 //     const amt = toFloat(amount ?? body.amountSource);
-//     if (!amt || Number.isNaN(amt) || amt <= 0) {
+
+//     if (!Number.isFinite(amt) || amt <= 0) {
 //       throw createError(400, "Montant invalide");
 //     }
 
@@ -378,7 +540,7 @@
 //     const sessOpts = maybeSessionOpts(session);
 
 //     const senderUser = await User.findById(senderId)
-//       .select("fullName email")
+//       .select(USER_CORRIDOR_SELECT)
 //       .lean()
 //       .session(sessOpts.session || null);
 
@@ -388,12 +550,52 @@
 
 //     const provider = resolveProviderForFlow(flow, body);
 //     const externalRecipientMeta = buildRecipientExternalMeta(flow, body);
-//     const { country: resolvedCountry, fromCountry, toCountry } = resolveCountries(body, country);
-//     const { currencySourceISO, currencyTargetISO } = resolveCurrencies({
+
+//     const {
+//       country: resolvedCountry,
+//       fromCountry,
+//       toCountry,
+//     } = resolveCountries(body, country);
+
+//     let { currencySourceISO, currencyTargetISO } = resolveCurrencies({
 //       body,
 //       normCur,
 //       country: resolvedCountry,
 //     });
+
+//     currencySourceISO = normalizeCurrency(currencySourceISO);
+//     currencyTargetISO = normalizeCurrency(currencyTargetISO);
+
+//     const requestedSourceCountry = body.fromCountry || body.sourceCountry || "";
+//     const requestedTargetCountry =
+//       body.toCountry ||
+//       body.destinationCountry ||
+//       body.targetCountry ||
+//       body.country ||
+//       toCountry ||
+//       resolvedCountry ||
+//       "";
+
+//     const corridorLock = validateOutboundExternalCorridor({
+//       flow,
+//       body,
+//       senderUser,
+//       fromCountry: requestedSourceCountry || fromCountry || "",
+//       toCountry: requestedTargetCountry,
+//       currencySource: currencySourceISO,
+//       currencyTarget: currencyTargetISO,
+//     });
+
+//     currencySourceISO = corridorLock.lockedSourceCurrency;
+//     currencyTargetISO = corridorLock.lockedTargetCurrency;
+
+//     if (!currencySourceISO) {
+//       throw createError(400, "Devise source introuvable");
+//     }
+
+//     if (!currencyTargetISO) {
+//       throw createError(400, "Devise destination introuvable");
+//     }
 
 //     await validationService.detectBasicFraud({
 //       sender: senderId,
@@ -411,11 +613,19 @@
 //     req.body.localCurrencyCode = currencyTargetISO;
 //     req.body.senderCurrencySymbol = currencySourceISO;
 //     req.body.localCurrencySymbol = currencyTargetISO;
-//     req.body.fromCountry = fromCountry;
-//     req.body.toCountry = toCountry;
-//     req.body.sourceCountry = fromCountry;
-//     req.body.targetCountry = toCountry;
-//     req.body.country = resolvedCountry;
+
+//     req.body.currencySource = currencySourceISO;
+//     req.body.currencyTarget = currencyTargetISO;
+//     req.body.fromCurrency = currencySourceISO;
+//     req.body.toCurrency = currencyTargetISO;
+
+//     req.body.fromCountry = corridorLock.lockedSourceCountry;
+//     req.body.toCountry = corridorLock.lockedTargetCountry;
+//     req.body.sourceCountry = corridorLock.lockedSourceCountry;
+//     req.body.targetCountry = corridorLock.lockedTargetCountry;
+//     req.body.destinationCountry = corridorLock.lockedTargetCountry;
+//     req.body.country = corridorLock.lockedTargetCountry;
+
 //     req.body.description = sanitize(description);
 //     req.body.securityQuestion = q;
 //     req.body.securityAnswer = aRaw;
@@ -424,7 +634,7 @@
 //       req,
 //       body,
 //       amount: amt,
-//       country: resolvedCountry,
+//       country: req.body.country,
 //       provider,
 //       currencySourceISO,
 //       currencyTargetISO,
@@ -434,24 +644,28 @@
 //     const securityAnswerHash = sha256Hex(aRaw);
 //     const amlSnapshot = req.aml || null;
 //     const treasurySeed = resolveFeesTreasurySeed();
+//     const autoCancelFields = buildAutoCancelFields("pending");
 
 //     const txMeta = {
 //       ...((meta && typeof meta === "object") ? meta : {}),
 //       ...buildExternalMeta({
 //         senderUser,
-//         body,
+//         body: req.body,
 //         extra: {
 //           entry: "external_payout.pending",
 //           requestOrigin: "tx-core",
 //           externalRecipient: externalRecipientMeta,
 //           description: sanitize(description),
 //           securityQuestion: q,
+//           corridorLock: corridorLock.snapshot,
 //           effectivePricingId:
 //             body.effectivePricingId ||
 //             body.pricingLockId ||
 //             body.pricingId ||
 //             body.quoteId ||
 //             null,
+//           autoCancelAt: autoCancelFields.autoCancelAt,
+//           autoCancelAfterDays: getAutoCancelAfterDays(),
 //         },
 //       }),
 //     };
@@ -461,64 +675,95 @@
 //       ...buildExternalMetadata({
 //         flow,
 //         provider,
-//         body,
+//         body: req.body,
 //         extra: {
 //           providerReference: pickExternalRef(body),
 //           externalRecipient: externalRecipientMeta,
+//           corridorLock: corridorLock.snapshot,
+//           autoCancelAt: autoCancelFields.autoCancelAt,
+//           autoCancelAfterDays: getAutoCancelAfterDays(),
 //         },
 //       }),
+//       corridorLock: corridorLock.snapshot,
+//       autoCancelAt: autoCancelFields.autoCancelAt,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
 //     };
+
+//     const destinationValue =
+//       flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
+//         ? "mobilemoney"
+//         : flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT
+//         ? "bank"
+//         : "visa_direct";
 
 //     const [tx] = await Transaction.create(
 //       [
 //         {
 //           userId: senderUser._id,
 //           internalImported: false,
+
 //           flow,
 //           operationKind: "transfer",
 //           initiatedBy: "user",
 //           context: "external_payout",
 //           contextId: null,
+
 //           reference,
 //           idempotencyKey: body.idempotencyKey || null,
+
 //           sender: senderUser._id,
 //           receiver: null,
+
 //           senderName: senderUser.fullName,
 //           senderEmail: senderUser.email,
 //           nameDestinataire: pickExternalDisplayName(body),
 //           recipientEmail: pickExternalRecipientEmail(body),
-//           destination:
-//             flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
-//               ? "mobilemoney"
-//               : flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT
-//               ? "bank"
-//               : "visa_direct",
+
+//           destination: destinationValue,
 //           funds: "paynoval",
 //           provider,
-//           operator: body.operator || body.operatorName || txMetadata?.provider || null,
-//           country: sanitize(resolvedCountry),
+//           operator:
+//             body.operator || body.operatorName || txMetadata?.provider || null,
+//           country: sanitize(corridorLock.lockedTargetCountry),
+
 //           amount: dec2(pricingCtx.amountSourceStd),
 //           transactionFees: dec2(pricingCtx.feeSourceStd),
 //           netAmount: dec2(pricingCtx.netFrom),
 //           exchangeRate: dec2(pricingCtx.rateUsed),
 //           localAmount: dec2(pricingCtx.amountTargetStd),
+
 //           senderCurrencySymbol: currencySourceISO,
 //           localCurrencySymbol: currencyTargetISO,
+
 //           amountSource: dec2(pricingCtx.amountSourceStd),
 //           amountTarget: dec2(pricingCtx.amountTargetStd),
 //           feeSource: dec2(pricingCtx.feeSourceStd),
 //           fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
 //           currencySource: currencySourceISO,
 //           currencyTarget: currencyTargetISO,
+
 //           money: {
-//             source: { amount: pricingCtx.amountSourceStd, currency: currencySourceISO },
-//             feeSource: { amount: pricingCtx.feeSourceStd, currency: currencySourceISO },
-//             target: { amount: pricingCtx.amountTargetStd, currency: currencyTargetISO },
+//             source: {
+//               amount: pricingCtx.amountSourceStd,
+//               currency: currencySourceISO,
+//             },
+//             feeSource: {
+//               amount: pricingCtx.feeSourceStd,
+//               currency: currencySourceISO,
+//             },
+//             target: {
+//               amount: pricingCtx.amountTargetStd,
+//               currency: currencyTargetISO,
+//             },
 //             fxRateSourceToTarget: pricingCtx.rateUsed,
 //           },
+
 //           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-//           pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
-//           pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+//           pricingRuleApplied:
+//             pricingCtx.pricingSnapshot?.ruleApplied || null,
+//           pricingFxRuleApplied:
+//             pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+
 //           feeSnapshot: {
 //             fee: pricingCtx.feeSourceStd,
 //             netAfterFees: pricingCtx.netFrom,
@@ -528,24 +773,33 @@
 //           },
 //           feeActual: null,
 //           feeId: null,
+
 //           treasuryRevenue: pricingCtx.treasuryRevenue,
 //           treasuryRevenueCredited: false,
 //           treasuryRevenueCreditedAt: null,
 //           treasuryUserId: treasurySeed.treasuryUserId,
 //           treasurySystemType: treasurySeed.treasurySystemType,
 //           treasuryLabel: treasurySeed.treasuryLabel,
+
 //           securityQuestion: q,
 //           securityAnswerHash,
 //           securityCode: securityAnswerHash,
+
 //           amlSnapshot,
 //           amlStatus: amlSnapshot?.status || "passed",
+
 //           description: sanitize(description),
 //           orderId: body.orderId || null,
+
 //           metadata: txMetadata,
 //           meta: txMeta,
+
 //           status: "pending",
 //           providerReference: pickExternalRef(body),
 //           providerStatus: "PENDING_USER_CONFIRMATION",
+
+//           ...autoCancelFields,
+
 //           fundsReserved: false,
 //           fundsReservedAt: null,
 //           fundsCaptured: false,
@@ -575,6 +829,7 @@
 //     tx.fundsReserved = true;
 //     tx.fundsReservedAt = new Date();
 //     tx.providerStatus = "FUNDS_RESERVED";
+
 //     await tx.save(sessOpts);
 
 //     logTransaction({
@@ -593,6 +848,8 @@
 //         transactionId: tx._id.toString(),
 //         reference: tx.reference,
 //         flow,
+//         corridorLock: corridorLock.snapshot,
+//         autoCancelAt: tx.autoCancelAt || null,
 //       },
 //       flagged: false,
 //       flagReason: "",
@@ -603,9 +860,11 @@
 //     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
 //     if (canUseSharedSession()) await session.commitTransaction();
+
 //     session.endSession();
 
 //     let execution = null;
+
 //     try {
 //       execution = await submitExternalExecution({
 //         req,
@@ -627,8 +886,11 @@
 //       flow: tx.flow,
 //       status: execution?.status || tx.status,
 //       providerStatus: execution?.providerStatus || tx.providerStatus,
-//       providerReference: execution?.providerReference || tx.providerReference || null,
+//       providerReference:
+//         execution?.providerReference || tx.providerReference || null,
 //       securityQuestion: q,
+//       autoCancelAt: tx.autoCancelAt || null,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
 //       pricing: {
 //         feeSource: pricingCtx.feeSourceStd,
 //         feeSourceCurrency: currencySourceISO,
@@ -644,11 +906,21 @@
 //       fundsReserved: true,
 //       treasuryCreditedAtInitiate: false,
 //       externalRecipient: redactSensitiveFields(externalRecipientMeta),
+//       corridorLock: corridorLock.snapshot,
 //     });
 //   } catch (err) {
+//     logger.error("[TX-CORE][OUTBOUND] initiate failed", {
+//       message: err.message,
+//       code: err.code || null,
+//       details: err.details || null,
+//       status: err.status || err.statusCode || 500,
+//       flow: safeResolveFlow(req.body),
+//     });
+
 //     try {
 //       if (canUseSharedSession()) await session.abortTransaction();
 //     } catch {}
+
 //     session.endSession();
 //     next(err);
 //   }
@@ -667,21 +939,21 @@
 //       throw createError(400, "Flow collection externe invalide");
 //     }
 
-//     const {
-//       amount,
-//       description = "",
-//       country,
-//       metadata = {},
-//       meta = {},
-//     } = body;
+//     const { amount, description = "", country, metadata = {}, meta = {} } = body;
 
 //     if (description && description.length > MAX_DESC_LENGTH) {
 //       throw createError(400, "Description trop longue");
 //     }
 
-//     const receiverId = req.user.id;
+//     const receiverId = String(req.user?.id || req.user?._id || "").trim();
+
+//     if (!receiverId) {
+//       throw createError(401, "Utilisateur non authentifié");
+//     }
+
 //     const amt = toFloat(amount ?? body.amountSource);
-//     if (!amt || Number.isNaN(amt) || amt <= 0) {
+
+//     if (!Number.isFinite(amt) || amt <= 0) {
 //       throw createError(400, "Montant invalide");
 //     }
 
@@ -690,7 +962,7 @@
 //     const sessOpts = maybeSessionOpts(session);
 
 //     const receiverUser = await User.findById(receiverId)
-//       .select("fullName email")
+//       .select(USER_CORRIDOR_SELECT)
 //       .lean()
 //       .session(sessOpts.session || null);
 
@@ -700,12 +972,56 @@
 
 //     const provider = resolveProviderForFlow(flow, body);
 //     const externalSourceMeta = buildRecipientExternalMeta(flow, body);
-//     const { country: resolvedCountry, fromCountry, toCountry } = resolveCountries(body, country);
-//     const { currencySourceISO, currencyTargetISO } = resolveCurrencies({
+
+//     const {
+//       country: resolvedCountry,
+//       fromCountry,
+//       toCountry,
+//     } = resolveCountries(body, country);
+
+//     let { currencySourceISO, currencyTargetISO } = resolveCurrencies({
 //       body,
 //       normCur,
 //       country: resolvedCountry,
 //     });
+
+//     currencySourceISO = normalizeCurrency(currencySourceISO);
+//     currencyTargetISO = normalizeCurrency(currencyTargetISO);
+
+//     const requestedSourceCountry =
+//       body.fromCountry ||
+//       body.sourceCountry ||
+//       body.country ||
+//       fromCountry ||
+//       resolvedCountry ||
+//       "";
+
+//     const requestedTargetCountry =
+//       body.toCountry ||
+//       body.destinationCountry ||
+//       body.targetCountry ||
+//       "";
+
+//     const corridorLock = validateInboundExternalCorridor({
+//       flow,
+//       body,
+//       receiverUser,
+//       fromCountry: requestedSourceCountry,
+//       toCountry: requestedTargetCountry || toCountry || "",
+//       currencySource: currencySourceISO,
+//       currencyTarget: currencyTargetISO,
+//     });
+
+//     currencySourceISO = corridorLock.lockedSourceCurrency;
+//     currencyTargetISO = corridorLock.lockedTargetCurrency;
+
+//     if (!currencySourceISO) {
+//       throw createError(400, "Devise source introuvable");
+//     }
+
+//     if (!currencyTargetISO) {
+//       throw createError(400, "Devise destination introuvable");
+//     }
 
 //     await validationService.detectBasicFraud({
 //       sender:
@@ -724,18 +1040,26 @@
 //     req.body.localCurrencyCode = currencyTargetISO;
 //     req.body.senderCurrencySymbol = currencySourceISO;
 //     req.body.localCurrencySymbol = currencyTargetISO;
-//     req.body.fromCountry = fromCountry;
-//     req.body.toCountry = toCountry;
-//     req.body.sourceCountry = fromCountry;
-//     req.body.targetCountry = toCountry;
-//     req.body.country = resolvedCountry;
+
+//     req.body.currencySource = currencySourceISO;
+//     req.body.currencyTarget = currencyTargetISO;
+//     req.body.fromCurrency = currencySourceISO;
+//     req.body.toCurrency = currencyTargetISO;
+
+//     req.body.fromCountry = corridorLock.lockedSourceCountry;
+//     req.body.toCountry = corridorLock.lockedTargetCountry;
+//     req.body.sourceCountry = corridorLock.lockedSourceCountry;
+//     req.body.targetCountry = corridorLock.lockedTargetCountry;
+//     req.body.destinationCountry = corridorLock.lockedTargetCountry;
+//     req.body.country = corridorLock.lockedTargetCountry;
+
 //     req.body.description = sanitize(description);
 
 //     const pricingCtx = await buildPricingContext({
 //       req,
 //       body,
 //       amount: amt,
-//       country: resolvedCountry,
+//       country: req.body.country,
 //       provider,
 //       currencySourceISO,
 //       currencyTargetISO,
@@ -744,23 +1068,27 @@
 //     const reference = sanitize(body.reference) || (await generateTransactionRef());
 //     const amlSnapshot = req.aml || null;
 //     const treasurySeed = resolveFeesTreasurySeed();
+//     const autoCancelFields = buildAutoCancelFields("processing");
 
 //     const txMeta = {
 //       ...((meta && typeof meta === "object") ? meta : {}),
 //       ...buildExternalMeta({
 //         receiverUser,
-//         body,
+//         body: req.body,
 //         extra: {
 //           entry: "external_collection.pending",
 //           requestOrigin: "tx-core",
 //           externalSource: externalSourceMeta,
 //           description: sanitize(description),
+//           corridorLock: corridorLock.snapshot,
 //           effectivePricingId:
 //             body.effectivePricingId ||
 //             body.pricingLockId ||
 //             body.pricingId ||
 //             body.quoteId ||
 //             null,
+//           autoCancelAt: autoCancelFields.autoCancelAt,
+//           autoCancelAfterDays: getAutoCancelAfterDays(),
 //         },
 //       }),
 //     };
@@ -770,28 +1098,47 @@
 //       ...buildExternalMetadata({
 //         flow,
 //         provider,
-//         body,
+//         body: req.body,
 //         extra: {
 //           providerReference: pickExternalRef(body),
 //           externalSource: externalSourceMeta,
+//           corridorLock: corridorLock.snapshot,
+//           autoCancelAt: autoCancelFields.autoCancelAt,
+//           autoCancelAfterDays: getAutoCancelAfterDays(),
 //         },
 //       }),
+//       corridorLock: corridorLock.snapshot,
+//       autoCancelAt: autoCancelFields.autoCancelAt,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
 //     };
+
+//     const fundsValue =
+//       flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
+//         ? "mobilemoney"
+//         : flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
+//         ? "bank"
+//         : provider === "visa_direct"
+//         ? "visa_direct"
+//         : "stripe";
 
 //     const [tx] = await Transaction.create(
 //       [
 //         {
 //           userId: receiverUser._id,
 //           internalImported: false,
+
 //           flow,
 //           operationKind: "transfer",
 //           initiatedBy: "user",
 //           context: "external_collection",
 //           contextId: null,
+
 //           reference,
 //           idempotencyKey: body.idempotencyKey || null,
+
 //           sender: null,
 //           receiver: receiverUser._id,
+
 //           senderName: sanitize(
 //             body.senderName ||
 //               body.accountHolder ||
@@ -801,40 +1148,52 @@
 //           senderEmail: null,
 //           nameDestinataire: receiverUser.fullName,
 //           recipientEmail: receiverUser.email,
+
 //           destination: "paynoval",
-//           funds:
-//             flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
-//               ? "mobilemoney"
-//               : flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
-//               ? "bank"
-//               : provider === "visa_direct"
-//               ? "visa_direct"
-//               : "stripe",
+//           funds: fundsValue,
 //           provider,
-//           operator: body.operator || body.operatorName || txMetadata?.provider || null,
-//           country: sanitize(resolvedCountry),
+//           operator:
+//             body.operator || body.operatorName || txMetadata?.provider || null,
+//           country: sanitize(corridorLock.lockedTargetCountry),
+
 //           amount: dec2(pricingCtx.amountSourceStd),
 //           transactionFees: dec2(pricingCtx.feeSourceStd),
 //           netAmount: dec2(pricingCtx.netFrom),
 //           exchangeRate: dec2(pricingCtx.rateUsed),
 //           localAmount: dec2(pricingCtx.amountTargetStd),
+
 //           senderCurrencySymbol: currencySourceISO,
 //           localCurrencySymbol: currencyTargetISO,
+
 //           amountSource: dec2(pricingCtx.amountSourceStd),
 //           amountTarget: dec2(pricingCtx.amountTargetStd),
 //           feeSource: dec2(pricingCtx.feeSourceStd),
 //           fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
 //           currencySource: currencySourceISO,
 //           currencyTarget: currencyTargetISO,
+
 //           money: {
-//             source: { amount: pricingCtx.amountSourceStd, currency: currencySourceISO },
-//             feeSource: { amount: pricingCtx.feeSourceStd, currency: currencySourceISO },
-//             target: { amount: pricingCtx.amountTargetStd, currency: currencyTargetISO },
+//             source: {
+//               amount: pricingCtx.amountSourceStd,
+//               currency: currencySourceISO,
+//             },
+//             feeSource: {
+//               amount: pricingCtx.feeSourceStd,
+//               currency: currencySourceISO,
+//             },
+//             target: {
+//               amount: pricingCtx.amountTargetStd,
+//               currency: currencyTargetISO,
+//             },
 //             fxRateSourceToTarget: pricingCtx.rateUsed,
 //           },
+
 //           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-//           pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
-//           pricingFxRuleApplied: pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+//           pricingRuleApplied:
+//             pricingCtx.pricingSnapshot?.ruleApplied || null,
+//           pricingFxRuleApplied:
+//             pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+
 //           feeSnapshot: {
 //             fee: pricingCtx.feeSourceStd,
 //             netAfterFees: pricingCtx.netFrom,
@@ -844,24 +1203,33 @@
 //           },
 //           feeActual: null,
 //           feeId: null,
+
 //           treasuryRevenue: pricingCtx.treasuryRevenue,
 //           treasuryRevenueCredited: false,
 //           treasuryRevenueCreditedAt: null,
 //           treasuryUserId: treasurySeed.treasuryUserId,
 //           treasurySystemType: treasurySeed.treasurySystemType,
 //           treasuryLabel: treasurySeed.treasuryLabel,
+
 //           securityQuestion: null,
 //           securityAnswerHash: null,
 //           securityCode: null,
+
 //           amlSnapshot,
 //           amlStatus: amlSnapshot?.status || "passed",
+
 //           description: sanitize(description),
 //           orderId: body.orderId || null,
+
 //           metadata: txMetadata,
 //           meta: txMeta,
+
 //           status: "processing",
 //           providerReference: pickExternalRef(body),
 //           providerStatus: "AWAITING_PROVIDER_PAYMENT",
+
+//           ...autoCancelFields,
+
 //           fundsReserved: false,
 //           fundsReservedAt: null,
 //           fundsCaptured: false,
@@ -891,6 +1259,8 @@
 //         transactionId: tx._id.toString(),
 //         reference: tx.reference,
 //         flow,
+//         corridorLock: corridorLock.snapshot,
+//         autoCancelAt: tx.autoCancelAt || null,
 //       },
 //       flagged: false,
 //       flagReason: "",
@@ -901,9 +1271,11 @@
 //     await notifyTransactionEvent(tx, "processing", session, currencyTargetISO);
 
 //     if (canUseSharedSession()) await session.commitTransaction();
+
 //     session.endSession();
 
 //     let execution = null;
+
 //     try {
 //       execution = await submitExternalExecution({
 //         req,
@@ -925,7 +1297,10 @@
 //       flow: tx.flow,
 //       status: execution?.status || tx.status,
 //       providerStatus: execution?.providerStatus || tx.providerStatus,
-//       providerReference: execution?.providerReference || tx.providerReference || null,
+//       providerReference:
+//         execution?.providerReference || tx.providerReference || null,
+//       autoCancelAt: tx.autoCancelAt || null,
+//       autoCancelAfterDays: getAutoCancelAfterDays(),
 //       pricing: {
 //         feeSource: pricingCtx.feeSourceStd,
 //         feeSourceCurrency: currencySourceISO,
@@ -939,12 +1314,22 @@
 //       },
 //       treasuryRevenue: pricingCtx.treasuryRevenue,
 //       externalSource: redactSensitiveFields(externalSourceMeta),
+//       corridorLock: corridorLock.snapshot,
 //       message: "Demande créée. En attente de confirmation provider.",
 //     });
 //   } catch (err) {
+//     logger.error("[TX-CORE][INBOUND] initiate failed", {
+//       message: err.message,
+//       code: err.code || null,
+//       details: err.details || null,
+//       status: err.status || err.statusCode || 500,
+//       flow: safeResolveFlow(req.body),
+//     });
+
 //     try {
 //       if (canUseSharedSession()) await session.abortTransaction();
 //     } catch {}
+
 //     session.endSession();
 //     next(err);
 //   }
@@ -960,6 +1345,9 @@
 
 
 
+
+
+// File: src/services/transactions/handlers/initiateExternalTransactions.js
 "use strict";
 
 const createError = require("http-errors");
@@ -1019,6 +1407,12 @@ const {
   validateInboundExternalCorridor,
 } = require("./corridorValidation");
 
+const {
+  assertUserCanTransact,
+  buildEligibilitySnapshot,
+  mergeEligibilityMetadata,
+} = require("../shared/transactionEligibility");
+
 const { submitExternalExecution } = require("./submitExternalExecution");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
@@ -1030,6 +1424,18 @@ const USER_CORRIDOR_SELECT = [
   "fullName",
   "email",
   "phone",
+  "phoneNumber",
+
+  "emailVerified",
+  "isEmailVerified",
+  "emailVerifiedAt",
+  "emailVerification",
+  "verifications",
+
+  "phoneVerified",
+  "isPhoneVerified",
+  "phoneVerifiedAt",
+  "phoneVerification",
 
   "country",
   "countryCode",
@@ -1044,6 +1450,8 @@ const USER_CORRIDOR_SELECT = [
   "managedCurrency",
 
   "userType",
+  "type",
+  "accountType",
   "role",
   "isBusiness",
   "isSystem",
@@ -1054,23 +1462,38 @@ const USER_CORRIDOR_SELECT = [
   "staffStatus",
 
   "isBlocked",
+  "blocked",
   "isLoginDisabled",
   "hiddenFromTransfers",
   "hiddenFromUserSearch",
   "hiddenFromUserApp",
+  "frozenUntil",
 
   "kycStatus",
+  "kycLevel",
   "kybStatus",
+  "businessStatus",
+  "businessKYBLevel",
 
   "kyc",
   "kyb",
+  "business",
   "profile",
   "address",
   "wallet",
 
+  "kycVerified",
+  "isKycVerified",
+  "kybVerified",
+  "isKybVerified",
+
   "isDeleted",
   "deletedAt",
 ].join(" ");
+
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
 
 function normalizeStatus(status) {
   return String(status || "")
@@ -1449,6 +1872,27 @@ function safeResolveFlow(body) {
   }
 }
 
+function buildOutboundEligibilitySnapshot({ req, senderUser, senderEligibility }) {
+  return {
+    requester:
+      req.transactionEligibility?.user ||
+      senderEligibility.snapshot ||
+      buildEligibilitySnapshot(senderUser),
+    sender: senderEligibility.snapshot || buildEligibilitySnapshot(senderUser),
+  };
+}
+
+function buildInboundEligibilitySnapshot({ req, receiverUser, receiverEligibility }) {
+  return {
+    requester:
+      req.transactionEligibility?.user ||
+      receiverEligibility.snapshot ||
+      buildEligibilitySnapshot(receiverUser),
+    receiver:
+      receiverEligibility.snapshot || buildEligibilitySnapshot(receiverUser),
+  };
+}
+
 async function initiateOutboundExternal(req, res, next) {
   const session = await startTxSession();
 
@@ -1509,6 +1953,17 @@ async function initiateOutboundExternal(req, res, next) {
     if (!senderUser) {
       throw createError(403, "Utilisateur invalide");
     }
+
+    const senderEligibility = assertUserCanTransact(senderUser, {
+      roleLabel: "expéditeur",
+      codePrefix: "SENDER",
+    });
+
+    const eligibilitySnapshot = buildOutboundEligibilitySnapshot({
+      req,
+      senderUser,
+      senderEligibility,
+    });
 
     const provider = resolveProviderForFlow(flow, body);
     const externalRecipientMeta = buildRecipientExternalMeta(flow, body);
@@ -1608,8 +2063,8 @@ async function initiateOutboundExternal(req, res, next) {
     const treasurySeed = resolveFeesTreasurySeed();
     const autoCancelFields = buildAutoCancelFields("pending");
 
-    const txMeta = {
-      ...((meta && typeof meta === "object") ? meta : {}),
+    const txMetaBase = {
+      ...(isPlainObject(meta) ? meta : {}),
       ...buildExternalMeta({
         senderUser,
         body: req.body,
@@ -1632,8 +2087,10 @@ async function initiateOutboundExternal(req, res, next) {
       }),
     };
 
-    const txMetadata = {
-      ...((metadata && typeof metadata === "object") ? metadata : {}),
+    const txMeta = mergeEligibilityMetadata(txMetaBase, eligibilitySnapshot);
+
+    const txMetadataBase = {
+      ...(isPlainObject(metadata) ? metadata : {}),
       ...buildExternalMetadata({
         flow,
         provider,
@@ -1650,6 +2107,11 @@ async function initiateOutboundExternal(req, res, next) {
       autoCancelAt: autoCancelFields.autoCancelAt,
       autoCancelAfterDays: getAutoCancelAfterDays(),
     };
+
+    const txMetadata = mergeEligibilityMetadata(
+      txMetadataBase,
+      eligibilitySnapshot
+    );
 
     const destinationValue =
       flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
@@ -1721,8 +2183,7 @@ async function initiateOutboundExternal(req, res, next) {
           },
 
           pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-          pricingRuleApplied:
-            pricingCtx.pricingSnapshot?.ruleApplied || null,
+          pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
           pricingFxRuleApplied:
             pricingCtx.pricingSnapshot?.fxRuleApplied || null,
 
@@ -1812,6 +2273,15 @@ async function initiateOutboundExternal(req, res, next) {
         flow,
         corridorLock: corridorLock.snapshot,
         autoCancelAt: tx.autoCancelAt || null,
+        eligibility: {
+          sender: {
+            emailVerified: eligibilitySnapshot.sender.emailVerified,
+            phoneVerified: eligibilitySnapshot.sender.phoneVerified,
+            kycVerified: eligibilitySnapshot.sender.kycVerified,
+            kybVerified: eligibilitySnapshot.sender.kybVerified,
+            accountStatus: eligibilitySnapshot.sender.accountStatus,
+          },
+        },
       },
       flagged: false,
       flagReason: "",
@@ -1932,6 +2402,17 @@ async function initiateInboundExternal(req, res, next) {
       throw createError(403, "Utilisateur invalide");
     }
 
+    const receiverEligibility = assertUserCanTransact(receiverUser, {
+      roleLabel: "destinataire",
+      codePrefix: "RECEIVER",
+    });
+
+    const eligibilitySnapshot = buildInboundEligibilitySnapshot({
+      req,
+      receiverUser,
+      receiverEligibility,
+    });
+
     const provider = resolveProviderForFlow(flow, body);
     const externalSourceMeta = buildRecipientExternalMeta(flow, body);
 
@@ -2032,8 +2513,8 @@ async function initiateInboundExternal(req, res, next) {
     const treasurySeed = resolveFeesTreasurySeed();
     const autoCancelFields = buildAutoCancelFields("processing");
 
-    const txMeta = {
-      ...((meta && typeof meta === "object") ? meta : {}),
+    const txMetaBase = {
+      ...(isPlainObject(meta) ? meta : {}),
       ...buildExternalMeta({
         receiverUser,
         body: req.body,
@@ -2055,8 +2536,10 @@ async function initiateInboundExternal(req, res, next) {
       }),
     };
 
-    const txMetadata = {
-      ...((metadata && typeof metadata === "object") ? metadata : {}),
+    const txMeta = mergeEligibilityMetadata(txMetaBase, eligibilitySnapshot);
+
+    const txMetadataBase = {
+      ...(isPlainObject(metadata) ? metadata : {}),
       ...buildExternalMetadata({
         flow,
         provider,
@@ -2073,6 +2556,11 @@ async function initiateInboundExternal(req, res, next) {
       autoCancelAt: autoCancelFields.autoCancelAt,
       autoCancelAfterDays: getAutoCancelAfterDays(),
     };
+
+    const txMetadata = mergeEligibilityMetadata(
+      txMetadataBase,
+      eligibilitySnapshot
+    );
 
     const fundsValue =
       flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
@@ -2223,6 +2711,15 @@ async function initiateInboundExternal(req, res, next) {
         flow,
         corridorLock: corridorLock.snapshot,
         autoCancelAt: tx.autoCancelAt || null,
+        eligibility: {
+          receiver: {
+            emailVerified: eligibilitySnapshot.receiver.emailVerified,
+            phoneVerified: eligibilitySnapshot.receiver.phoneVerified,
+            kycVerified: eligibilitySnapshot.receiver.kycVerified,
+            kybVerified: eligibilitySnapshot.receiver.kybVerified,
+            accountStatus: eligibilitySnapshot.receiver.accountStatus,
+          },
+        },
       },
       flagged: false,
       flagReason: "",
