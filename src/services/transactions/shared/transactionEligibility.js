@@ -371,6 +371,82 @@ function buildEligibilitySnapshot(user = {}) {
   };
 }
 
+/**
+ * Contrôle spécial réception interne :
+ * à l’initiation d’un transfert PayNoval → PayNoval, le destinataire doit
+ * exister et être recevable, mais on ne bloque pas l’expéditeur parce que
+ * le destinataire n’a pas encore email/phone/KYC/KYB finalisé.
+ *
+ * La vérification complète du destinataire reste faite au moment de confirmer
+ * ou de créditer définitivement la transaction.
+ */
+function buildReceiveTransferFailures(user = {}) {
+  const failures = [];
+
+  if (!user || typeof user !== "object" || !user._id) {
+    failures.push({
+      code: "RECEIVER_PROFILE_NOT_FOUND",
+      status: 401,
+      message: "Profil destinataire introuvable.",
+    });
+
+    return failures;
+  }
+
+  if (user.isSystem === true || user.systemType) {
+    failures.push({
+      code: "RECEIVER_SYSTEM_ACCOUNT_NOT_ALLOWED",
+      status: 403,
+      message:
+        "Le destinataire est un compte système et ne peut pas recevoir ce transfert.",
+    });
+  }
+
+  if (isAccountBlocked(user)) {
+    failures.push({
+      code: "RECEIVER_ACCOUNT_BLOCKED",
+      status: 403,
+      message:
+        "Le compte destinataire est bloqué, gelé, suspendu ou inactif.",
+    });
+  }
+
+  if (isPendingStatus(user.accountStatus)) {
+    failures.push({
+      code: "RECEIVER_ACCOUNT_PENDING",
+      status: 403,
+      message: "Le compte destinataire est en attente d’activation complète.",
+    });
+  }
+
+  return failures;
+}
+
+function assertUserCanReceiveInternalTransfer(user = {}, options = {}) {
+  const roleLabel = options.roleLabel || "destinataire";
+  const failures = buildReceiveTransferFailures(user);
+
+  if (!failures.length) {
+    return {
+      ok: true,
+      snapshot: buildEligibilitySnapshot(user),
+    };
+  }
+
+  const first = failures[0];
+
+  const err = createError(
+    first.status || 403,
+    `${roleLabel}: ${first.message}`
+  );
+
+  err.code = first.code;
+  err.details = failures;
+  err.requiresVerification = false;
+
+  throw err;
+}
+
 function assertUserCanTransact(user = {}, options = {}) {
   const roleLabel = options.roleLabel || "utilisateur";
   const failures = buildEligibilityFailures(user);
@@ -428,4 +504,6 @@ module.exports = {
   isKycVerified,
   isKybVerified,
   isAccountBlocked,
+  buildReceiveTransferFailures,
+  assertUserCanReceiveInternalTransfer,
 };
