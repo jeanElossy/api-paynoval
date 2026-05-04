@@ -258,13 +258,9 @@ const {
 const { createSandboxTransaction } = require("../../sandboxTransaction.service");
 
 /**
- * Chemin attendu si ce fichier est ici :
- * src/services/transactions/handlers/initiateByFlow.js
- *
- * Et si tes helpers sont ici :
  * utils/sandboxUser.js
  */
-const { isSandboxUser } = require("../../../../utils/sandboxUser");
+const { isSandboxUser } = require("../../../utils/sandboxUser");
 
 function norm(v) {
   return String(v || "").trim().toLowerCase();
