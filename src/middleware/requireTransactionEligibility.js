@@ -20,6 +20,7 @@ const {
  * Rôle :
  * - dernière barrière côté tx-core
  * - recharge TOUJOURS le profil frais depuis users-main
+ * - réhydrate req.user avec le profil frais pour les middlewares suivants
  * - refuse initiate/confirm si :
  *   - email non vérifié
  *   - téléphone non vérifié
@@ -105,7 +106,6 @@ function buildResponseError(err) {
   };
 }
 
-
 function buildDebugUserSnapshot(user = null) {
   if (!user) return null;
 
@@ -165,6 +165,75 @@ function buildDebugUserSnapshot(user = null) {
   };
 }
 
+function hydrateReqUserFromFreshProfile(req, user, snapshot) {
+  const userId = cleanString(user?._id || user?.id);
+
+  const hydrated = {
+    ...(ensurePlainObject(req.user) ? req.user : {}),
+
+    _id: user._id,
+    id: userId,
+    userId,
+
+    fullName: user.fullName || req.user?.fullName || "",
+    email: user.email || req.user?.email || "",
+    phone: user.phone || user.phoneNumber || req.user?.phone || "",
+
+    role: user.role || req.user?.role || "user",
+    userType: user.userType || user.type || user.accountType || req.user?.userType,
+    accountType: user.accountType || req.user?.accountType,
+    isBusiness: user.isBusiness === true,
+
+    accountStatus: user.accountStatus || user.status || "active",
+    status: user.status || user.accountStatus || "active",
+
+    emailVerified: snapshot.emailVerified === true,
+    isEmailVerified: snapshot.emailVerified === true,
+
+    phoneVerified: snapshot.phoneVerified === true,
+    isPhoneVerified: snapshot.phoneVerified === true,
+
+    kycStatus: user.kycStatus,
+    kycLevel: user.kycLevel,
+    kycVerified: snapshot.kycVerified === true,
+    isKycVerified: snapshot.kycVerified === true,
+
+    kybStatus: user.kybStatus,
+    businessStatus: user.businessStatus,
+    businessKYBLevel: user.businessKYBLevel,
+    kybVerified: snapshot.kybVerified === true,
+    isKybVerified: snapshot.kybVerified === true,
+
+    isBlocked: user.isBlocked === true,
+    blocked: user.blocked === true,
+    isLoginDisabled: user.isLoginDisabled === true,
+    hiddenFromTransfers: user.hiddenFromTransfers === true,
+
+    isSystem: user.isSystem === true,
+    systemType: user.systemType || null,
+
+    isDeleted: user.isDeleted === true,
+    deletedAt: user.deletedAt || null,
+  };
+
+  req.user = hydrated;
+
+  if (ensurePlainObject(req.auth)) {
+    req.auth = {
+      ...req.auth,
+      _id: user._id,
+      id: userId,
+      userId,
+      email: hydrated.email,
+      emailVerified: hydrated.emailVerified,
+      phoneVerified: hydrated.phoneVerified,
+      kycVerified: hydrated.kycVerified,
+      kybVerified: hydrated.kybVerified,
+      accountStatus: hydrated.accountStatus,
+    };
+  }
+}
+
 async function findFreshUser(req) {
   const User = runtime.User;
 
@@ -192,11 +261,6 @@ async function findFreshUser(req) {
     user = await User.findById(requesterId).select(select).lean();
   }
 
-  /**
-   * Sécurité + robustesse :
-   * Si le token contient aussi un email et que l'id ne correspond pas au même
-   * email, on recharge le profil par email pour éviter un mauvais snapshot.
-   */
   if (
     user &&
     requesterEmail &&
@@ -215,10 +279,6 @@ async function findFreshUser(req) {
     }
   }
 
-  /**
-   * Fallback si l'id est absent ou mal normalisé mais que l'email authentifié
-   * est disponible.
-   */
   if (!user && requesterEmail) {
     user = await User.findOne({
       email: requesterEmail,
@@ -263,6 +323,8 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
 
     const requesterSnapshot = result.snapshot || snapshot;
 
+    hydrateReqUserFromFreshProfile(req, user, requesterSnapshot);
+
     req.transactionEligibility = {
       ok: true,
       checkedAt: new Date().toISOString(),
@@ -282,6 +344,18 @@ module.exports = async function requireTransactionEligibility(req, res, next) {
     });
 
     req.body = body;
+
+    try {
+      logger.info?.("[TX ELIGIBILITY] req.user hydrated", {
+        userId: req.user?.id || req.user?._id || null,
+        email: req.user?.email || null,
+        emailVerified: req.user?.emailVerified,
+        phoneVerified: req.user?.phoneVerified,
+        kycVerified: req.user?.kycVerified,
+        kybVerified: req.user?.kybVerified,
+        path: req.originalUrl || req.url,
+      });
+    } catch {}
 
     return next();
   } catch (err) {
