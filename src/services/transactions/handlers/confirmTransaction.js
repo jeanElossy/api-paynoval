@@ -1,3 +1,5 @@
+
+// // File: src/services/transactions/handlers/confirmTransaction.js
 // "use strict";
 
 // const createError = require("http-errors");
@@ -37,6 +39,10 @@
 //   validatePaynovalUserProfile,
 // } = require("./corridorValidation");
 
+// const {
+//   assertUserCanTransact,
+// } = require("../shared/transactionEligibility");
+
 // const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
 
 // const OUTBOUND_EXTERNAL_FLOWS = new Set([
@@ -59,6 +65,18 @@
 //   "fullName",
 //   "email",
 //   "phone",
+//   "phoneNumber",
+
+//   "emailVerified",
+//   "isEmailVerified",
+//   "emailVerifiedAt",
+//   "emailVerification",
+//   "verifications",
+
+//   "phoneVerified",
+//   "isPhoneVerified",
+//   "phoneVerifiedAt",
+//   "phoneVerification",
 
 //   "country",
 //   "countryCode",
@@ -73,6 +91,8 @@
 //   "managedCurrency",
 
 //   "userType",
+//   "type",
+//   "accountType",
 //   "role",
 //   "isBusiness",
 //   "isSystem",
@@ -83,19 +103,30 @@
 //   "staffStatus",
 
 //   "isBlocked",
+//   "blocked",
 //   "isLoginDisabled",
 //   "hiddenFromTransfers",
 //   "hiddenFromUserSearch",
 //   "hiddenFromUserApp",
+//   "frozenUntil",
 
 //   "kycStatus",
+//   "kycLevel",
 //   "kybStatus",
+//   "businessStatus",
+//   "businessKYBLevel",
 
 //   "kyc",
 //   "kyb",
+//   "business",
 //   "profile",
 //   "address",
 //   "wallet",
+
+//   "kycVerified",
+//   "isKycVerified",
+//   "kybVerified",
+//   "isKybVerified",
 
 //   "isDeleted",
 //   "deletedAt",
@@ -298,6 +329,16 @@
 //         .session(session || null),
 //     ]);
 
+//     assertUserCanTransact(senderUser, {
+//       roleLabel: "expéditeur",
+//       codePrefix: "SENDER",
+//     });
+
+//     assertUserCanTransact(receiverUser, {
+//       roleLabel: "destinataire",
+//       codePrefix: "RECEIVER",
+//     });
+
 //     assertUserStillMatchesLock({
 //       user: senderUser,
 //       expectedCountry: lock.sourceCountry,
@@ -322,6 +363,11 @@
 //       .select(USER_CORRIDOR_SELECT)
 //       .lean()
 //       .session(session || null);
+
+//     assertUserCanTransact(senderUser, {
+//       roleLabel: "expéditeur",
+//       codePrefix: "SENDER",
+//     });
 
 //     assertUserStillMatchesLock({
 //       user: senderUser,
@@ -496,7 +542,7 @@
 //     if (isInternalTransfer(tx)) {
 //       assertTransition(tx.status, "confirmed");
 
-//       if (String(tx.receiver) !== String(req.user.id)) {
+//       if (String(tx.receiver) !== String(req.user.id || req.user._id)) {
 //         throw createError(
 //           403,
 //           "Vous n’êtes pas le destinataire de cette transaction"
@@ -511,7 +557,7 @@
 //         throw createError(409, "Transaction non confirmable dans son état actuel");
 //       }
 
-//       if (String(tx.sender) !== String(req.user.id)) {
+//       if (String(tx.sender) !== String(req.user.id || req.user._id)) {
 //         throw createError(
 //           403,
 //           "Vous n’êtes pas autorisé à confirmer cette transaction"
@@ -790,9 +836,7 @@ const {
   validatePaynovalUserProfile,
 } = require("./corridorValidation");
 
-const {
-  assertUserCanTransact,
-} = require("../shared/transactionEligibility");
+const { assertUserCanTransact } = require("../shared/transactionEligibility");
 
 const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
 
@@ -938,6 +982,125 @@ function getCorridorLock(tx) {
     tx?.meta?.extra?.corridorLock ||
     null
   );
+}
+
+function isSandboxTx(tx) {
+  return Boolean(
+    tx?.isSandbox === true ||
+      String(tx?.provider || "").toLowerCase() === "sandbox" ||
+      String(tx?.channel || "").toLowerCase() === "sandbox" ||
+      tx?.metadata?.source === "apple_review_sandbox" ||
+      tx?.meta?.source === "apple_review_sandbox" ||
+      tx?.meta?.sandbox === true ||
+      tx?.metadata?.sandbox === true
+  );
+}
+
+function getAuthedUserId(req) {
+  return String(req.user?.id || req.user?._id || req.user?.userId || "").trim();
+}
+
+function assertSandboxOwner({ req, tx }) {
+  const userId = getAuthedUserId(req);
+
+  const allowedIds = [
+    tx?.sender,
+    tx?.receiver,
+    tx?.receiverUserId,
+    tx?.createdBy,
+    tx?.ownerUserId,
+    tx?.userId,
+    tx?.user,
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+
+  if (!userId || !allowedIds.includes(userId)) {
+    throw createError(
+      403,
+      "Vous n’êtes pas autorisé à confirmer cette transaction."
+    );
+  }
+}
+
+function normalizeStatus(status) {
+  return String(status || "").trim().toLowerCase();
+}
+
+function isFinalNegativeStatus(status) {
+  return ["cancelled", "canceled", "failed", "refunded", "reversed"].includes(
+    normalizeStatus(status)
+  );
+}
+
+async function handleSandboxConfirm({ req, res, tx, sessOpts, session }) {
+  assertSandboxOwner({ req, tx });
+
+  if (isFinalNegativeStatus(tx.status)) {
+    throw createError(
+      410,
+      "Cette transaction sandbox n’est plus confirmable."
+    );
+  }
+
+  const now = new Date();
+
+  tx.status = tx.status || "completed";
+  if (["pending", "processing", "initiated", "pending_review", "relaunch"].includes(normalizeStatus(tx.status))) {
+    tx.status = "completed";
+  }
+
+  tx.provider = "sandbox";
+  tx.channel = "sandbox";
+  tx.providerStatus = tx.providerStatus || "sandbox_completed";
+  tx.providerReference =
+    tx.providerReference ||
+    `SBX-CONFIRM-${String(tx._id || "").slice(-8).toUpperCase()}`;
+
+  tx.confirmedAt = tx.confirmedAt || now;
+  tx.executedAt = tx.executedAt || now;
+  tx.completedAt = tx.completedAt || now;
+
+  tx.isSandbox = true;
+  tx.fundsCaptured = tx.fundsCaptured === true ? true : true;
+
+  tx.metadata = {
+    ...(tx.metadata || {}),
+    sandbox: true,
+    sandboxConfirm: {
+      skipped: true,
+      reason: "APPLE_REVIEW_SANDBOX_ALREADY_SIMULATED",
+      at: now.toISOString(),
+    },
+  };
+
+  tx.meta = {
+    ...(tx.meta || {}),
+    sandbox: true,
+    providerExecutionSkipped: true,
+  };
+
+  await tx.save(sessOpts);
+
+  if (canUseSharedSession()) {
+    await session.commitTransaction();
+  }
+
+  await endQuietly(session);
+
+  return res.json({
+    success: true,
+    sandbox: true,
+    transactionId: tx._id.toString(),
+    reference: tx.reference,
+    flow: tx.flow,
+    status: tx.status,
+    providerStatus: tx.providerStatus,
+    providerReference: tx.providerReference,
+    fundsCaptured: !!tx.fundsCaptured,
+    beneficiaryCredited: !!tx.beneficiaryCredited,
+    message: "Transaction sandbox déjà simulée avec succès.",
+  });
 }
 
 function assertCorridorLockIsValid(tx) {
@@ -1131,7 +1294,7 @@ async function assertCurrentProfilesStillMatchCorridor({ tx, lock, session }) {
 }
 
 function isAlreadyAutoCancelledOrFinal(tx) {
-  const status = String(tx?.status || "").trim().toLowerCase();
+  const status = normalizeStatus(tx?.status);
 
   return (
     !!tx?.autoCancelledAt ||
@@ -1180,8 +1343,8 @@ async function confirmController(req, res, next) {
     const { transactionId, securityAnswer, securityCode } = req.body || {};
     const provided = sanitize(securityAnswer || securityCode || "");
 
-    if (!transactionId || !provided) {
-      throw createError(400, "transactionId et securityAnswer sont requis");
+    if (!transactionId) {
+      throw createError(400, "transactionId requis");
     }
 
     const authHeader = req.headers.authorization;
@@ -1197,8 +1360,10 @@ async function confirmController(req, res, next) {
         "+userId",
         "+flow",
         "+provider",
+        "+channel",
         "+providerStatus",
         "+providerReference",
+        "+isSandbox",
         "+securityAnswerHash",
         "+securityCode",
 
@@ -1213,7 +1378,11 @@ async function confirmController(req, res, next) {
         "+money",
 
         "+receiver",
+        "+receiverUserId",
         "+sender",
+        "+createdBy",
+        "+ownerUserId",
+        "+user",
 
         "+feeSnapshot",
         "+attemptCount",
@@ -1235,12 +1404,15 @@ async function confirmController(req, res, next) {
 
         "+fundsReserved",
         "+fundsCaptured",
+        "+fundsCapturedAt",
         "+beneficiaryCredited",
+        "+beneficiaryCreditedAt",
         "+reserveReleased",
 
         "+reference",
         "+confirmedAt",
         "+executedAt",
+        "+completedAt",
 
         "+autoCancelAt",
         "+autoCancelledAt",
@@ -1256,6 +1428,20 @@ async function confirmController(req, res, next) {
 
     if (!tx) {
       throw createError(404, "Transaction introuvable");
+    }
+
+    if (isSandboxTx(tx)) {
+      return handleSandboxConfirm({
+        req,
+        res,
+        tx,
+        sessOpts,
+        session,
+      });
+    }
+
+    if (!provided) {
+      throw createError(400, "securityAnswer est requis");
     }
 
     const now = new Date();
@@ -1293,7 +1479,7 @@ async function confirmController(req, res, next) {
     if (isInternalTransfer(tx)) {
       assertTransition(tx.status, "confirmed");
 
-      if (String(tx.receiver) !== String(req.user.id || req.user._id)) {
+      if (String(tx.receiver) !== getAuthedUserId(req)) {
         throw createError(
           403,
           "Vous n’êtes pas le destinataire de cette transaction"
@@ -1302,13 +1488,13 @@ async function confirmController(req, res, next) {
     } else if (isOutboundExternalPayout(tx)) {
       if (
         !["pending", "pending_review", "relaunch"].includes(
-          String(tx.status || "")
+          normalizeStatus(tx.status)
         )
       ) {
         throw createError(409, "Transaction non confirmable dans son état actuel");
       }
 
-      if (String(tx.sender) !== String(req.user.id || req.user._id)) {
+      if (String(tx.sender) !== getAuthedUserId(req)) {
         throw createError(
           403,
           "Vous n’êtes pas autorisé à confirmer cette transaction"
