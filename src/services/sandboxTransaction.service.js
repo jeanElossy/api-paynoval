@@ -2,7 +2,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
-const runtime = require("../services/transactions/shared/runtime");
+const runtime = require("./transactions/shared/runtime");
 
 const { isSandboxUser, resolveUserId } = require("../utils/sandboxUser");
 
@@ -10,7 +10,7 @@ const {
   resolveExternalFlow,
   isOutboundExternalFlow,
   isInboundExternalFlow,
-} = require("./flowHelpers");
+} = require("./transactions/handlers/flowHelpers");
 
 function loadModel(modPath) {
   const mod = require(modPath);
@@ -22,7 +22,7 @@ function loadModel(modPath) {
 }
 
 const TxWalletBalance =
-  runtime.TxWalletBalance || loadModel("../../../models/TxWalletBalance");
+  runtime.TxWalletBalance || loadModel("../models/TxWalletBalance");
 
 function normalizeCurrency(value) {
   return String(value || "CAD").trim().toUpperCase();
