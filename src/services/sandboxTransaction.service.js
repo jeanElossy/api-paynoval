@@ -1,10 +1,10 @@
-// File: src/services/transactions/handlers/sandboxTransaction.service.js
+// File: src/services/sandboxTransaction.service.js
 "use strict";
 
 const mongoose = require("mongoose");
-const runtime = require("./transactions/shared/runtime");
 
-const { isSandboxUser, resolveUserId } = require("../utils/sandboxUser");
+const runtime = require("./transactions/shared/runtime");
+const db = require("../config/db");
 
 const {
   resolveExternalFlow,
@@ -12,20 +12,58 @@ const {
   isInboundExternalFlow,
 } = require("./transactions/handlers/flowHelpers");
 
-function loadModel(modPath) {
-  const mod = require(modPath);
-
-  if (mod && typeof mod === "function" && mod.modelName) return mod;
-  if (typeof mod === "function" && !mod.modelName) return mod();
-
-  return mod;
-}
-
-const TxWalletBalance =
-  runtime.TxWalletBalance || loadModel("../models/TxWalletBalance");
+const {
+  isSandboxUser,
+  isAppleReviewUserId,
+  resolveUserId,
+} = require("../utils/sandboxUser");
 
 function normalizeCurrency(value) {
-  return String(value || "CAD").trim().toUpperCase();
+  const s = String(value || "CAD").trim().toUpperCase();
+
+  if (s === "FCFA" || s === "CFA") return "XOF";
+  if (s === "$CAD") return "CAD";
+  if (s === "$USD") return "USD";
+
+  return s || "CAD";
+}
+
+function currencyDecimals(currency = "CAD") {
+  return ["XOF", "XAF", "JPY"].includes(normalizeCurrency(currency)) ? 0 : 2;
+}
+
+function roundCurrency(amount, currency = "CAD") {
+  const n = Number(amount || 0);
+  const safe = Number.isFinite(n) ? n : 0;
+  return Number(safe.toFixed(currencyDecimals(currency)));
+}
+
+function toDecimal128(amount, currency = "CAD") {
+  const rounded = roundCurrency(amount, currency);
+
+  return mongoose.Types.Decimal128.fromString(
+    rounded.toFixed(currencyDecimals(currency))
+  );
+}
+
+function decimalToNumber(value) {
+  if (value == null) return 0;
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === "object" && typeof value.$numberDecimal === "string") {
+    const n = Number(value.$numberDecimal);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  if (typeof value.toString === "function") {
+    const n = Number(value.toString());
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  return 0;
 }
 
 function normalizeAmount(value) {
@@ -41,40 +79,88 @@ function normalizeAmount(value) {
   return n;
 }
 
-function currencyDecimals(currency = "CAD") {
-  return ["XOF", "XAF", "JPY"].includes(normalizeCurrency(currency)) ? 0 : 2;
+function norm(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
-function roundCurrency(amount, currency = "CAD") {
-  const decimals = currencyDecimals(currency);
-  const n = Number(amount || 0);
-  const safe = Number.isFinite(n) ? n : 0;
-  return Number(safe.toFixed(decimals));
-}
+function getTxModelSafe(modelName) {
+  try {
+    if (typeof runtime?.getTxModel === "function") {
+      const model = runtime.getTxModel(modelName);
+      if (model?.modelName === modelName) return model;
+    }
+  } catch (_) {}
 
-function toDecimal128(amount, currency = "CAD") {
-  const rounded = roundCurrency(amount, currency);
-  return mongoose.Types.Decimal128.fromString(
-    rounded.toFixed(currencyDecimals(currency))
+  try {
+    const direct = runtime?.[modelName];
+    if (direct?.modelName === modelName) return direct;
+  } catch (_) {}
+
+  try {
+    const model = db.getTxModel(modelName);
+    if (model?.modelName === modelName) return model;
+  } catch (_) {}
+
+  const error = new Error(
+    `${modelName} model indisponible sur la connexion transactions.`
   );
+  error.status = 500;
+  error.statusCode = 500;
+  throw error;
 }
 
-function decimalToNumber(value) {
-  if (value == null) return 0;
+function getTransactionModel() {
+  return getTxModelSafe("Transaction");
+}
 
-  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+function getTxWalletBalanceModel() {
+  return getTxModelSafe("TxWalletBalance");
+}
 
-  if (typeof value === "object" && value.$numberDecimal) {
-    const n = Number(value.$numberDecimal);
-    return Number.isFinite(n) ? n : 0;
+function modelHasPath(Model, path) {
+  try {
+    return Boolean(Model?.schema?.path(path));
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildWalletUserOrQuery(Model, userId) {
+  const or = [];
+
+  if (modelHasPath(Model, "user")) {
+    or.push({ user: userId });
   }
 
-  const n = Number(value.toString());
-  return Number.isFinite(n) ? n : 0;
+  if (modelHasPath(Model, "userId")) {
+    or.push({ userId });
+  }
+
+  if (modelHasPath(Model, "ownerUserId")) {
+    or.push({ ownerUserId: userId });
+  }
+
+  if (!or.length) {
+    or.push({ user: userId });
+  }
+
+  return or;
 }
 
-function norm(v) {
-  return String(v || "").trim().toLowerCase();
+function buildWalletUserPayload(Model, userId) {
+  const payload = {};
+
+  if (modelHasPath(Model, "user")) {
+    payload.user = userId;
+  } else if (modelHasPath(Model, "userId")) {
+    payload.userId = userId;
+  } else if (modelHasPath(Model, "ownerUserId")) {
+    payload.ownerUserId = userId;
+  } else {
+    payload.user = userId;
+  }
+
+  return payload;
 }
 
 function isInternalSandboxFlow(body = {}) {
@@ -120,7 +206,7 @@ function resolveSandboxFlowType(body = {}) {
 
   return {
     type: "generic",
-    flow: body.flow || "SANDBOX_APPLE_REVIEW",
+    flow: body.flow || body.meta?.flow || "SANDBOX_APPLE_REVIEW",
     walletAction: "debit",
   };
 }
@@ -136,6 +222,7 @@ function pickAmount(body = {}) {
     body.amount ||
     body.netAmount ||
     body.amountTarget ||
+    body.localAmount ||
     body.money?.source?.amount ||
     body.money?.target?.amount ||
     0
@@ -155,44 +242,145 @@ function pickCurrency(body = {}, user = {}) {
 }
 
 function buildRecipientSnapshot(body = {}) {
+  const rawCard = String(body.cardNumber || body.beneficiary?.cardNumber || "")
+    .replace(/\D/g, "");
+
   return {
+    receiverId:
+      body.receiverId ||
+      body.receiverUserId ||
+      body.recipientInfo?.receiverId ||
+      body.meta?.resolvedPaynovalRecipient?.receiverId ||
+      null,
+
     email:
       body.toEmail ||
       body.recipientEmail ||
       body.recipientInfo?.email ||
       body.beneficiary?.email ||
+      body.meta?.recipientEmail ||
+      body.meta?.toEmail ||
       null,
+
     name:
       body.recipientName ||
       body.toName ||
       body.recipientInfo?.name ||
+      body.recipientInfo?.accountHolderName ||
       body.beneficiary?.name ||
+      body.meta?.resolvedPaynovalRecipient?.fullName ||
       null,
+
     phone:
       body.phoneNumber ||
       body.toPhone ||
       body.recipientPhone ||
       body.beneficiary?.phoneNumber ||
+      body.meta?.resolvedPaynovalRecipient?.phone ||
       null,
+
     operator:
       body.operator ||
       body.operatorName ||
       body.provider ||
       body.providerSelected ||
       null,
+
     bankName: body.bankName || body.beneficiary?.bankName || null,
-    cardLast4: body.cardNumber
-      ? String(body.cardNumber).replace(/\D/g, "").slice(-4)
-      : null,
+
+    cardLast4: rawCard.length >= 4 ? rawCard.slice(-4) : null,
+
+    country:
+      body.recipientInfo?.country ||
+      body.meta?.resolvedPaynovalRecipient?.country ||
+      body.toCountry ||
+      body.destinationCountry ||
+      null,
+
+    currency:
+      body.recipientInfo?.currency ||
+      body.meta?.resolvedPaynovalRecipient?.currency ||
+      body.currencyTarget ||
+      body.localCurrencyCode ||
+      null,
   };
 }
 
-async function getSandboxWallet({ userId, currency }) {
-  const wallet = await TxWalletBalance.findOne({
-    user: userId,
+async function autoCreateAppleReviewWallet({ Model, userId, currency }) {
+  if (!isAppleReviewUserId(userId)) {
+    return null;
+  }
+
+  const rawBalance =
+    process.env.APPLE_REVIEW_SANDBOX_BALANCE_CAD ||
+    process.env.APPLE_REVIEW_SANDBOX_BALANCE ||
+    1000;
+
+  const balance = Number(rawBalance);
+  const safeBalance = Number.isFinite(balance) && balance >= 0 ? balance : 1000;
+  const now = new Date();
+
+  const userPayload = buildWalletUserPayload(Model, userId);
+
+  const query = {
+    $or: buildWalletUserOrQuery(Model, userId),
     currency,
+  };
+
+  const payload = {
+    ...userPayload,
+    currency,
+    amount: toDecimal128(safeBalance, currency),
+    availableAmount: toDecimal128(safeBalance, currency),
+    reservedAmount: toDecimal128(0, currency),
+    status: "active",
+    isSandbox: true,
+    metadata: {
+      source: "apple_review_auto_wallet",
+      reason:
+        "Wallet sandbox recréé automatiquement côté tx-core car introuvable.",
+      userId,
+      currency,
+      balance: safeBalance,
+      createdAt: now,
+    },
+  };
+
+  return Model.findOneAndUpdate(
+    query,
+    { $set: payload },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    }
+  );
+}
+
+async function getSandboxWallet({ userId, currency }) {
+  const TxWalletBalance = getTxWalletBalanceModel();
+
+  const baseQuery = {
+    $or: buildWalletUserOrQuery(TxWalletBalance, userId),
+    currency,
+  };
+
+  let wallet = await TxWalletBalance.findOne({
+    ...baseQuery,
     status: "active",
   });
+
+  if (!wallet) {
+    wallet = await TxWalletBalance.findOne(baseQuery);
+  }
+
+  if (!wallet) {
+    wallet = await autoCreateAppleReviewWallet({
+      Model: TxWalletBalance,
+      userId,
+      currency,
+    });
+  }
 
   if (!wallet) {
     const error = new Error(`Wallet sandbox ${currency} introuvable.`);
@@ -200,6 +388,9 @@ async function getSandboxWallet({ userId, currency }) {
     error.statusCode = 404;
     throw error;
   }
+
+  wallet.status = "active";
+  wallet.isSandbox = true;
 
   return wallet;
 }
@@ -211,7 +402,9 @@ async function applySandboxWalletMutation({
   currency,
 }) {
   const currentAmount = decimalToNumber(wallet.amount);
-  const currentAvailable = decimalToNumber(wallet.availableAmount ?? wallet.amount);
+  const currentAvailable = decimalToNumber(
+    wallet.availableAmount ?? wallet.amount
+  );
 
   let nextAmount = currentAmount;
   let nextAvailable = currentAvailable;
@@ -237,12 +430,42 @@ async function applySandboxWalletMutation({
   wallet.status = "active";
   wallet.isSandbox = true;
 
+  wallet.metadata = {
+    ...(wallet.metadata || {}),
+    lastSandboxMutation: {
+      action,
+      amount,
+      currency,
+      at: new Date().toISOString(),
+    },
+  };
+
   await wallet.save();
 
   return {
     amount: roundCurrency(nextAmount, currency),
     availableAmount: roundCurrency(nextAvailable, currency),
   };
+}
+
+function getUserId(user) {
+  const userId = String(resolveUserId(user) || "").trim();
+
+  if (!userId) {
+    const error = new Error("Utilisateur sandbox introuvable.");
+    error.status = 401;
+    error.statusCode = 401;
+    throw error;
+  }
+
+  if (!mongoose.isValidObjectId(userId)) {
+    const error = new Error("Identifiant utilisateur sandbox invalide.");
+    error.status = 400;
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return userId;
 }
 
 async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
@@ -255,24 +478,9 @@ async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
     throw error;
   }
 
-  const Transaction = runtime.Transaction;
+  const Transaction = getTransactionModel();
 
-  if (!Transaction) {
-    const error = new Error("Transaction model indisponible.");
-    error.status = 500;
-    error.statusCode = 500;
-    throw error;
-  }
-
-  const userId = String(resolveUserId(user) || "").trim();
-
-  if (!userId) {
-    const error = new Error("Utilisateur sandbox introuvable.");
-    error.status = 401;
-    error.statusCode = 401;
-    throw error;
-  }
-
+  const userId = getUserId(user);
   const amount = normalizeAmount(pickAmount(body));
   const currency = pickCurrency(body, user);
   const flowInfo = resolveSandboxFlowType(body);
@@ -291,6 +499,7 @@ async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
 
   const now = new Date();
   const reference = buildSandboxReference();
+  const recipientSnapshot = buildRecipientSnapshot(body);
 
   const txPayload = {
     reference,
@@ -306,6 +515,8 @@ async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
 
     amount,
     netAmount: amount,
+    localAmount: amount,
+
     currency,
     currencySource: currency,
     currencyTarget: currency,
@@ -325,34 +536,33 @@ async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
     providerReference: reference,
 
     isSandbox: true,
+
     fundsReserved: false,
     fundsCaptured: true,
+    fundsCapturedAt: now,
+
     reserveReleased: false,
+
     beneficiaryCredited: flowInfo.walletAction === "credit",
+    beneficiaryCreditedAt: flowInfo.walletAction === "credit" ? now : null,
+
+    treasuryRevenueCredited: false,
 
     description:
       body.description || "Transaction simulée pour Apple App Review.",
 
-    recipientEmail:
-      body.toEmail ||
-      body.recipientEmail ||
-      body.recipientInfo?.email ||
-      null,
-
-    recipientName:
-      body.recipientName ||
-      body.toName ||
-      body.recipientInfo?.name ||
-      null,
+    recipientEmail: recipientSnapshot.email,
+    recipientName: recipientSnapshot.name,
 
     metadata: {
       source: "apple_review_sandbox",
+      sandbox: true,
       reason: "Aucun argent réel déplacé.",
       flowType: flowInfo.type,
       walletAction: flowInfo.walletAction,
       originalProvider: body.provider || body.channel || null,
-      originalFlow: body.flow || null,
-      recipientSnapshot: buildRecipientSnapshot(body),
+      originalFlow: body.flow || body.meta?.flow || null,
+      recipientSnapshot,
       ...metadata,
     },
 
@@ -361,8 +571,12 @@ async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
       sandbox: true,
       flowType: flowInfo.type,
       walletAction: flowInfo.walletAction,
+      providerExecutionSkipped: true,
+      recipientSnapshot,
     },
 
+    confirmedAt: now,
+    executedAt: now,
     completedAt: now,
     createdAt: now,
     updatedAt: now,
