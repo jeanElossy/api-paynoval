@@ -11,6 +11,10 @@ const {
   getInternalAdminTransactionById,
 } = require("../controllers/internalAdminTransactions.controller");
 
+const {
+  getInternalDashboardStats,
+} = require("../controllers/internalDashboardStats.controller");
+
 const router = express.Router();
 
 function getExpectedInternalToken() {
@@ -86,6 +90,15 @@ function requireInternalToken(req, _res, next) {
 
   return next();
 }
+
+// Agrégats du tableau de bord. Monté AVANT `/internal/admin/transactions/:id`
+// n'est pas nécessaire (chemins disjoints), mais on garde les routes de
+// statistiques groupées en tête pour la lisibilité.
+router.get(
+  "/internal/admin/dashboard/stats",
+  requireInternalToken,
+  getInternalDashboardStats
+);
 
 router.get(
   "/internal/admin/transactions",
