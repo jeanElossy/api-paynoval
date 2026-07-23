@@ -10,7 +10,8 @@ try {
 } catch {}
 
 const config = require("../config");
-const Transaction = require("../models/Transaction");
+const TransactionFactory = require("../models/Transaction");
+const { getTxConn } = require("../config/db");
 
 const PRINCIPAL_URL = (config.principalUrl || process.env.PRINCIPAL_URL || "").replace(/\/+$/, "");
 
@@ -133,8 +134,29 @@ const BONUSES_BY_REGION = {
   AFRICA: { currency: "XOF", parrain: 2000, filleul: 1000 },
 };
 
+/**
+ * Modèle `Transaction` résolu sur la connexion **Transactions**.
+ *
+ * ⚠️ Correctif : cette fonction renvoyait la *factory* elle-même
+ * (`module.exports = (conn = mongoose) => …`) et non un modèle. Les deux
+ * appelants faisaient donc `.find()` et `.countDocuments()` sur une fonction,
+ * ce qui levait systématiquement un `TypeError` :
+ *   - `getFirstTwoConfirmedTotal()` : l'exception remontait, aucun bonus de
+ *     parrainage n'était jamais traité par ce chemin ;
+ *   - le repli hérité de `checkAndGenerateReferralCodeInMain()` : l'exception
+ *     était avalée par son `catch`, le code de parrainage n'était donc jamais
+ *     généré, sans autre trace qu'une ligne de log.
+ *
+ * Résolution **paresseuse et mémoïsée** : `getTxConn()` lève tant que
+ * `connectTransactionsDB()` n'a pas eu lieu, on ne peut donc pas résoudre au
+ * chargement du module.
+ */
+let _Transaction = null;
+
 function TransactionModel() {
-  return Transaction;
+  if (_Transaction) return _Transaction;
+  _Transaction = TransactionFactory(getTxConn());
+  return _Transaction;
 }
 
 async function fetchUserFromMain(userId, authToken) {
