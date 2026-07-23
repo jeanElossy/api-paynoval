@@ -410,6 +410,10 @@ async function createLedgerEntry({
     "FEE_REVENUE",
     "FX_REVENUE",
     "ADJUSTMENT",
+    // Doit rester aligné sur `ENTRY_TYPES` de models/LedgerEntry.js : les deux
+    // listes sont séparées, un ajout ici sans l'autre passe la validation du
+    // service puis échoue à l'écriture.
+    "REFERRAL_PAYOUT",
   ]);
 
   if (!allowedDirections.has(String(direction || "").toUpperCase())) {

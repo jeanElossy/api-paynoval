@@ -12,6 +12,7 @@ const { getTxConn } = require("../config/db");
 const TxWalletBalanceModel = require("../models/TxWalletBalance");
 const TxSystemBalanceModel = require("../models/TxSystemBalance");
 const TransactionModel = require("../models/Transaction");
+const LedgerEntryModel = require("../models/LedgerEntry");
 
 function safeNumber(v) {
   const n =
@@ -136,6 +137,128 @@ function getTxSystemBalance() {
 
 function getTransactionModel() {
   return TransactionModel(getTxConn());
+}
+
+/**
+ * Double écriture comptable d'un bonus de parrainage.
+ *
+ * ⚠️ Jusqu'ici, `transferReferralBonus` débitait la trésorerie et créditait le
+ * portefeuille du bénéficiaire **sans jamais écrire au grand livre** : de
+ * l'argent bougeait et le registre comptable l'ignorait. Le solde réel de
+ * REFERRAL_TREASURY et la somme des écritures divergeaient donc en silence, et
+ * l'analytique de trésorerie devait reconstituer la section parrainage depuis
+ * les `Transaction` faute d'écritures.
+ *
+ * Deux entrées par bénéficiaire, dans la session de la transaction Mongo :
+ *   - DEBIT  sur `treasury:<SYSTEM_TYPE>:<uid>:<CUR>` (la trésorerie paie) ;
+ *   - CREDIT sur `user_wallet:<uid>:<CUR>` (le bénéficiaire reçoit).
+ *
+ * Les deux montants sont dans des devises potentiellement différentes — le
+ * bonus peut être converti — donc on n'écrit jamais un montant pour l'autre :
+ * chaque entrée porte sa propre devise, et la conversion est tracée en
+ * métadonnée.
+ *
+ * **Rejeu** : les écritures sont conditionnées à l'absence d'une entrée de même
+ * `reference` et même `accountId`. `createLedgerEntry` fait un `create()` sec,
+ * sans garde d'unicité ; sans ce contrôle, un rejeu du transfert doublerait la
+ * comptabilité.
+ */
+async function writeReferralLedgerEntries({
+  transactionId,
+  reference,
+  beneficiaryId,
+  beneficiaryCurrency,
+  creditedAmount,
+  treasuryUserId,
+  treasurySystemType,
+  treasuryCurrency,
+  treasuryDebitedAmount,
+  session,
+  metadata = {},
+}) {
+  if (!transactionId) {
+    // Sans transaction rattachable, une écriture serait orpheline : on préfère
+    // ne rien écrire et le signaler plutôt que polluer le grand livre.
+    logReferral("ledger:skipped:no-transaction-id", { reference });
+    return { written: 0 };
+  }
+
+  /* ⚠️ `ledgerService` appelle `getTxConn()` **au chargement du module**
+     (ledgerService.js, ligne 21) : l'importer en tête de ce fichier ferait
+     échouer le démarrage dès que ce service est chargé avant
+     `connectTransactionsDB()`. On le requiert donc ici, à l'usage — c'est le
+     piège documenté dans le CLAUDE.md du dépôt. */
+  const { createLedgerEntry } = require("./ledgerService");
+
+  const LedgerEntry = LedgerEntryModel(getTxConn());
+
+  const treasuryAccountId = `treasury:${treasurySystemType}:${String(
+    treasuryUserId
+  )}:${treasuryCurrency}`;
+  const walletAccountId = `user_wallet:${String(
+    beneficiaryId
+  )}:${beneficiaryCurrency}`;
+
+  // Une seule requête pour les deux comptes : on saura lequel manque.
+  const existing = await LedgerEntry.find(
+    { reference: String(reference), accountId: { $in: [treasuryAccountId, walletAccountId] } },
+    { accountId: 1 },
+    { session }
+  ).lean();
+
+  const already = new Set(existing.map((e) => e.accountId));
+  let written = 0;
+
+  const sharedMetadata = {
+    ...metadata,
+    referralReference: String(reference),
+    treasurySystemType,
+  };
+
+  if (!already.has(treasuryAccountId) && treasuryDebitedAmount > 0) {
+    await createLedgerEntry({
+      transactionId,
+      reference: String(reference),
+      userId: treasuryUserId,
+      accountType: "TREASURY",
+      accountId: treasuryAccountId,
+      direction: "DEBIT",
+      entryType: "REFERRAL_PAYOUT",
+      amount: treasuryDebitedAmount,
+      currency: treasuryCurrency,
+      metadata: {
+        ...sharedMetadata,
+        counterpartyUserId: String(beneficiaryId),
+        counterpartyCurrency: beneficiaryCurrency,
+        counterpartyAmount: creditedAmount,
+      },
+      session,
+    });
+    written += 1;
+  }
+
+  if (!already.has(walletAccountId) && creditedAmount > 0) {
+    await createLedgerEntry({
+      transactionId,
+      reference: String(reference),
+      userId: beneficiaryId,
+      accountType: "USER_WALLET",
+      accountId: walletAccountId,
+      direction: "CREDIT",
+      entryType: "USER_CREDIT",
+      amount: creditedAmount,
+      currency: beneficiaryCurrency,
+      metadata: {
+        ...sharedMetadata,
+        sourceAmount: treasuryDebitedAmount,
+        sourceCurrency: treasuryCurrency,
+      },
+      session,
+    });
+    written += 1;
+  }
+
+  return { written };
 }
 
 function logReferral(label, payload) {
@@ -659,10 +782,16 @@ function buildUserVisibleReferralTx({
   };
 }
 
+/**
+ * Enregistre (ou met à jour) la transaction visible par l'utilisateur.
+ *
+ * Renvoie le document : son `_id` est nécessaire pour rattacher les écritures
+ * comptables, `transactionId` étant requis sur `LedgerEntry`.
+ */
 async function upsertReferralHistoryTransaction(doc, session) {
   const Transaction = getTransactionModel();
 
-  await Transaction.updateOne(
+  return Transaction.findOneAndUpdate(
     { reference: String(doc.reference) },
     {
       $setOnInsert: {
@@ -715,7 +844,7 @@ async function upsertReferralHistoryTransaction(doc, session) {
         lockedUntil: 1,
       },
     },
-    { upsert: true, session }
+    { upsert: true, new: true, session }
   );
 }
 
@@ -883,7 +1012,7 @@ async function transferReferralBonus({
           errorCode: "SPONSOR_WALLET_CREDIT_FAILED",
         });
 
-        await upsertReferralHistoryTransaction(
+        const sponsorTx = await upsertReferralHistoryTransaction(
           buildUserVisibleReferralTx({
             reference: `${payoutRefBase}-SPONSOR`,
             idempotencyKey: `${idempotencyKey}:sponsor`,
@@ -912,6 +1041,27 @@ async function transferReferralBonus({
           }),
           session
         );
+
+        await writeReferralLedgerEntries({
+          transactionId: sponsorTx?._id,
+          reference: `${payoutRefBase}-SPONSOR`,
+          beneficiaryId: sponsorId,
+          beneficiaryCurrency: sponsorCur,
+          creditedAmount: sponsorMovement.creditedAmount,
+          treasuryUserId: treasuryUser,
+          treasurySystemType: systemType,
+          treasuryCurrency: treasuryCur,
+          treasuryDebitedAmount: sponsorMovement.treasuryDebitedAmount,
+          session,
+          metadata: {
+            role: "sponsor",
+            payoutRefBase,
+            sponsorId: String(sponsorId),
+            refereeId: String(refereeId),
+            triggerTxId: metadata?.triggerTxId || "",
+            conversions: sponsorMovement.conversions,
+          },
+        });
       }
 
       if (!refereeMovement.skipped && refereeMovement.creditedAmount > 0) {
@@ -923,7 +1073,7 @@ async function transferReferralBonus({
           errorCode: "REFEREE_WALLET_CREDIT_FAILED",
         });
 
-        await upsertReferralHistoryTransaction(
+        const refereeTx = await upsertReferralHistoryTransaction(
           buildUserVisibleReferralTx({
             reference: `${payoutRefBase}-REFEREE`,
             idempotencyKey: `${idempotencyKey}:referee`,
@@ -952,6 +1102,27 @@ async function transferReferralBonus({
           }),
           session
         );
+
+        await writeReferralLedgerEntries({
+          transactionId: refereeTx?._id,
+          reference: `${payoutRefBase}-REFEREE`,
+          beneficiaryId: refereeId,
+          beneficiaryCurrency: refereeCur,
+          creditedAmount: refereeMovement.creditedAmount,
+          treasuryUserId: treasuryUser,
+          treasurySystemType: systemType,
+          treasuryCurrency: treasuryCur,
+          treasuryDebitedAmount: refereeMovement.treasuryDebitedAmount,
+          session,
+          metadata: {
+            role: "referee",
+            payoutRefBase,
+            sponsorId: String(sponsorId),
+            refereeId: String(refereeId),
+            triggerTxId: metadata?.triggerTxId || "",
+            conversions: refereeMovement.conversions,
+          },
+        });
       }
 
       result = {
