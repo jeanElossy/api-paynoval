@@ -15,6 +15,10 @@ const {
   getInternalDashboardStats,
 } = require("../controllers/internalDashboardStats.controller");
 
+const {
+  getInternalTreasuryAnalytics,
+} = require("../controllers/internalTreasuryAnalytics.controller");
+
 const router = express.Router();
 
 function getExpectedInternalToken() {
@@ -98,6 +102,20 @@ router.get(
   "/internal/admin/dashboard/stats",
   requireInternalToken,
   getInternalDashboardStats
+);
+
+/**
+ * Grand livre et analytiques de trésorerie (frais, marge de change, parrainage).
+ *
+ * Un seul endpoint pour les quatre écrans : le paramètre `sections` permet à
+ * chaque écran du back-office de ne déclencher que les agrégations dont il a
+ * besoin, sans multiplier les allers-retours HTTP ni recalculer les trois
+ * autres blocs à chaque appel.
+ */
+router.get(
+  "/internal/admin/treasury/analytics",
+  requireInternalToken,
+  getInternalTreasuryAnalytics
 );
 
 router.get(
