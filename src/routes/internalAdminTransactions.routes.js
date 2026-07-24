@@ -19,6 +19,10 @@ const {
   getInternalTreasuryAnalytics,
 } = require("../controllers/internalTreasuryAnalytics.controller");
 
+const {
+  executeInternalAdminAdjustment,
+} = require("../controllers/internalAdminAdjustments.controller");
+
 const router = express.Router();
 
 function getExpectedInternalToken() {
@@ -128,6 +132,24 @@ router.get(
   "/internal/admin/transactions/:id",
   requireInternalToken,
   getInternalAdminTransactionById
+);
+
+/**
+ * Exécution d'un ajustement manuel de solde décidé au back-office.
+ *
+ * Route hébergée dans ce fichier plutôt que dans un routeur dédié afin de
+ * réutiliser exactement `requireInternalToken` ci-dessus. Le dépôt compte déjà
+ * trois implémentations distinctes du contrôle de token interne, chacune avec
+ * sa propre chaîne de repli : en ajouter une quatrième pour l'unique route qui
+ * déplace de l'argent sur décision humaine serait le pire endroit où introduire
+ * un écart.
+ *
+ * POST /api/v1/internal/admin/adjustments/execute
+ */
+router.post(
+  "/internal/admin/adjustments/execute",
+  requireInternalToken,
+  executeInternalAdminAdjustment
 );
 
 module.exports = router;
