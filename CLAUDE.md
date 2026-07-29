@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> Les explications, commentaires et messages d'erreur de ce dépôt sont en **français** (convention `.claude/memory/conventions.md`). Le code reste en anglais.
+> Les explications, commentaires et messages d'erreur de ce dépôt sont en **français** (convention `.claude/context/conventions.md`). Le code reste en anglais. Règles de collaboration transverses → [`../CLAUDE.md`](../CLAUDE.md) ; vue d'ensemble de l'écosystème → [`../.claude/context/ecosystem.md`](../.claude/context/ecosystem.md).
 
 ## Vue d'ensemble
 
@@ -114,4 +114,4 @@ Un chemin parallèle complet existe pour le compte de revue Apple : `utils/sandb
 - **Code mort connu** : `src/services/balance.js` n'est référencé nulle part et appellerait une factory de modèle comme un modèle (il lèverait au premier appel) — ne pas s'en inspirer ; l'équivalent vivant est `TxWalletBalance` + `ledgerService`.
 - **Bypass de rate limit** : le `sensitiveLimiter` de `routes/transactionsRoutes.js` saute la limite dès que l'en-tête `x-internal-token` est **présent**, sans comparer sa valeur (contrairement à `server.js` qui compare en timing-safe). En tenir compte avant de s'appuyer sur ce limiteur.
 - **Git** : l'historique utilise des messages du type `api paynoval file update vNN---`. Les standards du dépôt (`.claude/docs/coding-standards.md`) demandent des commits conventionnels (`feat(scope): …`) — préférer ces derniers pour les nouveaux commits.
-- Les documents de `.claude/docs/` et `.claude/memory/` sont des gabarits largement génériques (l'un décrit même un autre projet) : ce fichier CLAUDE.md fait foi pour l'architecture réelle. Les **skills** de `.claude/skills/` (`create-api-skill`, `create-service-skill`, `create-model-skill`, `debug-skill`, `security-review-skill`…) sont en revanche opérationnelles et doivent être utilisées pour les tâches correspondantes.
+- Ce fichier CLAUDE.md fait foi pour l'architecture réelle de ce dépôt. Les **skills** de `.claude/skills/` (`create-api-skill`, `create-service-skill`, `create-model-skill`, `debug-skill`, `security-review-skill`…) sont opérationnelles et doivent être utilisées pour les tâches correspondantes.

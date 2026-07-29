@@ -210,6 +210,21 @@ async function refundController(req, res, next) {
   }
 }
 
+/**
+ * Validation manuelle d'une transaction (chemin gateway).
+ *
+ * ⚠️ Ce contrôleur est la **seconde porte d'entrée** vers la même opération que
+ * `POST /api/v1/admin/transactions/:id/validate` du backend principal. Il était
+ * nettement plus permissif : il n'interrogeait pas la machine à états et ne
+ * vérifiait pas que l'argent avait bougé, si bien qu'une transaction `pending`
+ * pouvait être écrite en `confirmed` alors qu'aucune écriture comptable ne
+ * venait en face. Le client voyait un paiement réussi, le grand livre disait le
+ * contraire.
+ *
+ * Les deux gardes ci-dessous rétablissent la symétrie avec l'autre chemin et
+ * avec `refundController`, qui applique déjà exactement le même contrôle de
+ * mouvement de fonds.
+ */
 async function validateController(req, res, next) {
   try {
     const { transactionId, status, adminNote } = req.body;
@@ -232,6 +247,23 @@ async function validateController(req, res, next) {
       throw createError(
         409,
         "Un flow externe ne doit pas être confirmé manuellement sans exécution provider."
+      );
+    }
+
+    // La machine à états est la seule autorité sur les transitions : la
+    // court-circuiter ici produirait un état que le reste de la chaîne
+    // considère comme impossible.
+    assertTransition(tx.status, normalized);
+
+    /* On ne déclare pas un succès que la comptabilité ne porte pas. Ces
+       drapeaux sont posés lors du mouvement réel ; absents, l'argent n'a pas
+       bougé. Même garde que `refundController` ci-dessus. */
+    if (normalized === "confirmed" && (!tx.fundsCaptured || !tx.beneficiaryCredited)) {
+      throw createError(
+        409,
+        "Confirmation refusée : les fonds n'ont pas été capturés ni le bénéficiaire crédité. " +
+          "Marquer cette transaction « confirmée » afficherait au client un paiement inexistant.",
+        { code: "FUNDS_NOT_SETTLED" }
       );
     }
 
