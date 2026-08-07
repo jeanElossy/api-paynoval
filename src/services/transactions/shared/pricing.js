@@ -19,7 +19,6 @@ if (typeof buildTreasuryRevenueBreakdown !== "function") {
 
 const {
   toFloat,
-  round2,
   roundMoney,
   getGatewayBase,
   normalizeTxTypeValue,
@@ -171,8 +170,11 @@ function extractPricingBundle(pricingPayload, pricingInput = {}) {
     ? roundMoney(rawNetTo, toCurrency)
     : 0;
 
-  const appliedRate = round2(toFloat(pricingSnapshot?.result?.appliedRate, 0));
-  const marketRate = round2(toFloat(pricingSnapshot?.result?.marketRate, 0));
+  // Un taux n'est pas un montant : `round2` écrasait à 0,00 tout corridor dont
+  // le taux est inférieur à 0,01 — XOF → EUR vaut ~0,001524. Les montants,
+  // eux, restent arrondis à la devise via `roundMoney`.
+  const appliedRate = toFloat(pricingSnapshot?.result?.appliedRate, 0);
+  const marketRate = toFloat(pricingSnapshot?.result?.marketRate, 0);
 
   const treasuryRevenue = buildTreasuryRevenueBreakdown(pricingSnapshot);
 
