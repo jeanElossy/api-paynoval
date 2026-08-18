@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Vue d'ensemble
 
-`paynoval-transactions-service` (« TX Core ») est le micro-service financier de PayNoval : il détient les soldes, le grand livre et la machine à états des transactions. Node 20, CommonJS, Express 4, Mongoose 7. **Pas de TypeScript, pas d'étape de build, pas de tests ni de linter configurés.**
+`paynoval-transactions-service` (« TX Core ») est le micro-service financier de PayNoval : il détient les soldes, le grand livre et la machine à états des transactions. Node 20, CommonJS, Express 4, Mongoose 7. **Pas de TypeScript, pas d'étape de build, pas de linter configuré.**
 
 Il n'héberge **pas** le back-office admin (qui reste dans le backend principal) : il expose des routes utilisateur protégées par JWT et des routes `/internal/*` protégées par token interne, appelées par le backend principal et l'API Gateway.
 
@@ -16,12 +16,16 @@ Il n'héberge **pas** le back-office admin (qui reste dans le backend principal)
 npm install
 npm run dev      # nodemon src/server.js
 npm start        # node src/server.js
+npm test         # node --test "test/**/*.test.js" — runner natif, aucune dépendance
+node --test test/userScopeQuery.test.js  # un seul fichier
 
 node scripts/seedBalance.js              # solde de test (utilise MONGO_URI_USERS)
 node scripts/seedAppleReviewerWallet.js  # wallet du compte sandbox Apple Review
 ```
 
-Aucun `npm test` / `npm run lint` n'existe — ne pas en inventer. La vérification se fait par démarrage du service et appels HTTP (`/health`, `/api/v1/health`), ou par `node -e "require('./src/...')"` pour valider qu'un module charge.
+**Une suite de tests existe depuis le 2026-08-18** (elle n'existait pas avant, plusieurs sections de ce fichier le disaient) : runner natif `node:test`, aucune dépendance ajoutée, logique pure uniquement — aucun test ne démarre le service ni n'ouvre de connexion Mongo. Le glob est indispensable : `node --test test/` résout `test/` comme un module CommonJS et échoue en `MODULE_NOT_FOUND` sur Node 22.
+
+Contrainte pratique à connaître : `require` d'un contrôleur charge `src/config.js`, donc `dotenv-safe`, qui **échoue sans `.env` complet**. Une logique qu'on veut tester doit donc vivre dans un module sans dépendance de configuration (cf. [src/utils/userScopeQuery.js](src/utils/userScopeQuery.js), extrait du contrôleur exactement pour cette raison). Le reste se vérifie par démarrage du service et appels HTTP (`/health`, `/api/v1/health`).
 
 Surfaces utiles au runtime : `/docs` (Swagger, protégé par JWT + rôle admin/developer/superadmin en production), `/openapi.yaml`, `/openapi.json`.
 

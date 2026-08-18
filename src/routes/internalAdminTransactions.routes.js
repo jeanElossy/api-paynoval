@@ -9,6 +9,7 @@ const createError = require("http-errors");
 const {
   listInternalAdminTransactions,
   getInternalAdminTransactionById,
+  getInternalAdminUserStats,
 } = require("../controllers/internalAdminTransactions.controller");
 
 const {
@@ -132,6 +133,20 @@ router.get(
   "/internal/admin/transactions/:id",
   requireInternalToken,
   getInternalAdminTransactionById
+);
+
+/**
+ * Indicateurs d'un compte, agrégés côté serveur.
+ *
+ * Monté ici et pas sous `/internal/admin/transactions/...` : le chemin décrit
+ * la ressource observée (un utilisateur), pas la collection interrogée. Un
+ * `/transactions/user/:id` aurait de plus été capté par la route `:id`
+ * ci-dessus, qui aurait cherché une transaction nommée « user ».
+ */
+router.get(
+  "/internal/admin/users/:id/stats",
+  requireInternalToken,
+  getInternalAdminUserStats
 );
 
 /**
