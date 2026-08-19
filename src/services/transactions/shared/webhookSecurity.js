@@ -137,11 +137,41 @@ function verifyHmacWebhook({
   const normalizedAlgorithm = normalizeAlgorithm(algorithm);
 
   const enabled = Boolean(normalizedSecret);
+
+  /**
+   * ABSENCE DE SECRET = REFUS. C'est la règle de Stripe, de PayPal et de Wise :
+   * un webhook non signé n'est pas un webhook, c'est une requête anonyme qui
+   * prétend venir d'un prestataire de paiement.
+   *
+   * Ce code renvoyait `verified: true` — donc une requête forgée par n'importe
+   * qui était traitée comme authentique dès lors que la variable de secret
+   * n'était pas renseignée. Un oubli de configuration devenait une porte
+   * ouverte, silencieusement : rien dans les journaux ne distinguait un webhook
+   * légitime d'un webhook inventé.
+   *
+   * L'échappatoire de développement local est explicite et NE FONCTIONNE PAS en
+   * production : on ne veut pas qu'une variable oubliée sur un poste voyage
+   * jusqu'au serveur.
+   */
   if (!enabled) {
+    const allowUnsigned =
+      String(process.env.WEBHOOK_ALLOW_UNSIGNED || "").toLowerCase() === "true" &&
+      process.env.NODE_ENV !== "production";
+
+    if (!allowUnsigned) {
+      // `console` et non winston : ce module n'a volontairement aucune
+      // dépendance hors `crypto`, ce qui le rend testable sans configuration.
+      console.error(
+        `[WEBHOOK] secret absent — requête refusée (${normalizedAlgorithm})`
+      );
+    }
+
     return {
       enabled: false,
-      verified: true,
-      reason: "NO_SECRET_CONFIGURED",
+      verified: allowUnsigned,
+      reason: allowUnsigned
+        ? "UNSIGNED_ALLOWED_DEV_ONLY"
+        : "NO_SECRET_CONFIGURED",
       signature: "",
       timestamp: "",
       algorithm: normalizedAlgorithm,

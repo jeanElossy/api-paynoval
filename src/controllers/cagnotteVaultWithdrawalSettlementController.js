@@ -343,6 +343,7 @@ const mongoose = require("mongoose");
 const { getTxConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
+const { commitWithRetry } = require("../utils/commitWithRetry");
 
 function normalizeCurrencyCode(raw) {
   const s = String(raw || "").trim().toUpperCase();
@@ -585,7 +586,7 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
 
     const settlement = settlementDocs[0];
 
-    await session.commitTransaction();
+    await commitWithRetry(session);
     committed = true;
 
     return res.status(201).json({

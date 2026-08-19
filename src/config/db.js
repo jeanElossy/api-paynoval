@@ -53,6 +53,8 @@ function registerTransactionModels(conn) {
   require("../models/Notification")(conn);
   require("../models/LedgerEntry")(conn);
   require("../models/TxWalletBalance")(conn);
+  require("../models/ReferralPayout")(conn);
+  require("../models/IdempotencyRecord")(conn);
 
   try {
     require("../models/TxSystemBalance")(conn);
@@ -115,6 +117,87 @@ async function connectTxDB(uriTx, opts) {
   return txConn;
 }
 
+/**
+ * ============================================================================
+ * UN SEUL CLIENT MONGO POUR DEUX BASES — CONDITION DE L'ATOMICITÉ
+ * ============================================================================
+ *
+ * Une transaction MongoDB ne vaut que dans les limites d'UN `MongoClient`. Or
+ * ce service ouvrait deux clients : `mongoose.connect()` pour la base des
+ * utilisateurs, `mongoose.createConnection()` pour celle des transactions.
+ * `canUseSharedSession()` (voir `services/transactions/shared/runtime.js`)
+ * compare l'identité du client — elle renvoyait donc **toujours** `false`, et
+ * tout le mouvement d'argent tournait sans transaction, silencieusement, alors
+ * même que les deux bases vivent sur le même cluster.
+ *
+ * `useDb()` règle cela : la connexion enfant réutilise le client du parent. Une
+ * transaction couvre alors réellement les deux bases (vérifié : écriture
+ * croisée puis annulation, aucun résidu).
+ *
+ * Le partage n'est tenté que si les deux URI ne diffèrent QUE par le nom de la
+ * base — même serveur, mêmes identifiants, mêmes options. Deux clusters
+ * distincts, ou deux comptes aux droits différents, retombent sur l'ancien
+ * comportement : mieux vaut le mode dégradé qu'une connexion qui ment sur ses
+ * privilèges.
+ *
+ * `MONGO_SHARE_CLIENT=off` restaure l'ancien comportement sans redéploiement,
+ * si le passage aux transactions réelles devait révéler un effet de bord.
+ */
+function splitMongoUri(uri) {
+  const m = /^(mongodb(?:\+srv)?:\/\/[^/]+)\/([^?]*)(\?.*)?$/.exec(
+    String(uri || "").trim()
+  );
+
+  if (!m) return null;
+
+  // `authority` porte les identifiants : il sert à COMPARER, jamais à journaliser.
+  return {
+    authority: m[1],
+    dbName: decodeURIComponent(m[2] || ""),
+    query: m[3] || "",
+  };
+}
+
+function canShareMongoClient(uriUsers, uriTx) {
+  if (String(process.env.MONGO_SHARE_CLIENT || "auto").toLowerCase() === "off") {
+    return false;
+  }
+
+  const a = splitMongoUri(uriUsers);
+  const b = splitMongoUri(uriTx);
+
+  return !!(
+    a &&
+    b &&
+    a.authority === b.authority &&
+    a.query === b.query &&
+    a.dbName &&
+    b.dbName
+  );
+}
+
+/**
+ * Journalise le régime effectif. Le mode dégradé était jusqu'ici invisible :
+ * personne ne pouvait savoir, en lisant les journaux de démarrage, que l'argent
+ * bougeait sans transaction. C'est désormais dit explicitement.
+ */
+function logSessionMode() {
+  const shared =
+    !!txConn &&
+    typeof txConn.getClient === "function" &&
+    mongoose.connection.getClient?.() === txConn.getClient();
+
+  if (shared) {
+    console.log("✅ Transactions Mongo ACTIVES — atomicité inter-bases disponible");
+  } else {
+    console.warn(
+      "⚠️ Transactions Mongo INACTIVES — clients distincts. Les écritures " +
+        "croisées Users/Transactions ne sont PAS atomiques. Les garanties " +
+        "reposent alors sur les index uniques et les registres d'idempotence."
+    );
+  }
+}
+
 async function connectTransactionsDB() {
   const { users: uriUsers, transactions: uriTx } = config.mongo || {};
 
@@ -129,7 +212,23 @@ async function connectTransactionsDB() {
   const opts = buildMongooseOpts();
 
   await connectUsersDB(uriUsers, opts);
-  await connectTxDB(uriTx, opts);
+
+  if (txConn && txConn.readyState === 1) {
+    registerTransactionModels(txConn);
+  } else if (canShareMongoClient(uriUsers, uriTx)) {
+    const { dbName } = splitMongoUri(uriTx);
+
+    // `useCache` garantit qu'un second appel rend la MÊME connexion, et non
+    // une nouvelle : la fonction doit rester idempotente.
+    txConn = mongoose.connection.useDb(dbName, { useCache: true });
+
+    console.log(`✅ DB Transactions sur le client partagé : ${txConn.name}`);
+    registerTransactionModels(txConn);
+  } else {
+    await connectTxDB(uriTx, opts);
+  }
+
+  logSessionMode();
 
   return {
     usersConn: mongoose.connection,

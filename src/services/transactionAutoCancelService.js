@@ -561,7 +561,7 @@ async function cancelLockedTransaction(lockedTx, workerId) {
     }
 
     if (useSession) {
-      await session.commitTransaction();
+      await runtime.safeCommit(session);
     }
 
     logger.info?.("[TX AUTO CANCEL] transaction annulée automatiquement", {

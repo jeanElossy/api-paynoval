@@ -12,6 +12,7 @@ const {
   maybeSessionOpts,
   CAN_USE_SHARED_SESSION,
   assertTransition,
+  safeCommit,
 } = require("../shared/runtime");
 
 const { sanitize, toFloat, round2, isEmailLike } = require("../shared/helpers");
@@ -187,7 +188,7 @@ async function refundController(req, res, next) {
     tx.cancellationFeeResult = cancellationFeeResult || null;
     await tx.save(sessOpts);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) await safeCommit(session);
     session.endSession();
 
     return res.json({
@@ -326,7 +327,7 @@ async function reassignController(req, res, next) {
     tx.providerStatus = "REASSIGNED";
     await tx.save(sessOpts);
 
-    if (CAN_USE_SHARED_SESSION) await session.commitTransaction();
+    if (CAN_USE_SHARED_SESSION) await safeCommit(session);
     session.endSession();
 
     return res.json({

@@ -420,6 +420,7 @@ const {
   maybeSessionOpts,
   canUseSharedSession,
   assertTransition,
+  safeCommit,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
@@ -560,7 +561,7 @@ async function handleSandboxCancel({ req, res, tx, reason, sessOpts, session }) 
   await tx.save(sessOpts);
 
   if (canUseSharedSession()) {
-    await session.commitTransaction();
+    await safeCommit(session);
   }
 
   await endQuietly(session);
@@ -939,7 +940,7 @@ async function cancelController(req, res, next) {
     await notifyTransactionEvent(tx, "cancelled", session, sourceCurrency);
 
     if (canUseSharedSession()) {
-      await session.commitTransaction();
+      await safeCommit(session);
     }
 
     await endQuietly(session);

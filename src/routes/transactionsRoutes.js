@@ -762,6 +762,20 @@ const requireTransactionEligibility = require("../middleware/requireTransactionE
 const requireRole = require("../middleware/requireRole");
 const requestValidator = require("../middleware/requestValidator");
 
+// Même source de vérité que l'authentification interne : voir `sensitiveLimiter`.
+const { isValidInternalToken } = require("../middleware/internalAuth");
+
+/**
+ * Idempotence de l'API (motif Stripe) : un rejeu — double appui, délai
+ * d'attente réseau, reprise de la passerelle — rend la réponse d'origine au
+ * lieu de produire un second mouvement.
+ *
+ * La clé est EXIGÉE par défaut. `IDEMPOTENCY_REQUIRED=false` assouplit sans
+ * redéploiement, le temps que le parc mobile installé passe à une version qui
+ * l'envoie — le mobile la produit depuis le 2026-08-19.
+ */
+const idempotency = require("../middleware/idempotency");
+
 const router = express.Router();
 
 /* -------------------------------------------------------------------------- */
@@ -831,8 +845,16 @@ function ensureMetadata(body) {
 
 /**
  * Rate-limit sur actions sensibles.
- * Le bypass via x-internal-token est autorisé uniquement pour trafic serveur
- * interne maîtrisé.
+ *
+ * ⚠️ CORRECTIF DE SÉCURITÉ. Le `skip` testait la seule PRÉSENCE de l'en-tête
+ * `x-internal-token`, sans jamais comparer sa valeur : `x-internal-token: x`
+ * suffisait à lever la limite de 10 requêtes/minute sur `/initiate`,
+ * `/confirm` et `/cancel`. C'est-à-dire, en pratique, à autoriser le
+ * martèlement des codes de sécurité de confirmation par n'importe qui.
+ *
+ * La valeur est désormais comparée en timing-safe, avec la MÊME fonction que
+ * l'authentification interne (`isValidInternalToken`) : un seul endroit décide
+ * si un token interne est valide.
  */
 const sensitiveLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -844,10 +866,7 @@ const sensitiveLimiter = rateLimit({
     status: 429,
     message: "Trop de requêtes, veuillez réessayer plus tard.",
   },
-  skip: (req) => {
-    const t = req.get("x-internal-token");
-    return !!String(t || "").trim();
-  },
+  skip: (req) => isValidInternalToken(req),
 });
 
 router.use(["/initiate", "/confirm", "/cancel"], sensitiveLimiter);
@@ -1161,6 +1180,7 @@ router.get(
 router.post(
   "/initiate",
   protect,
+  idempotency(),
   normalizeProviderRails,
   normalizeInitiateBody,
   [
@@ -1265,6 +1285,7 @@ router.post(
 router.post(
   "/confirm",
   protect,
+  idempotency(),
   normalizeProviderRails,
   normalizeConfirmBody,
   [
@@ -1311,6 +1332,7 @@ router.post(
 router.post(
   "/cancel",
   protect,
+  idempotency(),
   [
     txIdValidator,
     body("reason")
@@ -1331,6 +1353,7 @@ router.post(
 router.post(
   "/refund",
   protect,
+  idempotency(),
   requireRole(["admin", "superadmin"]),
   [txIdValidator, body("reason").optional().trim().escape()],
   requestValidator,

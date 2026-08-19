@@ -7,6 +7,7 @@ const createError = require("http-errors");
 const {
   startTxSession,
   canUseSharedSession,
+  runInTransaction,
 } = require("../services/transactions/shared/runtime");
 
 const {
@@ -62,46 +63,48 @@ function getIdempotencyKey(req, transactionId) {
  * Il ne doit jamais être exposé directement au mobile ou au back-office.
  */
 async function adminCancelRefundController(req, res, next) {
+  /**
+   * TROIS COUCHES, DANS CET ORDRE — c'est la structure de Stripe et de Wise.
+   *
+   *   1. transport : on lit et on valide la requête, HORS transaction ;
+   *   2. unité de travail : `runInTransaction`, rejouable, sans `res` ;
+   *   3. sérialisation : la réponse est écrite APRÈS.
+   *
+   * La validation vivait auparavant dans la transaction : elle y ouvrait un
+   * verrou pour rien, et un `throw createError(400)` provoquait une annulation
+   * de transaction là où une simple erreur de saisie suffisait.
+   */
+  const transactionId =
+    req.params?.transactionId || req.body?.transactionId || null;
+
+  const reason = String(req.body?.reason || "").trim();
+
+  if (!transactionId) {
+    return next(createError(400, "transactionId requis"));
+  }
+
+  if (!reason || reason.length < 5) {
+    return next(
+      createError(400, "Le motif d’annulation/remboursement est obligatoire")
+    );
+  }
+
+  const requestedBy = getActorFromRequest(req);
+  const idempotencyKey = getIdempotencyKey(req, transactionId);
+
   const session = await startTxSession();
 
   try {
-    if (canUseSharedSession()) {
-      session.startTransaction();
-    }
-
-    const transactionId =
-      req.params?.transactionId ||
-      req.body?.transactionId ||
-      null;
-
-    const reason = String(req.body?.reason || "").trim();
-
-    if (!transactionId) {
-      throw createError(400, "transactionId requis");
-    }
-
-    if (!reason || reason.length < 5) {
-      throw createError(
-        400,
-        "Le motif d’annulation/remboursement est obligatoire"
-      );
-    }
-
-    const requestedBy = getActorFromRequest(req);
-    const idempotencyKey = getIdempotencyKey(req, transactionId);
-
-    const result = await processAdminCancelRefund({
-      transactionId,
-      reason,
-      requestedBy,
-      idempotencyKey,
-      ip: req.ip,
-      session,
-    });
-
-    if (canUseSharedSession()) {
-      await session.commitTransaction();
-    }
+    const result = await runInTransaction(session, (activeSession) =>
+      processAdminCancelRefund({
+        transactionId,
+        reason,
+        requestedBy,
+        idempotencyKey,
+        ip: req.ip,
+        session: activeSession,
+      })
+    );
 
     session.endSession();
 
@@ -118,8 +121,13 @@ async function adminCancelRefundController(req, res, next) {
       data: result,
     });
   } catch (error) {
+    /**
+     * `withTransaction` a déjà annulé avant de propager. Cette annulation
+     * défensive ne couvre que le cas où la transaction serait restée ouverte ;
+     * elle est sans effet sinon.
+     */
     try {
-      if (canUseSharedSession()) {
+      if (canUseSharedSession() && session.inTransaction?.()) {
         await session.abortTransaction();
       }
     } catch {}

@@ -29,6 +29,7 @@ const {
   startTxSession,
   maybeSessionOpts,
   canUseSharedSession,
+  safeCommit,
 } = require("../services/transactions/shared/runtime");
 
 const {
@@ -46,8 +47,8 @@ const {
 } = require("../services/transactions/handlers/flowHelpers");
 
 const {
-  syncReferralAfterConfirmedTx,
-} = require("../services/referralSyncService");
+  enqueueReferralActivityEvent,
+} = require("../services/referral/referralEventOutbox");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
@@ -312,7 +313,7 @@ function resolveTargetAmount(tx) {
 async function commitAndEnd(session) {
   try {
     if (canUseSharedSession() && session) {
-      await session.commitTransaction();
+      await safeCommit(session);
     }
   } finally {
     try {
@@ -333,9 +334,20 @@ async function abortAndEnd(session) {
   } catch {}
 }
 
-async function runReferralSync(tx) {
+/**
+ * Met l'evenement de parrainage en file, dans le regime de session de
+ * l'appelant.
+ *
+ * Remplace l'appel HTTP en ligne au backend principal, qui n'avait ni file ni
+ * reprise : une indisponibilite momentanee du principal faisait perdre
+ * l'evenement definitivement.
+ */
+async function runReferralSync(tx, sessionOpts = {}) {
   try {
-    return await syncReferralAfterConfirmedTx(tx);
+    return await enqueueReferralActivityEvent({
+      transaction: tx,
+      sessionOpts,
+    });
   } catch (err) {
     return buildReferralSyncError(err);
   }
@@ -429,9 +441,12 @@ async function settleOutboundSuccess({
 
   await tx.save(sessOpts);
   await notifyParties(tx, "confirmed", session, notifyCurrency);
-  await commitAndEnd(session);
 
-  const referralSync = await runReferralSync(tx);
+  // Mise en file AVANT le commit : l'evenement de parrainage est solidaire de
+  // la confirmation. Voir referralEventOutbox pour le detail du motif.
+  const referralSync = await runReferralSync(tx, sessOpts);
+
+  await commitAndEnd(session);
 
   return {
     statusCode: 200,
@@ -514,9 +529,12 @@ async function settleInboundSuccess({
 
   await tx.save(sessOpts);
   await notifyParties(tx, "confirmed", session, notifyCurrency);
-  await commitAndEnd(session);
 
-  const referralSync = await runReferralSync(tx);
+  // Mise en file AVANT le commit : l'evenement de parrainage est solidaire de
+  // la confirmation. Voir referralEventOutbox pour le detail du motif.
+  const referralSync = await runReferralSync(tx, sessOpts);
+
+  await commitAndEnd(session);
 
   return {
     statusCode: 200,

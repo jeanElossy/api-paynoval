@@ -230,6 +230,24 @@ function buildOutboxIdempotencyKey(txId, userId, status, channel) {
     .digest("hex");
 }
 
+/**
+ * Écrit la notification et son ordre de livraison DANS LA TRANSACTION appelante.
+ *
+ * ⚠️ CORRECTIF. `sessOpts` était calculé par `notifyTransactionEvent` puis
+ * jamais transmis : la notification et l'entrée d'Outbox étaient écrites HORS
+ * transaction. Une transaction annulée après cet appel laissait donc
+ * l'utilisateur prévenu d'un virement qui n'a jamais eu lieu — et l'ordre de
+ * livraison partait quand même.
+ *
+ * C'est tout l'intérêt de l'Outbox transactionnel, celui qu'appliquent Stripe
+ * et Wise : l'événement est écrit dans la MÊME transaction que le changement
+ * d'état, et livré ensuite par un worker. Ou les deux existent, ou aucun.
+ *
+ * Ce n'était pas réparable avant le 2026-08-19 : `Notification` et `Outbox`
+ * vivent sur la connexion Users tandis que la transaction naît côté
+ * Transactions, et les deux connexions utilisaient deux `MongoClient`
+ * distincts. Le client partagé rend la session valable sur les deux bases.
+ */
 async function enqueueUserNotification({
   tx,
   status,
@@ -239,21 +257,28 @@ async function enqueueUserNotification({
   type,
   data,
   channels = ["push"],
+  sessOpts = {},
 }) {
   const recipient = String(recipientId || "");
   const txId = tx?._id?.toString?.() || "";
 
-  await Notification.create({
-    recipient,
-    type,
-    title,
-    message,
-    data,
-    read: false,
-    readAt: null,
-    date: new Date(),
-    channels: ["in_app", ...channels],
-  });
+  // Forme tableau : c'est la seule que `create()` accepte avec des options.
+  await Notification.create(
+    [
+      {
+        recipient,
+        type,
+        title,
+        message,
+        data,
+        read: false,
+        readAt: null,
+        date: new Date(),
+        channels: ["in_app", ...channels],
+      },
+    ],
+    { ...sessOpts }
+  );
 
   const outboxDocs = channels.map((channel) => ({
     service: "notifications",
@@ -287,7 +312,7 @@ async function enqueueUserNotification({
   }));
 
   if (outboxDocs.length) {
-    await Outbox.insertMany(outboxDocs, { ordered: false });
+    await Outbox.insertMany(outboxDocs, { ordered: false, ...sessOpts });
   }
 }
 
@@ -367,6 +392,7 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       type: messages.sender.type,
       data: senderData,
       channels: senderChannels,
+      sessOpts,
     });
 
     await enqueueUserNotification({
@@ -378,6 +404,7 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       type: messages.receiver.type,
       data: receiverData,
       channels: receiverChannels,
+      sessOpts,
     });
 
     logger?.info?.(

@@ -21,6 +21,8 @@ const logger = require("../../../logger");
 const { convertAmount } = require("../../../tools/currency");
 const { normCur } = require("../../../utils/currency");
 const generateTransactionRef = require("../../../utils/generateRef");
+const { commitWithRetry } = require("../../../utils/commitWithRetry");
+const { runWithTransaction } = require("../../../utils/transactionRunner");
 
 const {
   reserveSenderFunds,
@@ -137,8 +139,18 @@ function getOutboxModel() {
   if (_Outbox) return _Outbox;
 
   /**
-   * Dans ton db.js, Outbox est enregistré sur txConn.
-   * Donc ici on doit aussi le charger depuis txConn.
+   * Outbox est enregistré sur txConn dans `config/db.js`, donc chargé d'ici.
+   *
+   * ⚠️ PIÈGE. Ce modèle pointe vers `api_transactions_paynoval.outboxes`, que
+   * **personne ne draine** : le worker de livraison vit dans le backend
+   * principal et lit `paynoval.outboxes`. Écrire un événement ici, c'est
+   * l'écrire dans une file sans lecteur — la notification ne partira jamais, et
+   * rien ne le signalera.
+   *
+   * Aucun code n'écrit actuellement par ce chemin :
+   * `transactions/transactionNotificationService.js` charge délibérément son
+   * Outbox depuis `getUsersConnectionSafe()`. Ne pas « corriger » cette
+   * asymétrie apparente sans déplacer d'abord le worker.
    */
   _Outbox = require("../../../models/Outbox")(getTxConnectionSafe());
   return _Outbox;
@@ -229,10 +241,56 @@ function safeEndSession(session) {
   } catch {}
 }
 
+/**
+ * Valide la transaction, avec le rejeu du pilote sur
+ * `UnknownTransactionCommitResult`. La logique de rejeu vit dans
+ * `utils/commitWithRetry.js` — sans dépendance, donc testable et importable
+ * depuis les contrôleurs qui ne peuvent pas charger ce runtime (il touche
+ * `getTxConn()` au chargement).
+ *
+ * ⚠️ DETTE CONNUE : le rejeu du COMMIT est désormais uniforme, mais 14 chemins
+ * ouvrent encore une transaction sans rejouer l'OPÉRATION ENTIÈRE sur
+ * `TransientTransactionError` (conflit d'écriture). Le remède standard est
+ * `session.withTransaction()` ; il suppose d'abord de sortir les `res.json()`
+ * du périmètre transactionnel, sans quoi un rejeu enverrait deux réponses HTTP.
+ */
 async function safeCommit(session) {
   if (!canUseSharedSession() || !session) return;
 
-  await session.commitTransaction();
+  await commitWithRetry(session, {
+    onRetry: () => logger?.warn?.("[TX] commit incertain, nouvelle tentative"),
+  });
+}
+
+/**
+ * Exécute une unité de travail dans une transaction, avec le rejeu du pilote.
+ *
+ * C'EST LA FAÇON STANDARD, ET ELLE N'EST PAS DE NOUS : `session.withTransaction()`
+ * rejoue le corps sur `TransientTransactionError` (conflit d'écriture) ET rejoue
+ * le commit sur `UnknownTransactionCommitResult`, dans une fenêtre de 120 s. On
+ * n'écrit donc aucune boucle : on appelle celle du pilote.
+ *
+ * Le seul ajout est le mode dégradé — quand les deux bases ne partagent pas de
+ * client, aucune transaction n'est possible et le corps s'exécute tel quel,
+ * exactement comme le faisait l'ancien `if (canUseSharedSession())`.
+ *
+ * ⚠️ LE CORPS DOIT ÊTRE REJOUABLE. Il peut s'exécuter plusieurs fois. Donc :
+ *   - aucun envoi de réponse HTTP à l'intérieur (`res.json`, `res.status`) ;
+ *   - aucun appel réseau, aucun envoi de notification — cela passe par l'Outbox,
+ *     écrit dans la même transaction et livré après coup par le worker ;
+ *   - toute écriture doit rester protégée par ses gardes d'idempotence
+ *     (`fundsReserved`, `fundsCaptured`, `beneficiaryCredited`…).
+ *
+ * La valeur retournée par le corps est celle retournée par cette fonction.
+ */
+async function runInTransaction(session, fn) {
+  if (!session || !canUseSharedSession()) {
+    return fn(session);
+  }
+
+  // Le rejeu et la capture du retour vivent dans `utils/transactionRunner.js`,
+  // sans dépendance, donc testables. Ici on ne garde que le mode dégradé.
+  return runWithTransaction(session, fn);
 }
 
 async function safeAbort(session) {
@@ -321,6 +379,7 @@ function getRuntime() {
     startTxSession,
     maybeSessionOpts,
     safeCommit,
+    runInTransaction,
     safeAbort,
     safeEndSession,
 
@@ -498,6 +557,9 @@ Object.defineProperties(runtime, {
   },
   safeCommit: {
     get: () => safeCommit,
+  },
+  runInTransaction: {
+    get: () => runInTransaction,
   },
   safeAbort: {
     get: () => safeAbort,

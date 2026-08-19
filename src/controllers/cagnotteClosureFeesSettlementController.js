@@ -281,6 +281,7 @@ const asyncHandler = require("express-async-handler");
 const { getTxConn } = require("../config/db");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
+const { commitWithRetry } = require("../utils/commitWithRetry");
 const {
   resolveTreasuryFromSystemType,
   normalizeTreasurySystemType,
@@ -526,7 +527,7 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
 
     const settlement = settlementDocs[0];
 
-    await session.commitTransaction();
+    await commitWithRetry(session);
     committed = true;
 
     return res.status(201).json({

@@ -1,5 +1,26 @@
 "use strict";
 
+/**
+ * ============================================================================
+ * ENDPOINTS INTERNES DE PARRAINAGE — Tx-Core
+ * ============================================================================
+ *
+ * Deux responsabilités, strictement séparées :
+ *
+ *   POST /internal/referral/activity       → TÉMOIGNER (faits transactionnels)
+ *   POST /internal/referral/transfer-bonus → EXÉCUTER  (le versement décidé)
+ *
+ * Tx-Core ne décide jamais d'un bonus. Il rapporte ce qu'il a vu, et il exécute
+ * ce que le backend principal a arrêté. Aucun montant n'est calculé ici ; aucune
+ * condition d'éligibilité n'y est évaluée.
+ *
+ * AUTHENTIFICATION. Elle n'est plus faite dans ces fonctions : elle est portée
+ * par `requireInternalAuth('principal')` au niveau du routeur. L'ancien contrôle
+ * inline comparait les jetons avec `===` — vulnérable à une attaque temporelle —
+ * et vivait au même endroit que la logique métier, ce qui rendait facile de
+ * l'oublier en ajoutant une route.
+ */
+
 let logger = console;
 try {
   logger = require("../utils/logger");
@@ -9,6 +30,10 @@ const {
   transferReferralBonus,
 } = require("../services/internalReferralTransferService");
 
+const {
+  getQualifyingActivity,
+} = require("../services/referral/referralActivityService");
+
 function safeNumber(v) {
   const n =
     typeof v === "number" ? v : parseFloat(String(v ?? "").replace(",", "."));
@@ -16,53 +41,98 @@ function safeNumber(v) {
 }
 
 function normalizeCurrency(v, fallback = "CAD") {
-  const code = String(v || fallback).trim().toUpperCase();
+  const code = String(v || fallback)
+    .trim()
+    .toUpperCase();
   return code || fallback;
 }
 
-function getInternalToken() {
-  return (
-    process.env.TX_CORE_INTERNAL_TOKEN ||
-    process.env.INTERNAL_TX_TOKEN ||
-    process.env.PRINCIPAL_INTERNAL_TOKEN ||
-    process.env.INTERNAL_TOKEN ||
-    ""
-  );
+/** Identifiant de corrélation transmis par l'appelant, ou vide. */
+function getCorrelationId(req) {
+  return String(req.headers["x-correlation-id"] || "").trim().slice(0, 128);
 }
 
-function isValidInternalToken(req) {
-  const received =
-    req.headers["x-internal-token"] ||
-    req.headers["x-tx-internal-token"] ||
-    "";
-  const expected = getInternalToken();
-  return !!expected && String(received) === String(expected);
-}
+/**
+ * POST /api/v1/internal/referral/activity
+ *
+ * Rapporte l'activité qualifiante d'un utilisateur. Les critères (flux, fenêtre,
+ * exclusions) sont imposés par l'appelant, mais revalidés ici contre une liste
+ * blanche : un service interne compromis ne doit pas pouvoir transformer cet
+ * endpoint en extracteur de données arbitraire.
+ */
+exports.getActivity = async (req, res) => {
+  const correlationId = getCorrelationId(req);
 
-exports.transferBonus = async (req, res) => {
   try {
-    if (!isValidInternalToken(req)) {
-      return res.status(401).json({
-        success: false,
-        ok: false,
-        code: "INVALID_INTERNAL_TOKEN",
-        error: "Accès interne refusé",
+    const activity = await getQualifyingActivity({
+      userId: req.body?.userId,
+      flows: req.body?.flows,
+      since: req.body?.since,
+      until: req.body?.until,
+      excludeTypes: req.body?.excludeTypes,
+      excludeCounterpartyUserId: req.body?.excludeCounterpartyUserId,
+    });
+
+    return res.json({ success: true, data: activity });
+  } catch (e) {
+    const status = Number(e?.status) || 500;
+
+    if (status >= 500) {
+      logger.error?.("[InternalReferral] getActivity error", {
+        correlationId,
+        message: e?.message,
+        code: e?.code,
       });
     }
 
+    return res.status(status).json({
+      success: false,
+      code: e?.code || "REFERRAL_ACTIVITY_FAILED",
+      error:
+        status >= 500
+          ? "Activité de parrainage indisponible"
+          : e?.message || "Requête invalide",
+    });
+  }
+};
+
+/**
+ * POST /api/v1/internal/referral/transfer-bonus
+ *
+ * Exécute un versement déjà décidé. Idempotent par construction : le même
+ * `rewardId` et le même bénéficiaire ne peuvent donner lieu qu'à un seul
+ * mouvement, quel que soit le nombre d'appels.
+ *
+ * ⚠️ LES MONTANTS ARRIVENT D'AILLEURS, ET C'EST NORMAL — mais uniquement parce
+ * que cet endpoint est inaccessible depuis l'extérieur et que le seul appelant
+ * autorisé est le moteur d'éligibilité, qui les calcule lui-même à partir du
+ * barème. Si cet endpoint devenait un jour joignable autrement, ces montants
+ * devraient être recalculés ici.
+ */
+exports.transferBonus = async (req, res) => {
+  const correlationId = getCorrelationId(req) || String(req.body?.correlationId || "");
+
+  try {
     const {
+      rewardId,
+      programVersion = "",
+      triggerTxId = "",
       treasuryUserId,
       treasurySystemType = "REFERRAL_TREASURY",
       treasuryCurrency = "CAD",
-      sponsorId,
-      refereeId,
-      sponsorBonus = 0,
-      refereeBonus = 0,
       bonusInputCurrency = "CAD",
-      sponsorCurrency,
-      refereeCurrency,
+      beneficiaries,
       metadata = {},
     } = req.body || {};
+
+    if (!rewardId) {
+      return res.status(400).json({
+        success: false,
+        ok: false,
+        code: "REWARD_ID_REQUIRED",
+        error: "rewardId requis",
+      });
+    }
 
     if (!treasuryUserId) {
       return res.status(400).json({
@@ -73,48 +143,36 @@ exports.transferBonus = async (req, res) => {
       });
     }
 
-    if (!sponsorId) {
+    if (!Array.isArray(beneficiaries) || !beneficiaries.length) {
       return res.status(400).json({
         success: false,
         ok: false,
-        code: "SPONSOR_ID_REQUIRED",
-        error: "sponsorId requis",
+        code: "BENEFICIARIES_REQUIRED",
+        error: "beneficiaries requis",
       });
     }
 
-    if (!refereeId) {
-      return res.status(400).json({
-        success: false,
-        ok: false,
-        code: "REFEREE_ID_REQUIRED",
-        error: "refereeId requis",
-      });
-    }
-
-    const normalizedBonusInputCurrency = normalizeCurrency(
-      bonusInputCurrency,
-      "CAD"
-    );
+    const normalizedInputCurrency = normalizeCurrency(bonusInputCurrency, "CAD");
 
     const result = await transferReferralBonus({
-      treasuryUserId: String(treasuryUserId || "").trim(),
-      treasurySystemType: String(
-        treasurySystemType || "REFERRAL_TREASURY"
-      ).trim(),
+      rewardId: String(rewardId),
+      correlationId,
+      programVersion: String(programVersion || ""),
+      triggerTxId: String(triggerTxId || ""),
+      treasuryUserId: String(treasuryUserId).trim(),
+      treasurySystemType: String(treasurySystemType || "REFERRAL_TREASURY").trim(),
       treasuryCurrency: normalizeCurrency(treasuryCurrency, "CAD"),
-      sponsorId: String(sponsorId),
-      refereeId: String(refereeId),
-      sponsorBonus: safeNumber(sponsorBonus),
-      refereeBonus: safeNumber(refereeBonus),
-      bonusInputCurrency: normalizedBonusInputCurrency,
-      sponsorCurrency: normalizeCurrency(
-        sponsorCurrency || normalizedBonusInputCurrency,
-        normalizedBonusInputCurrency
-      ),
-      refereeCurrency: normalizeCurrency(
-        refereeCurrency || normalizedBonusInputCurrency,
-        normalizedBonusInputCurrency
-      ),
+      bonusInputCurrency: normalizedInputCurrency,
+      beneficiaries: beneficiaries.map((b) => ({
+        userId: String(b?.userId || ""),
+        role: String(b?.role || ""),
+        amount: safeNumber(b?.amount),
+        payoutCurrency: normalizeCurrency(
+          b?.payoutCurrency || normalizedInputCurrency,
+          normalizedInputCurrency
+        ),
+        label: String(b?.label || ""),
+      })),
       metadata:
         metadata && typeof metadata === "object" && !Array.isArray(metadata)
           ? metadata
@@ -122,21 +180,21 @@ exports.transferBonus = async (req, res) => {
     });
 
     if (!result?.ok) {
-      return res.status(400).json({
-        success: false,
-        ok: false,
-        ...result,
-      });
+      /**
+       * 409 et non 400 : l'échec porte sur l'ÉTAT du système (fonds
+       * insuffisants, portefeuille absent), pas sur la forme de la requête. La
+       * distinction compte pour l'appelant, qui doit reprogrammer une tentative
+       * dans le premier cas et corriger son appel dans le second.
+       */
+      return res.status(409).json({ success: false, ...result });
     }
 
-    return res.json({
-      success: true,
-      ok: true,
-      ...result,
-    });
+    return res.json({ success: true, ...result });
   } catch (e) {
-    logger.error?.("[InternalReferralController.transferBonus] error", {
+    logger.error?.("[InternalReferral] transferBonus error", {
+      correlationId,
       message: e?.message,
+      code: e?.code,
       stack: e?.stack,
     });
 
@@ -144,7 +202,7 @@ exports.transferBonus = async (req, res) => {
       success: false,
       ok: false,
       code: e?.code || "INTERNAL_REFERRAL_TRANSFER_ERROR",
-      error: e?.message || "Erreur transfert bonus referral",
+      error: "Erreur transfert bonus parrainage",
     });
   }
 };

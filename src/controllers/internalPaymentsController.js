@@ -14,6 +14,7 @@ const txConn = getTxConn();
 const User = require("../models/User")(usersConn);
 const TxWalletBalance = require("../models/TxWalletBalance")(txConn);
 const Transaction = require("../models/Transaction")(txConn);
+const { commitWithRetry } = require("../utils/commitWithRetry");
 
 const sanitize = (text) =>
   String(text || "").replace(/[<>\\/{};]/g, "").trim();
@@ -293,7 +294,7 @@ exports.createInternalPayment = async (req, res, next) => {
         .session(session || null);
 
       if (existing) {
-        if (session) await session.commitTransaction();
+        if (session) await commitWithRetry(session);
         if (session) session.endSession();
 
         logger.warn("[internal-payments] idempotent-hit", {
@@ -422,7 +423,7 @@ exports.createInternalPayment = async (req, res, next) => {
         idempotencyKey,
       });
 
-      if (session) await session.commitTransaction();
+      if (session) await commitWithRetry(session);
       if (session) session.endSession();
 
       return res.status(201).json({
@@ -509,7 +510,7 @@ exports.createInternalPayment = async (req, res, next) => {
       idempotencyKey,
     });
 
-    if (session) await session.commitTransaction();
+    if (session) await commitWithRetry(session);
     if (session) session.endSession();
 
     logger.info("[internal-payments] done", {

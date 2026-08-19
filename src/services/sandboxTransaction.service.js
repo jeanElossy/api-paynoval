@@ -633,23 +633,43 @@ async function createTransactionAndMutateWallet({
   try {
     if (conn && typeof conn.startSession === "function") {
       session = await conn.startSession();
-      session.startTransaction();
 
-      const created = await Transaction.create([txPayload], { session });
-      const tx = created[0];
+      /**
+       * `withTransaction` plutôt que start/commit à la main : le pilote rejoue
+       * le corps sur conflit d'écriture et rejoue le commit sur réponse perdue.
+       *
+       * Écritures toutes sur la MÊME connexion — c'est donc une transaction
+       * mono-base, valable indépendamment du partage de client entre Users et
+       * Transactions. Passer par `runtime.runInTransaction` ici la désactiverait
+       * à tort en mode dégradé.
+       *
+       * Le corps est rejouable : deux créations, aucune écriture hors base,
+       * aucun envoi de réponse.
+       */
+      /**
+       * La valeur est capturée dans une fermeture : `withTransaction` ne
+       * propage pas le retour du corps sur le pilote mongodb 5.x (vérifié).
+       */
+      let result;
 
-      const walletAfter = await applySandboxWalletMutation({
-        wallet,
-        action: flowInfo.walletAction,
-        amount,
-        currency,
-        session,
+      await session.withTransaction(async () => {
+        const created = await Transaction.create([txPayload], { session });
+        const tx = created[0];
+
+        const walletAfter = await applySandboxWalletMutation({
+          wallet,
+          action: flowInfo.walletAction,
+          amount,
+          currency,
+          session,
+        });
+
+        result = { tx, walletAfter };
       });
 
-      await session.commitTransaction();
       session.endSession();
 
-      return { tx, walletAfter };
+      return result;
     }
   } catch (err) {
     try {

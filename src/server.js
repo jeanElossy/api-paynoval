@@ -512,6 +512,37 @@ app.use(
 // ─────────────────────────────────────────────────────────────
 let server = null;
 let autoCancelWorker = null;
+let referralOutboxWorker = null;
+
+/**
+ * Worker de livraison des evenements de parrainage.
+ *
+ * Il consomme la file ecrite par `referralEventOutbox` lors de la confirmation
+ * des transactions et notifie le backend principal. Son absence ne bloque aucun
+ * mouvement financier : les evenements s'accumulent en file et repartiront des
+ * son demarrage — c'est precisement la propriete recherchee.
+ */
+function startReferralWorker() {
+  try {
+    const {
+      startReferralOutboxWorker,
+    } = require("./services/referral/referralOutboxWorker");
+
+    const worker = startReferralOutboxWorker();
+
+    logger.info("🎁 Worker parrainage active", {
+      intervalMs: Number(process.env.REFERRAL_OUTBOX_INTERVAL_MS || 5000),
+      batchSize: Number(process.env.REFERRAL_OUTBOX_BATCH_SIZE || 50),
+    });
+
+    return worker;
+  } catch (err) {
+    logger.error("❌ Worker parrainage non demarre", {
+      err: err?.message || err,
+    });
+    return null;
+  }
+}
 
 function startAutoCancelWorker() {
   if (process.env.TX_AUTO_CANCEL_WORKER === "false") {
@@ -624,8 +655,9 @@ async function bootstrap() {
       })
     );
 
-    // Démarrage du worker après la connexion DB et le montage des routes.
+    // Démarrage des workers après la connexion DB et le montage des routes.
     autoCancelWorker = startAutoCancelWorker();
+    referralOutboxWorker = startReferralWorker();
 
     app.use((_req, res) =>
       res.status(404).json({
@@ -686,6 +718,15 @@ const graceful = async (signal) => {
       logger.info("⏱️ Auto-cancel TX worker arrêté");
     } catch (err) {
       logger.warn("Erreur arrêt auto-cancel TX worker", {
+        message: err?.message || err,
+      });
+    }
+
+    try {
+      referralOutboxWorker?.stop?.();
+      logger.info("🎁 Worker parrainage arrêté");
+    } catch (err) {
+      logger.warn("Erreur arrêt worker parrainage", {
         message: err?.message || err,
       });
     }

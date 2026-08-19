@@ -598,7 +598,8 @@ function buildSettlementPayload(parsed, req, rail, provider) {
       parsed?.verificationReason ||
       null,
 
-    verified: parsed?.verified !== false,
+    // Idem : `true` explicite exigé, pas « tout sauf false ».
+    verified: parsed?.verified === true,
     verificationReason: parsed?.verificationReason || null,
 
     raw,
@@ -654,8 +655,16 @@ async function providerWebhookController(req, res, next) {
       throw createError(400, "Webhook provider invalide ou vide");
     }
 
-    if (parsed.verified === false) {
-      logger.warn("[providerWebhook] signature invalide", {
+    /**
+     * REFUS PAR DÉFAUT. L'ancien test `parsed.verified === false` laissait
+     * passer `undefined` : un adaptateur qui oublie le champ, ou qui sort par un
+     * chemin d'erreur avant de le renseigner, rendait le webhook authentique.
+     * On exige désormais un `true` explicite — c'est la posture de Stripe et de
+     * PayPal : une signature qu'on n'a pas vérifiée n'est pas une signature
+     * valide, c'est une signature absente.
+     */
+    if (parsed.verified !== true) {
+      logger.warn("[providerWebhook] signature non vérifiée", {
         provider,
         rail,
         reason: parsed?.verificationReason || "BAD_SIGNATURE",

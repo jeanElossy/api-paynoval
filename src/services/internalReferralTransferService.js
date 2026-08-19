@@ -13,6 +13,21 @@ const TxWalletBalanceModel = require("../models/TxWalletBalance");
 const TxSystemBalanceModel = require("../models/TxSystemBalance");
 const TransactionModel = require("../models/Transaction");
 const LedgerEntryModel = require("../models/LedgerEntry");
+const ReferralPayoutModel = require("../models/ReferralPayout");
+
+/**
+ * Primitives d'idempotence — module PUR, testable sans base ni configuration.
+ * Elles definissent la garantie « exactement une fois » : les extraire permet
+ * de les verifier isolement, ce que ce fichier (qui charge la configuration au
+ * require) ne permettrait pas.
+ */
+const {
+  buildPayoutIdempotencyKey,
+  computeRequestFingerprint,
+  normalizeBeneficiaries,
+} = require("./referral/referralKeys");
+
+const crypto = require("crypto");
 
 function safeNumber(v) {
   const n =
@@ -287,41 +302,6 @@ async function ensureWallet(userId, currency, session) {
   }
 
   return TxWalletBalance.ensureWallet(userId, cur, { session });
-}
-
-async function creditWallet({ userId, currency, amount, session, errorCode }) {
-  const TxWalletBalance = getTxWalletBalance();
-  const cur = normalizeCurrency(currency);
-  const amt = roundForCurrency(amount, cur);
-
-  if (!(amt > 0)) {
-    return {
-      skipped: true,
-      userId: String(userId),
-      currency: cur,
-      amount: 0,
-    };
-  }
-
-  await ensureWallet(userId, cur, session);
-
-  const updated = await TxWalletBalance.credit(userId, cur, amt, { session });
-
-  if (!updated) {
-    throw Object.assign(new Error(errorCode || "WALLET_CREDIT_FAILED"), {
-      code: errorCode || "WALLET_CREDIT_FAILED",
-      details: { userId: String(userId), currency: cur, amount: amt },
-    });
-  }
-
-  return {
-    skipped: false,
-    userId: String(userId),
-    currency: cur,
-    amount: amt,
-    balance: Number(updated.amount?.toString?.() || 0),
-    availableBalance: Number(updated.availableAmount?.toString?.() || 0),
-  };
 }
 
 async function convertAmountViaInternalFx({
@@ -718,6 +698,109 @@ async function debitReferralTreasury({
   };
 }
 
+/**
+ * ---------------------------------------------------------------------------
+ * REGISTRE D'IDEMPOTENCE
+ * ---------------------------------------------------------------------------
+ */
+
+function getReferralPayout() {
+  return ReferralPayoutModel(getTxConn());
+}
+
+/** Reconstitue la réponse d'origine à partir des versements déjà enregistrés. */
+function buildReplayResponse(payouts, { fingerprint }) {
+  const snapshot = payouts.find((p) => p.responseSnapshot)?.responseSnapshot;
+
+  const mismatch = payouts.some(
+    (p) => p.requestFingerprint && p.requestFingerprint !== fingerprint
+  );
+
+  return {
+    ...(snapshot || {}),
+    ok: true,
+    alreadyPaid: true,
+    code: "ALREADY_PAID",
+    fingerprintMismatch: mismatch,
+    payouts: payouts.map((p) => ({
+      idempotencyKey: p.idempotencyKey,
+      beneficiaryId: p.beneficiaryId,
+      role: p.beneficiaryRole,
+      creditedAmount: p.creditedAmount,
+      creditedCurrency: p.creditedCurrency,
+      balanceBefore: p.balanceBefore,
+      balanceAfter: p.balanceAfter,
+      transactionReference: p.transactionReference,
+      completedAt: p.completedAt,
+    })),
+  };
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * CRÉDIT AVEC CAPTURE DU SOLDE AVANT / APRÈS
+ * ---------------------------------------------------------------------------
+ */
+
+function decimalToNumber(value) {
+  if (value === null || value === undefined) return 0;
+  const n = Number(value?.toString?.() ?? value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Crédite un portefeuille et retourne les soldes encadrant le mouvement.
+ *
+ * La lecture du solde initial se fait DANS la même transaction Mongo que le
+ * crédit : l'isolation par instantané garantit que la valeur lue est bien celle
+ * qui précède immédiatement l'écriture. Un « solde avant » lu hors transaction
+ * serait une approximation, et une approximation dans un relevé financier est
+ * une erreur qu'on ne peut pas défendre.
+ */
+async function creditWalletWithBalances({
+  userId,
+  currency,
+  amount,
+  session,
+  errorCode,
+}) {
+  const TxWalletBalance = getTxWalletBalance();
+  const cur = normalizeCurrency(currency);
+  const amt = roundForCurrency(amount, cur);
+
+  if (!(amt > 0)) {
+    return { skipped: true, balanceBefore: null, balanceAfter: null, amount: 0 };
+  }
+
+  const before = await ensureWallet(userId, cur, session);
+  const balanceBefore = decimalToNumber(before?.amount);
+
+  const updated = await TxWalletBalance.credit(userId, cur, amt, { session });
+
+  if (!updated) {
+    throw Object.assign(new Error(errorCode || "WALLET_CREDIT_FAILED"), {
+      code: errorCode || "WALLET_CREDIT_FAILED",
+      details: { userId: String(userId), currency: cur, amount: amt },
+    });
+  }
+
+  return {
+    skipped: false,
+    userId: String(userId),
+    currency: cur,
+    amount: amt,
+    balanceBefore,
+    balanceAfter: decimalToNumber(updated.amount),
+    availableAfter: decimalToNumber(updated.availableAmount),
+  };
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * TRANSACTION VISIBLE PAR L'UTILISATEUR
+ * ---------------------------------------------------------------------------
+ */
+
 function buildUserVisibleReferralTx({
   reference,
   idempotencyKey,
@@ -730,6 +813,10 @@ function buildUserVisibleReferralTx({
   triggerTxId,
   payoutRefBase,
   label,
+  rewardId,
+  correlationId,
+  balanceBefore,
+  balanceAfter,
   metadata = {},
 }) {
   const cur = normalizeCurrency(currency || "XOF");
@@ -761,20 +848,29 @@ function buildUserVisibleReferralTx({
     localCurrencySymbol: cur,
     status: "confirmed",
     confirmedAt: now,
+    completedAt: now,
     requiresSecurityValidation: false,
     securityAttempts: 0,
     securityLockedUntil: null,
     metadata: {
       category: "referral_bonus",
       role,
+      rewardId: String(rewardId || ""),
+      correlationId: String(correlationId || ""),
       triggerTxId: String(triggerTxId || ""),
+      balanceBefore,
+      balanceAfter,
       ...metadata,
     },
     meta: {
       category: "referral_bonus",
       role,
       direction: "credit",
+      rewardId: String(rewardId || ""),
+      correlationId: String(correlationId || ""),
       triggerTxId: String(triggerTxId || ""),
+      balanceBefore,
+      balanceAfter,
       ...metadata,
     },
     createdAt: now,
@@ -783,99 +879,74 @@ function buildUserVisibleReferralTx({
 }
 
 /**
- * Enregistre (ou met à jour) la transaction visible par l'utilisateur.
+ * Enregistre la transaction visible par l'utilisateur — EN INSERTION STRICTE.
  *
- * Renvoie le document : son `_id` est nécessaire pour rattacher les écritures
- * comptables, `transactionId` étant requis sur `LedgerEntry`.
+ * L'`upsert` précédent était un trou dans la coque : rejoué, il mettait
+ * simplement le document à jour et laissait le crédit se produire une seconde
+ * fois. L'insertion stricte, elle, se heurte à l'index unique
+ * `{userId, reference}` et lève un E11000 qui annule TOUTE la transaction Mongo.
+ *
+ * C'est aussi ce qui protège les récompenses accordées AVANT l'introduction du
+ * registre d'idempotence : elles n'ont pas de `ReferralPayout`, mais elles ont
+ * leur transaction — et sa référence n'a pas changé de format, précisément pour
+ * que cette garde continue de mordre.
  */
-async function upsertReferralHistoryTransaction(doc, session) {
+async function insertReferralHistoryTransaction(doc, session) {
   const Transaction = getTransactionModel();
 
-  return Transaction.findOneAndUpdate(
-    { reference: String(doc.reference) },
-    {
-      $setOnInsert: {
-        reference: doc.reference,
-        createdAt: doc.createdAt || new Date(),
-      },
-      $set: {
-        idempotencyKey: doc.idempotencyKey,
-        internalImported: doc.internalImported,
-        flow: doc.flow,
-        operationKind: doc.operationKind,
-        initiatedBy: doc.initiatedBy,
-        context: doc.context,
-        contextId: doc.contextId,
-        provider: doc.provider,
-        type: doc.type,
-        userId: doc.userId,
-        sender: doc.sender,
-        receiver: doc.receiver,
-        senderName: doc.senderName,
-        receiverName: doc.receiverName,
-        amount: doc.amount,
-        localAmount: doc.localAmount,
-        currency: doc.currency,
-        localCurrency: doc.localCurrency,
-        currencySource: doc.currencySource,
-        currencyTarget: doc.currencyTarget,
-        localCurrencySymbol: doc.localCurrencySymbol,
-        status: doc.status,
-        confirmedAt: doc.confirmedAt,
-        completedAt: doc.completedAt,
-        requiresSecurityValidation: false,
-        securityAttempts: 0,
-        securityLockedUntil: null,
-        metadata: doc.metadata || {},
-        meta: doc.meta || {},
-        updatedAt: new Date(),
-      },
-      $unset: {
-        verificationToken: 1,
-        verificationCode: 1,
-        verificationExpiresAt: 1,
-        securityCode: 1,
-        securityQuestion: 1,
-        securityAnswerHash: 1,
-        validatedAt: 1,
-        cancelledAt: 1,
-        failedAt: 1,
-        lastAttemptAt: 1,
-        lockedUntil: 1,
-      },
-    },
-    { upsert: true, new: true, session }
-  );
+  const [created] = await Transaction.create([doc], { session });
+  return created;
 }
 
+/**
+ * ---------------------------------------------------------------------------
+ * VERSEMENT
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Verse un bonus de parrainage, exactement une fois.
+ *
+ * GARANTIE. Pour un `rewardId` et un bénéficiaire donnés, l'argent ne peut
+ * partir qu'une seule fois, quel que soit le nombre d'appels, leur simultanéité,
+ * ou les redémarrages intercalés. Trois verrous concourants l'assurent :
+ *
+ *   1. l'index unique de `ReferralPayout`, inséré AVANT tout mouvement ;
+ *   2. l'index unique `{userId, reference}` de `Transaction`, qui couvre en
+ *      plus les récompenses antérieures à ce dispositif ;
+ *   3. le contrôle de rejeu du grand livre, conservé en défense en profondeur.
+ *
+ * Le tout dans UNE transaction Mongo : si l'un des trois mord, rien n'a bougé —
+ * ni le solde du bénéficiaire, ni celui de la trésorerie.
+ *
+ * @param {object} params
+ * @param {string} params.rewardId          récompense de parrainage concernée
+ * @param {Array}  params.beneficiaries     [{userId, role, amount, payoutCurrency, label}]
+ * @param {string} params.bonusInputCurrency devise dans laquelle les montants sont exprimés
+ */
 async function transferReferralBonus({
+  rewardId,
+  correlationId = "",
+  programVersion = "",
+  triggerTxId = "",
   treasuryUserId,
   treasurySystemType = "REFERRAL_TREASURY",
   treasuryCurrency = "CAD",
-  sponsorId,
-  refereeId,
-  sponsorBonus,
-  refereeBonus,
   bonusInputCurrency = "CAD",
-  sponsorCurrency,
-  refereeCurrency,
+  beneficiaries: rawBeneficiaries,
   metadata = {},
 }) {
   const treasuryUser = String(treasuryUserId || "").trim();
   const systemType = String(treasurySystemType || "REFERRAL_TREASURY").trim();
   const treasuryCur = normalizeCurrency(treasuryCurrency || "CAD");
   const inputBonusCurrency = normalizeCurrency(bonusInputCurrency || "CAD");
-  const sponsorCur = normalizeCurrency(sponsorCurrency || inputBonusCurrency);
-  const refereeCur = normalizeCurrency(refereeCurrency || inputBonusCurrency);
+  const reward = String(rewardId || "").trim();
 
-  const normalizedSponsorBonus = roundForCurrency(
-    sponsorBonus,
-    inputBonusCurrency
-  );
-  const normalizedRefereeBonus = roundForCurrency(
-    refereeBonus,
-    inputBonusCurrency
-  );
+  if (!reward) {
+    throw Object.assign(new Error("REWARD_ID_REQUIRED"), {
+      code: "REWARD_ID_REQUIRED",
+    });
+  }
 
   if (!treasuryUser) {
     throw Object.assign(new Error("TREASURY_USER_ID_REQUIRED"), {
@@ -883,107 +954,138 @@ async function transferReferralBonus({
     });
   }
 
-  if (!sponsorId) {
-    throw Object.assign(new Error("SPONSOR_ID_REQUIRED"), {
-      code: "SPONSOR_ID_REQUIRED",
-    });
-  }
-
-  if (!refereeId) {
-    throw Object.assign(new Error("REFEREE_ID_REQUIRED"), {
-      code: "REFEREE_ID_REQUIRED",
-    });
-  }
-
-  const sponsorMovement = await buildMovement({
-    nominalBonusAmount: normalizedSponsorBonus,
-    nominalBonusCurrency: inputBonusCurrency,
-    creditedCurrency: sponsorCur,
-    treasuryCurrency: treasuryCur,
-  });
-
-  const refereeMovement = await buildMovement({
-    nominalBonusAmount: normalizedRefereeBonus,
-    nominalBonusCurrency: inputBonusCurrency,
-    creditedCurrency: refereeCur,
-    treasuryCurrency: treasuryCur,
-  });
-
-  const treasuryDebitTotal = roundForCurrency(
-    sponsorMovement.treasuryDebitedAmount +
-      refereeMovement.treasuryDebitedAmount,
-    treasuryCur
+  const beneficiaries = normalizeBeneficiaries(
+    rawBeneficiaries,
+    inputBonusCurrency
   );
 
-  const payoutRefBase =
-    String(metadata?.payoutRefBase || "").trim() ||
-    `REFBONUS-${String(sponsorId)}-${String(refereeId)}`;
-
-  const idempotencyKey =
-    String(metadata?.idempotencyKey || "").trim() ||
-    `referral_bonus:${payoutRefBase}`;
-
-  logReferral("transferReferralBonus.start", {
-    treasuryUserId: treasuryUser,
-    treasurySystemType: systemType,
-    treasuryCurrency: treasuryCur,
-    sponsorId: String(sponsorId),
-    refereeId: String(refereeId),
-    sponsorBonus: normalizedSponsorBonus,
-    refereeBonus: normalizedRefereeBonus,
-    bonusInputCurrency: inputBonusCurrency,
-    sponsorCurrency: sponsorCur,
-    refereeCurrency: refereeCur,
-    treasuryDebitTotal,
-    metadata,
-  });
-
-  if (!(treasuryDebitTotal > 0)) {
-    const skipped = {
+  if (!beneficiaries.length) {
+    return {
       ok: true,
       skipped: true,
       code: "NO_POSITIVE_BONUS",
-      treasuryUserId: treasuryUser,
-      treasurySystemType: systemType,
-      treasuryCurrency: treasuryCur,
-      treasuryDebitTotal: 0,
-      sponsor: {
-        userId: String(sponsorId),
-        nominalBonusAmount: 0,
-        nominalBonusCurrency: inputBonusCurrency,
-        creditedAmount: 0,
-        creditedCurrency: sponsorCur,
-        treasuryDebitedAmount: 0,
-        treasuryCurrency: treasuryCur,
-      },
-      referee: {
-        userId: String(refereeId),
-        nominalBonusAmount: 0,
-        nominalBonusCurrency: inputBonusCurrency,
-        creditedAmount: 0,
-        creditedCurrency: refereeCur,
-        treasuryDebitedAmount: 0,
-        treasuryCurrency: treasuryCur,
-      },
-      conversions: {
-        sponsor: sponsorMovement.conversions,
-        referee: refereeMovement.conversions,
-      },
-      txRefs: {
-        sponsor: `${payoutRefBase}-SPONSOR`,
-        referee: `${payoutRefBase}-REFEREE`,
-      },
+      rewardId: reward,
+      beneficiaries: [],
     };
-
-    logReferral("transferReferralBonus.skipped", skipped);
-    return skipped;
   }
+
+  const fingerprint = computeRequestFingerprint({
+    rewardId: reward,
+    treasuryUserId: treasuryUser,
+    treasurySystemType: systemType,
+    treasuryCurrency: treasuryCur,
+    bonusInputCurrency: inputBonusCurrency,
+    beneficiaries,
+  });
+
+  const ReferralPayout = getReferralPayout();
+
+  const keys = beneficiaries.map((b) =>
+    buildPayoutIdempotencyKey(reward, b.userId)
+  );
+
+  /* --- Voie rapide : déjà versé ? ---------------------------------------- */
+
+  const alreadyPaid = await ReferralPayout.find({
+    idempotencyKey: { $in: keys },
+    status: "succeeded",
+  }).lean();
+
+  if (alreadyPaid.length) {
+    const replay = buildReplayResponse(alreadyPaid, { fingerprint });
+
+    if (replay.fingerprintMismatch) {
+      /**
+       * Même clé, paramètres différents. On ne repaie SURTOUT pas — mais on ne
+       * se tait pas non plus : c'est le signe d'un barème modifié après coup ou
+       * d'un appelant qui réutilise une clé. Il faut que quelqu'un regarde.
+       */
+      logger.error?.(
+        "[REFERRAL][TX-CORE][TRANSFER] empreinte divergente sur une cle deja versee",
+        { rewardId: reward, correlationId, fingerprint }
+      );
+    }
+
+    logReferral("transferReferralBonus.already_paid", {
+      rewardId: reward,
+      correlationId,
+      keys,
+    });
+
+    return replay;
+  }
+
+  /* --- Conversions de change : HORS transaction Mongo ---------------------
+   * Un appel réseau à l'intérieur d'une transaction Mongo maintient les verrous
+   * ouverts pendant toute la latence du tiers. On calcule donc tous les
+   * mouvements d'abord, on n'ouvre la transaction qu'ensuite.
+   */
+
+  const movements = [];
+
+  for (const beneficiary of beneficiaries) {
+    const movement = await buildMovement({
+      nominalBonusAmount: beneficiary.amount,
+      nominalBonusCurrency: inputBonusCurrency,
+      creditedCurrency: beneficiary.payoutCurrency,
+      treasuryCurrency: treasuryCur,
+    });
+
+    movements.push({ beneficiary, movement });
+  }
+
+  const treasuryDebitTotal = roundForCurrency(
+    movements.reduce(
+      (acc, m) => acc + safeNumber(m.movement.treasuryDebitedAmount),
+      0
+    ),
+    treasuryCur
+  );
+
+  if (!(treasuryDebitTotal > 0)) {
+    return {
+      ok: true,
+      skipped: true,
+      code: "NO_POSITIVE_BONUS",
+      rewardId: reward,
+      treasuryDebitTotal: 0,
+      beneficiaries: [],
+    };
+  }
+
+  const payoutRefBase =
+    String(metadata?.payoutRefBase || "").trim() || `REFBONUS-${reward}`;
 
   const session = await mongoose.startSession();
   let result = null;
 
   try {
     await session.withTransaction(async () => {
+      /* 1. LE VERROU, AVANT TOUT MOUVEMENT.
+       *    Si une autre exécution est passée par là, l'insertion échoue ici —
+       *    donc avant que le moindre centime ne bouge. */
+      const payoutDocs = movements.map(({ beneficiary, movement }) => ({
+        idempotencyKey: buildPayoutIdempotencyKey(reward, beneficiary.userId),
+        requestFingerprint: fingerprint,
+        rewardId: reward,
+        beneficiaryId: beneficiary.userId,
+        beneficiaryRole: beneficiary.role,
+        treasuryUserId: treasuryUser,
+        treasurySystemType: systemType,
+        creditedAmount: movement.creditedAmount,
+        creditedCurrency: movement.creditedCurrency,
+        treasuryDebitedAmount: movement.treasuryDebitedAmount,
+        treasuryCurrency: treasuryCur,
+        status: "processing",
+        correlationId: String(correlationId || ""),
+        triggerTxId: String(triggerTxId || ""),
+        programVersion: String(programVersion || ""),
+        transactionReference: `${payoutRefBase}-${beneficiary.role.toUpperCase()}`,
+      }));
+
+      await ReferralPayout.create(payoutDocs, { session, ordered: true });
+
+      /* 2. Débit de la trésorerie. */
       await debitReferralTreasury({
         treasuryUserId: treasuryUser,
         treasurySystemType: systemType,
@@ -992,185 +1094,195 @@ async function transferReferralBonus({
         session,
         metadata: {
           ...metadata,
-          sponsorId: String(sponsorId),
-          refereeId: String(refereeId),
-          sponsorCurrency: sponsorCur,
-          refereeCurrency: refereeCur,
-          sponsorNominalBonus: normalizedSponsorBonus,
-          refereeNominalBonus: normalizedRefereeBonus,
+          rewardId: reward,
+          correlationId: String(correlationId || ""),
           payoutRefBase,
-          idempotencyKey,
+          beneficiaries: beneficiaries.map((b) => ({
+            userId: b.userId,
+            role: b.role,
+          })),
         },
       });
 
-      if (!sponsorMovement.skipped && sponsorMovement.creditedAmount > 0) {
-        await creditWallet({
-          userId: sponsorId,
-          currency: sponsorCur,
-          amount: sponsorMovement.creditedAmount,
+      /* 3. Crédit de chaque bénéficiaire, avec capture du solde avant/après. */
+      const credited = [];
+
+      for (const { beneficiary, movement } of movements) {
+        if (movement.skipped || !(movement.creditedAmount > 0)) continue;
+
+        const reference = `${payoutRefBase}-${beneficiary.role.toUpperCase()}`;
+
+        const balances = await creditWalletWithBalances({
+          userId: beneficiary.userId,
+          currency: movement.creditedCurrency,
+          amount: movement.creditedAmount,
           session,
-          errorCode: "SPONSOR_WALLET_CREDIT_FAILED",
+          errorCode: `${beneficiary.role.toUpperCase()}_WALLET_CREDIT_FAILED`,
         });
 
-        const sponsorTx = await upsertReferralHistoryTransaction(
+        const txDoc = await insertReferralHistoryTransaction(
           buildUserVisibleReferralTx({
-            reference: `${payoutRefBase}-SPONSOR`,
-            idempotencyKey: `${idempotencyKey}:sponsor`,
-            userId: sponsorId,
-            senderId: treasuryUserId,
-            receiverId: sponsorId,
-            amount: sponsorMovement.creditedAmount,
-            currency: sponsorCur,
-            role: "sponsor",
-            triggerTxId: metadata?.triggerTxId || "",
+            reference,
+            idempotencyKey: buildPayoutIdempotencyKey(
+              reward,
+              beneficiary.userId
+            ),
+            userId: beneficiary.userId,
+            senderId: treasuryUser,
+            receiverId: beneficiary.userId,
+            amount: movement.creditedAmount,
+            currency: movement.creditedCurrency,
+            role: beneficiary.role,
+            triggerTxId,
             payoutRefBase,
-            label:
-              metadata?.sponsorFullName || metadata?.sponsorEmail || "Sponsor",
+            rewardId: reward,
+            correlationId,
+            balanceBefore: balances.balanceBefore,
+            balanceAfter: balances.balanceAfter,
+            label: beneficiary.label || beneficiary.role,
             metadata: {
               payoutRefBase,
-              fromTreasuryUserId: String(treasuryUserId),
+              fromTreasuryUserId: treasuryUser,
               treasurySystemType: systemType,
-              nominalBonusAmount: sponsorMovement.nominalBonusAmount,
-              nominalBonusCurrency: sponsorMovement.nominalBonusCurrency,
-              treasuryDebitedAmount: sponsorMovement.treasuryDebitedAmount,
+              nominalBonusAmount: movement.nominalBonusAmount,
+              nominalBonusCurrency: movement.nominalBonusCurrency,
+              treasuryDebitedAmount: movement.treasuryDebitedAmount,
               treasuryCurrency: treasuryCur,
-              conversions: sponsorMovement.conversions,
-              sponsorId: String(sponsorId),
-              refereeId: String(refereeId),
+              conversions: movement.conversions,
+              programVersion: String(programVersion || ""),
             },
           }),
           session
         );
 
         await writeReferralLedgerEntries({
-          transactionId: sponsorTx?._id,
-          reference: `${payoutRefBase}-SPONSOR`,
-          beneficiaryId: sponsorId,
-          beneficiaryCurrency: sponsorCur,
-          creditedAmount: sponsorMovement.creditedAmount,
+          transactionId: txDoc?._id,
+          reference,
+          beneficiaryId: beneficiary.userId,
+          beneficiaryCurrency: movement.creditedCurrency,
+          creditedAmount: movement.creditedAmount,
           treasuryUserId: treasuryUser,
           treasurySystemType: systemType,
           treasuryCurrency: treasuryCur,
-          treasuryDebitedAmount: sponsorMovement.treasuryDebitedAmount,
+          treasuryDebitedAmount: movement.treasuryDebitedAmount,
           session,
           metadata: {
-            role: "sponsor",
+            role: beneficiary.role,
+            rewardId: reward,
+            correlationId: String(correlationId || ""),
             payoutRefBase,
-            sponsorId: String(sponsorId),
-            refereeId: String(refereeId),
-            triggerTxId: metadata?.triggerTxId || "",
-            conversions: sponsorMovement.conversions,
+            triggerTxId: String(triggerTxId || ""),
+            conversions: movement.conversions,
           },
         });
-      }
 
-      if (!refereeMovement.skipped && refereeMovement.creditedAmount > 0) {
-        await creditWallet({
-          userId: refereeId,
-          currency: refereeCur,
-          amount: refereeMovement.creditedAmount,
-          session,
-          errorCode: "REFEREE_WALLET_CREDIT_FAILED",
-        });
-
-        const refereeTx = await upsertReferralHistoryTransaction(
-          buildUserVisibleReferralTx({
-            reference: `${payoutRefBase}-REFEREE`,
-            idempotencyKey: `${idempotencyKey}:referee`,
-            userId: refereeId,
-            senderId: treasuryUserId,
-            receiverId: refereeId,
-            amount: refereeMovement.creditedAmount,
-            currency: refereeCur,
-            role: "referee",
-            triggerTxId: metadata?.triggerTxId || "",
-            payoutRefBase,
-            label:
-              metadata?.refereeFullName || metadata?.refereeEmail || "Referee",
-            metadata: {
-              payoutRefBase,
-              fromTreasuryUserId: String(treasuryUserId),
-              treasurySystemType: systemType,
-              nominalBonusAmount: refereeMovement.nominalBonusAmount,
-              nominalBonusCurrency: refereeMovement.nominalBonusCurrency,
-              treasuryDebitedAmount: refereeMovement.treasuryDebitedAmount,
-              treasuryCurrency: treasuryCur,
-              conversions: refereeMovement.conversions,
-              sponsorId: String(sponsorId),
-              refereeId: String(refereeId),
-            },
-          }),
-          session
-        );
-
-        await writeReferralLedgerEntries({
-          transactionId: refereeTx?._id,
-          reference: `${payoutRefBase}-REFEREE`,
-          beneficiaryId: refereeId,
-          beneficiaryCurrency: refereeCur,
-          creditedAmount: refereeMovement.creditedAmount,
-          treasuryUserId: treasuryUser,
-          treasurySystemType: systemType,
+        credited.push({
+          userId: beneficiary.userId,
+          role: beneficiary.role,
+          nominalBonusAmount: movement.nominalBonusAmount,
+          nominalBonusCurrency: movement.nominalBonusCurrency,
+          creditedAmount: movement.creditedAmount,
+          creditedCurrency: movement.creditedCurrency,
+          treasuryDebitedAmount: movement.treasuryDebitedAmount,
           treasuryCurrency: treasuryCur,
-          treasuryDebitedAmount: refereeMovement.treasuryDebitedAmount,
-          session,
-          metadata: {
-            role: "referee",
-            payoutRefBase,
-            sponsorId: String(sponsorId),
-            refereeId: String(refereeId),
-            triggerTxId: metadata?.triggerTxId || "",
-            conversions: refereeMovement.conversions,
-          },
+          balanceBefore: balances.balanceBefore,
+          balanceAfter: balances.balanceAfter,
+          transactionReference: reference,
+          transactionId: txDoc?._id ? String(txDoc._id) : null,
+          conversions: movement.conversions,
         });
       }
 
       result = {
         ok: true,
+        alreadyPaid: false,
         code: null,
-        message: null,
+        rewardId: reward,
+        correlationId: String(correlationId || ""),
         treasuryUserId: treasuryUser,
         treasurySystemType: systemType,
         treasuryCurrency: treasuryCur,
         bonusInputCurrency: inputBonusCurrency,
         treasuryDebitTotal,
-        sponsor: {
-          userId: String(sponsorId),
-          nominalBonusAmount: sponsorMovement.nominalBonusAmount,
-          nominalBonusCurrency: sponsorMovement.nominalBonusCurrency,
-          creditedAmount: sponsorMovement.creditedAmount,
-          creditedCurrency: sponsorMovement.creditedCurrency,
-          treasuryDebitedAmount: sponsorMovement.treasuryDebitedAmount,
-          treasuryCurrency: treasuryCur,
-        },
-        referee: {
-          userId: String(refereeId),
-          nominalBonusAmount: refereeMovement.nominalBonusAmount,
-          nominalBonusCurrency: refereeMovement.nominalBonusCurrency,
-          creditedAmount: refereeMovement.creditedAmount,
-          creditedCurrency: refereeMovement.creditedCurrency,
-          treasuryDebitedAmount: refereeMovement.treasuryDebitedAmount,
-          treasuryCurrency: treasuryCur,
-        },
-        conversions: {
-          sponsor: sponsorMovement.conversions,
-          referee: refereeMovement.conversions,
-        },
-        txRefs: {
-          sponsor: `${payoutRefBase}-SPONSOR`,
-          referee: `${payoutRefBase}-REFEREE`,
-        },
+        payoutRefBase,
+        beneficiaries: credited,
       };
+
+      /* 4. Clôture du registre : le versement devient définitif, et porte la
+       *    réponse qui sera rejouée à l'identique en cas de nouvel appel. */
+      const completedAt = new Date();
+
+      for (const entry of credited) {
+        await ReferralPayout.updateOne(
+          {
+            idempotencyKey: buildPayoutIdempotencyKey(reward, entry.userId),
+          },
+          {
+            $set: {
+              status: "succeeded",
+              balanceBefore: entry.balanceBefore,
+              balanceAfter: entry.balanceAfter,
+              transactionId: entry.transactionId,
+              transactionReference: entry.transactionReference,
+              responseSnapshot: result,
+              completedAt,
+            },
+          },
+          { session }
+        );
+      }
     });
 
     logReferral("transferReferralBonus.success", result);
     return result;
   } catch (e) {
+    /**
+     * E11000 = un autre passage a déjà versé (concurrence, rejeu, reprise de
+     * worker). Ce n'est pas une erreur : c'est exactement la garantie qui joue
+     * son rôle. On relit le registre et on renvoie la réponse d'origine.
+     */
+    if (e?.code === 11000) {
+      const settled = await ReferralPayout.find({
+        idempotencyKey: { $in: keys },
+        status: "succeeded",
+      }).lean();
+
+      if (settled.length) {
+        logReferral("transferReferralBonus.already_paid_on_conflict", {
+          rewardId: reward,
+          correlationId,
+        });
+
+        return buildReplayResponse(settled, { fingerprint });
+      }
+
+      /**
+       * E11000 sans versement enregistré : c'est l'index unique de
+       * `Transaction` qui a mordu — une récompense accordée AVANT ce
+       * dispositif. L'argent est déjà parti ; il ne doit pas repartir.
+       */
+      logger.warn?.(
+        "[REFERRAL][TX-CORE][TRANSFER] doublon detecte sur l'historique (versement anterieur au registre)",
+        { rewardId: reward, correlationId, payoutRefBase }
+      );
+
+      return {
+        ok: true,
+        alreadyPaid: true,
+        code: "ALREADY_PAID_LEGACY",
+        rewardId: reward,
+        payoutRefBase,
+        beneficiaries: [],
+      };
+    }
+
     const errorResult = {
       ok: false,
       code: e?.code || "TXCORE_REFERRAL_TRANSFER_FAILED",
       message: e?.message || "Referral transfer failed",
       details: e?.details || null,
+      rewardId: reward,
+      correlationId: String(correlationId || ""),
     };
 
     logReferral("transferReferralBonus.error", {
@@ -1186,4 +1298,8 @@ async function transferReferralBonus({
 
 module.exports = {
   transferReferralBonus,
+  // Exportés pour les tests d'idempotence : ces deux fonctions définissent
+  // la garantie « exactement une fois » et doivent être vérifiables isolément.
+  buildPayoutIdempotencyKey,
+  computeRequestFingerprint,
 };

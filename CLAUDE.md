@@ -19,11 +19,15 @@ npm start        # node src/server.js
 npm test         # node --test "test/**/*.test.js" — runner natif, aucune dépendance
 node --test test/userScopeQuery.test.js  # un seul fichier
 
+npm run reconcile:transactions           # reconciliation de TOUS les flux (lecture seule)
+npm run reconcile:referral               # reconciliation des versements de parrainage
+npm run verify:referral-idempotency      # 100 tentatives simultanees -> 1 versement
+
 node scripts/seedBalance.js              # solde de test (utilise MONGO_URI_USERS)
 node scripts/seedAppleReviewerWallet.js  # wallet du compte sandbox Apple Review
 ```
 
-**Une suite de tests existe depuis le 2026-08-18** (elle n'existait pas avant, plusieurs sections de ce fichier le disaient) : runner natif `node:test`, aucune dépendance ajoutée, logique pure uniquement — aucun test ne démarre le service ni n'ouvre de connexion Mongo. Le glob est indispensable : `node --test test/` résout `test/` comme un module CommonJS et échoue en `MODULE_NOT_FOUND` sur Node 22.
+**Une suite de tests existe depuis le 2026-08-18** (elle n'existait pas avant, plusieurs sections de ce fichier le disaient) : runner natif `node:test`, aucune dépendance ajoutée, logique pure uniquement — aucun test ne démarre le service ni n'ouvre de connexion Mongo. **68 tests au 2026-08-19** (28 initiaux + 40 ajoutés : idempotence du parrainage, signature des webhooks, tokens internes, rejeu du commit, exécution transactionnelle, clés d'idempotence de l'API). Le glob est indispensable : `node --test test/` résout `test/` comme un module CommonJS et échoue en `MODULE_NOT_FOUND` sur Node 22.
 
 Contrainte pratique à connaître : `require` d'un contrôleur charge `src/config.js`, donc `dotenv-safe`, qui **échoue sans `.env` complet**. Une logique qu'on veut tester doit donc vivre dans un module sans dépendance de configuration (cf. [src/utils/userScopeQuery.js](src/utils/userScopeQuery.js), extrait du contrôleur exactement pour cette raison). Le reste se vérifie par démarrage du service et appels HTTP (`/health`, `/api/v1/health`).
 
@@ -39,21 +43,41 @@ Surfaces utiles au runtime : `/docs` (Swagger, protégé par JWT + rôle admin/d
   - providers : `WAVE_*`, `ORANGE_*`, `MTN_*`, `MOOV_*`, `STRIPE_*`, `VISA_DIRECT_*`, `BANK_GENERIC_*` (chacun avec `_BASE_URL`, `_API_KEY`, `_WEBHOOK_SECRET`, `_MOCK`) ;
   - worker : `TX_AUTO_CANCEL_WORKER`, `TX_AUTO_CANCEL_INTERVAL_MS`, `TX_AUTO_CANCEL_AFTER_DAYS`, `TX_AUTO_CANCEL_REQUIRED`.
 - `<PROVIDER>_MOCK=true` fait tourner un adapter sans appel réseau réel — c'est le mode de développement local.
+- Deux variables **optionnelles** introduites le 2026-08-19, volontairement **absentes de `.env.example`** (les y mettre les rendrait obligatoires et casserait le démarrage) :
+  - `MONGO_SHARE_CLIENT=off` — rétablit deux `MongoClient` distincts, donc l'ancien mode sans transaction. Bascule de secours.
+  - `WEBHOOK_ALLOW_UNSIGNED=true` — accepte les webhooks non signés **hors production uniquement**. Sans elle, un webhook sans secret configuré est refusé (voir ci-dessous).
 
 ## Les deux bases MongoDB (point le plus structurant)
 
-[src/config/db.js](src/config/db.js) ouvre **deux connexions distinctes** :
+[src/config/db.js](src/config/db.js) ouvre **deux connexions** :
 
 | Connexion | Obtenue par | Modèles enregistrés |
 |---|---|---|
 | Users (connexion mongoose par défaut) | `getUsersConn()` | `User`, `Device` |
-| Transactions (`mongoose.createConnection`) | `getTxConn()` | `Transaction`, `Outbox`, `Notification`, `LedgerEntry`, `TxWalletBalance`, `TxSystemBalance` |
+| Transactions | `getTxConn()` | `Transaction`, `Outbox`, `Notification`, `LedgerEntry`, `TxWalletBalance`, `TxSystemBalance`, `ReferralPayout` |
+
+**Depuis le 2026-08-19, les deux connexions partagent le même `MongoClient`** quand les
+deux URI ne diffèrent que par le nom de la base (même serveur, mêmes identifiants, mêmes
+options) : la connexion transactions est alors obtenue par `usersConn.useDb(...)` et non
+plus par `mongoose.createConnection()`. C'est la condition pour qu'une transaction Mongo
+couvre les deux bases.
+
+Auparavant, deux clients distincts étaient toujours ouverts, donc
+`runtime.canUseSharedSession()` renvoyait **toujours `false`** et **tout le mouvement
+d'argent tournait sans transaction**, silencieusement. Deux clusters distincts, ou deux
+comptes aux droits différents, retombent sur l'ancien comportement. `MONGO_SHARE_CLIENT=off`
+le restaure sans redéploiement. Le régime effectif est journalisé au démarrage
+(« Transactions Mongo ACTIVES / INACTIVES ») — il ne faut plus le deviner.
 
 **Tous les modèles sont des factories** : `module.exports = (conn) => conn.models.X || conn.model("X", schema)`. Il ne faut jamais faire `require("../models/Transaction").findOne(...)` — toujours `require("../models/Transaction")(conn)` avec la **bonne** connexion. `User` est enregistré sur les deux connexions ; la source de vérité profil (`country`, `accountStatus`, `isBlocked`, `isSystem`…) est la base **Users**.
 
 [src/services/transactions/shared/runtime.js](src/services/transactions/shared/runtime.js) est l'accès canonique : un objet à getters paresseux qui expose modèles, connexions, helpers ledger et helpers de session. **Utiliser `runtime` plutôt que de résoudre les modèles à la main** dans les handlers de transaction.
 
 Conséquence sur les sessions Mongo : `runtime.canUseSharedSession()` n'est vrai que si les deux connexions partagent le même client Mongo. Les handlers utilisent donc `startTxSession()` / `maybeSessionOpts(session)` / `safeCommit` / `safeAbort`, qui deviennent des no-op quand la session multi-documents n'est pas possible. Ne pas remplacer par `session.withTransaction()` inconditionnel.
+
+**Le commit ne s'appelle jamais en direct.** Les 22 appels à `session.commitTransaction()` ont été migrés le 2026-08-19 vers `safeCommit(session)` (dans `runtime`) ou `commitWithRetry(session)` ([src/utils/commitWithRetry.js](src/utils/commitWithRetry.js), module pur, sans dépendance, utilisable depuis les contrôleurs qui ne peuvent pas charger `runtime` — celui-ci touche `getTxConn()` au chargement). Le rejeu applique la règle du pilote : sur `UnknownTransactionCommitResult`, on rejoue le commit dans une fenêtre de 120 s, exactement ce que fait `withTransaction()` en interne. Ce signal ne veut pas dire « échec » mais « je ne sais pas » : abandonner dessus revient à déclarer perdue une opération peut-être réussie. **Aucun nouveau code ne doit appeler `commitTransaction()` directement.**
+
+⚠️ **Dette restante, assumée.** 14 chemins ouvrent une transaction sans rejouer l'**opération entière** sur `TransientTransactionError` (conflit d'écriture). Le remède standard est `session.withTransaction()`, mais il ne peut pas être appliqué mécaniquement ici : plusieurs de ces blocs contiennent des `return res.json(...)` **à l'intérieur** du périmètre transactionnel, et un rejeu enverrait deux réponses HTTP. La migration suppose donc d'abord de sortir l'envoi de la réponse du bloc — chantier à part, avec passage en préproduction.
 
 ## Chaîne de traitement d'une transaction
 
@@ -81,6 +105,25 @@ Les primitives sont dans [src/services/ledgerService.js](src/services/ledgerServ
 
 Idempotence côté requête : `utils/idempotency.js` + index uniques partiels `{sender, idempotencyKey}` et `{userId, idempotencyKey}` sur `Transaction`.
 
+### Idempotence de l'API (motif Stripe) — depuis le 2026-08-19
+
+`middleware/idempotency.js` est posé sur `/initiate`, `/confirm`, `/cancel` et `/refund`, juste après `protect`. Quatre situations, quatre réponses :
+
+| Situation | Réponse |
+|---|---|
+| clé inconnue | on exécute, et on fige la réponse |
+| clé connue, même requête, terminée | **la réponse d'origine**, à l'identique, avec l'en-tête `Idempotency-Replayed: true` |
+| clé connue, requête différente | `400` — rendre la réponse d'un virement à un autre serait mentir |
+| clé connue, traitement en cours | `409` |
+
+Les réponses **5xx ne sont pas figées** : une panne n'est pas un résultat, la clé est libérée pour que le rejeu reparte proprement. Les **4xx le sont** : un refus pour solde insuffisant est stable.
+
+Le registre est `models/IdempotencyRecord.js` (collection `idempotency_records`, unique `{scope, key}`, TTL 24 h comme Stripe). La portée isole par utilisateur ET par endpoint. L'empreinte de requête utilise une sérialisation **stable** (clés triées) : sans elle, `{a,b}` et `{b,a}` donneraient deux empreintes et un rejeu légitime passerait pour une réutilisation abusive.
+
+**La clé est exigée par défaut** ; `IDEMPOTENCY_REQUIRED=false` assouplit sans redéploiement, le temps que le parc mobile installé bascule. Le mobile en envoie une depuis cette version (`TransactionContext`, une clé **par intention de virement** — pas par appel, sinon elle ne protège de rien — libérée par `clearTransactionData()`). L'exigence sera activée une fois le parc à jour.
+
+Avant cela, `utils/idempotency.js` existait mais `pickIdempotencyKey` **n'était appelée nulle part** : `/initiate` n'acceptait qu'un `body.idempotencyKey` optionnel, que le mobile n'envoyait pas. Un double appui réservait donc les fonds deux fois, la seconde réservation n'étant libérée que par le worker d'annulation, des jours plus tard.
+
 ### Montants
 
 Tous les montants sont des `Decimal128` en base, arrondis via `roundMoney(value, currency)` ([src/services/pricingSnapshotNormalizer.js](src/services/pricingSnapshotNormalizer.js)) et reconvertis en `Number` par le `toJSON` de `Transaction` (qui supprime aussi `securityCode`, `securityAnswerHash`, `verificationToken`, `attemptCount`, `lockedUntil`). Le prix appliqué est figé dans `pricingSnapshot` / `feeSnapshot` / `money` au moment de l'initiation — la confirmation **relit** ce snapshot au lieu de recalculer.
@@ -93,7 +136,7 @@ Double écriture dans `LedgerEntry` avec des `accountId` conventionnels : `user_
 
 - Adapters bas niveau par rail dans [src/providers/](src/providers/) (mobilemoney : wave/orange/mtn/moov ; card : stripe/visa direct ; bank : générique). Chaque adapter normalise le statut provider vers `completed | processing | failed | cancelled | pending`.
 - Au-dessus : `services/transactions/providers/` — `providerExecutorRegistry.resolveExecutor({flow, provider})` choisit l'executor, et **retourne `null` pour tout flow/provider sandbox** (garde-fou secondaire).
-- Webhooks entrants : `POST /webhooks/providers/:rail/:provider` → [src/controllers/providerWebhookController.js](src/controllers/providerWebhookController.js). La signature est vérifiée par `verifyHmacWebhook()` ([shared/webhookSecurity.js](src/services/transactions/shared/webhookSecurity.js)) : HMAC sur `rawBody` ou `${timestamp}.${rawBody}`, comparaison timing-safe, fenêtre de fraîcheur. Si aucun secret n'est configuré, la vérification est **désactivée** (`verified: true`) — attention en production.
+- Webhooks entrants : `POST /webhooks/providers/:rail/:provider` → [src/controllers/providerWebhookController.js](src/controllers/providerWebhookController.js). La signature est vérifiée par `verifyHmacWebhook()` ([shared/webhookSecurity.js](src/services/transactions/shared/webhookSecurity.js)) : HMAC sur `rawBody` ou `${timestamp}.${rawBody}`, comparaison timing-safe, fenêtre de fraîcheur. **Si aucun secret n'est configuré, la requête est REFUSÉE** (`verified: false`, 401). Ce n'était pas le cas avant le 2026-08-19 : la fonction renvoyait `verified: true`, donc un oubli de variable d'environnement transformait l'endpoint en porte ouverte — n'importe qui pouvait forger un webhook de prestataire de paiement. Échappatoire de développement : `WEBHOOK_ALLOW_UNSIGNED=true`, **sans effet en production**. Le contrôleur exige par ailleurs un `verified === true` explicite : « tout sauf `false` » laissait passer un `undefined`.
 - **Ordre de montage critique** dans [src/server.js](src/server.js) : `/webhooks/providers` est monté **avant** `mountSanitizers()` (`express-mongo-sanitize`, `xss-clean`, `hpp`) pour préserver la charge utile ; `express.json({ verify })` alimente `req.rawBody`, indispensable au HMAC. Ne pas déplacer ces appels.
 
 ## Authentification — trois mécanismes coexistants
@@ -116,6 +159,6 @@ Un chemin parallèle complet existe pour le compte de revue Apple : `utils/sandb
 - **Format de réponse** : succès `{ success: true, ... }` ; erreur produite par [src/middleware/errorHandler.js](src/middleware/errorHandler.js) → `{ success, status, message }` (+ `errors` pour la validation, `stack` hors production). Les erreurs métier se lèvent avec `http-errors` (`createError(409, "…")`), jamais en renvoyant un 200.
 - **Deux loggers winston** : [src/logger.js](src/logger.js) (nommé, niveau/fichiers configurables, utilisé par `server.js`) et [src/utils/logger.js](src/utils/logger.js) (minimal, utilisé par `errorHandler` et les modèles). Suivre celui déjà importé dans le fichier édité.
 - **Code mort connu** : `src/services/balance.js` n'est référencé nulle part et appellerait une factory de modèle comme un modèle (il lèverait au premier appel) — ne pas s'en inspirer ; l'équivalent vivant est `TxWalletBalance` + `ledgerService`.
-- **Bypass de rate limit** : le `sensitiveLimiter` de `routes/transactionsRoutes.js` saute la limite dès que l'en-tête `x-internal-token` est **présent**, sans comparer sa valeur (contrairement à `server.js` qui compare en timing-safe). En tenir compte avant de s'appuyer sur ce limiteur.
+- **Rate limit — corrigé le 2026-08-19.** Le `sensitiveLimiter` de `routes/transactionsRoutes.js` sautait la limite dès que l'en-tête `x-internal-token` était **présent**, sans comparer sa valeur : `x-internal-token: x` suffisait à lever la limite de 10 requêtes/minute sur `/initiate`, `/confirm` et `/cancel` — donc à autoriser le martèlement des codes de sécurité de confirmation. Il appelle désormais `isValidInternalToken(req)`, exporté par `middleware/internalAuth.js`, qui délègue à [src/utils/internalTokens.js](src/utils/internalTokens.js) : **une seule implémentation** décide si un token interne est valide, en comparaison timing-safe. Couvert par `test/internalTokens.test.js`.
 - **Git** : l'historique utilise des messages du type `api paynoval file update vNN---`. Les standards du dépôt (`.claude/docs/coding-standards.md`) demandent des commits conventionnels (`feat(scope): …`) — préférer ces derniers pour les nouveaux commits.
 - Ce fichier CLAUDE.md fait foi pour l'architecture réelle de ce dépôt. Les **skills** de `.claude/skills/` (`create-api-skill`, `create-service-skill`, `create-model-skill`, `debug-skill`, `security-review-skill`…) sont opérationnelles et doivent être utilisées pour les tâches correspondantes.

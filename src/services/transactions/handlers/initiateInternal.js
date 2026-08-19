@@ -842,7 +842,7 @@ async function initiateInternal(req, res, next) {
     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
     if (runtime.canUseSharedSession()) {
-      await session.commitTransaction();
+      await runtime.safeCommit(session);
     }
 
     await endQuietly(session);

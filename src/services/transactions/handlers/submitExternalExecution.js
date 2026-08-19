@@ -119,6 +119,7 @@ const {
   Transaction,
   startTxSession,
   maybeSessionOpts,
+  runInTransaction,
 } = runtime;
 
 function canUseSession() {
@@ -278,117 +279,130 @@ function resolveProviderCandidate({ tx, resolved }) {
   );
 }
 
+/**
+ * ============================================================================
+ * SOUMISSION AU PRESTATAIRE — L'APPEL RÉSEAU EST HORS TRANSACTION
+ * ============================================================================
+ *
+ * CORRECTIF. Cette fonction ouvrait une transaction Mongo puis appelait
+ * `resolved.execute()` A L'INTERIEUR — c'est-a-dire un `axios.post` vers Wave,
+ * Orange, Stripe ou une banque, transaction ouverte.
+ *
+ * Tant que les transactions etaient inactives (deux clients Mongo distincts),
+ * c'etait sans consequence. Depuis qu'elles sont reelles, c'est un risque de
+ * perte d'argent : MongoDB tue toute transaction depassant
+ * `transactionLifetimeLimitSeconds` (60 s par defaut). Un prestataire lent, et
+ * le virement part chez lui pendant que la base annule tout — argent sorti,
+ * aucune trace en base.
+ *
+ * Ni Stripe ni Wise ne placent un appel reseau dans une transaction. La forme
+ * correcte est en trois temps, et c'est celle appliquee ici :
+ *
+ *   1. lecture et verifications — aucune transaction, ce sont des lectures ;
+ *   2. APPEL PRESTATAIRE — hors transaction, donc sans verrou tenu ;
+ *   3. persistance du resultat — transaction courte, purement locale.
+ *
+ * Corollaire assume : l'etape 2 n'est jamais rejouee automatiquement. Un rejeu,
+ * ici, voudrait dire payer deux fois.
+ */
 async function submitExternalExecution({ req, transactionId }) {
+  /* 1. Lecture et verifications ------------------------------------------- */
+
+  const tx = await Transaction.findById(transactionId);
+
+  if (!tx) {
+    throw createError(404, "Transaction introuvable");
+  }
+
+  /**
+   * Barriere de securite Apple Review :
+   * Une transaction sandbox ne doit jamais appeler un executor reel.
+   */
+  if (isSandboxTransaction({ req, tx })) {
+    const session = await startTxSession();
+
+    try {
+      return await runInTransaction(session, (activeSession) =>
+        markSandboxExecutionSkipped({
+          tx,
+          sessOpts: maybeSessionOpts(activeSession),
+        })
+      );
+    } finally {
+      safeEndSession(session);
+    }
+  }
+
+  const resolved = resolveExecutor({
+    flow: tx.flow,
+    provider: tx.provider,
+  });
+
+  if (!resolved || typeof resolved.execute !== "function") {
+    throw createError(400, `Aucun executor trouve pour le flow ${tx.flow}`);
+  }
+
+  const sandboxCheckUser = buildSandboxCheckUser({ req, tx });
+  const providerCandidate = resolveProviderCandidate({ tx, resolved });
+
+  /**
+   * Deuxieme barriere :
+   * Meme si la tx n'est pas marquee isSandbox, si le user Apple Review tente un
+   * provider reel, on bloque.
+   */
+  assertProviderAllowedForUser(sandboxCheckUser, providerCandidate);
+
+  if (!tx.provider && resolved.provider) {
+    tx.provider = resolved.provider;
+  }
+
+  /* 2. Appel prestataire — HORS TRANSACTION -------------------------------- */
+
+  const result = await resolved.execute({
+    req,
+    transaction: tx,
+  });
+
+  /* 3. Persistance du resultat — transaction courte ------------------------ */
+
+  tx.providerStatus =
+    result?.providerStatus || tx.providerStatus || "PROVIDER_SUBMITTED";
+
+  tx.providerReference =
+    result?.providerReference || tx.providerReference || null;
+
+  if (tx.status === "pending") {
+    tx.status = "processing";
+  }
+
+  tx.metadata = {
+    ...(tx.metadata || {}),
+    execution: {
+      ...(tx.metadata?.execution || {}),
+      submittedAt: new Date().toISOString(),
+      resolvedProvider: resolved.provider || tx.provider || null,
+      providerResponse: result?.raw || null,
+    },
+  };
+
   const session = await startTxSession();
 
   try {
-    if (canUseSession()) {
-      session.startTransaction();
-    }
-
-    const sessOpts = maybeSessionOpts(session);
-
-    const tx = await Transaction.findById(transactionId).session(
-      sessOpts.session || null
+    await runInTransaction(session, (activeSession) =>
+      tx.save(maybeSessionOpts(activeSession))
     );
-
-    if (!tx) {
-      throw createError(404, "Transaction introuvable");
-    }
-
-    /**
-     * Barrière de sécurité Apple Review :
-     * Une transaction sandbox ne doit jamais appeler un executor réel.
-     */
-    if (isSandboxTransaction({ req, tx })) {
-      const result = await markSandboxExecutionSkipped({ tx, sessOpts });
-
-      if (canUseSession()) {
-        await session.commitTransaction();
-      }
-
-      safeEndSession(session);
-      return result;
-    }
-
-    const resolved = resolveExecutor({
-      flow: tx.flow,
-      provider: tx.provider,
-    });
-
-    if (!resolved || typeof resolved.execute !== "function") {
-      throw createError(400, `Aucun executor trouvé pour le flow ${tx.flow}`);
-    }
-
-    const sandboxCheckUser = buildSandboxCheckUser({ req, tx });
-    const providerCandidate = resolveProviderCandidate({ tx, resolved });
-
-    /**
-     * Deuxième barrière :
-     * Même si la tx n’est pas marquée isSandbox,
-     * si le user Apple Review tente un provider réel, on bloque.
-     */
-    assertProviderAllowedForUser(sandboxCheckUser, providerCandidate);
-
-    if (!tx.provider && resolved.provider) {
-      tx.provider = resolved.provider;
-    }
-
-    const result = await resolved.execute({
-      req,
-      transaction: tx,
-    });
-
-    tx.providerStatus =
-      result?.providerStatus ||
-      tx.providerStatus ||
-      "PROVIDER_SUBMITTED";
-
-    tx.providerReference =
-      result?.providerReference ||
-      tx.providerReference ||
-      null;
-
-    if (tx.status === "pending") {
-      tx.status = "processing";
-    }
-
-    tx.metadata = {
-      ...(tx.metadata || {}),
-      execution: {
-        ...(tx.metadata?.execution || {}),
-        submittedAt: new Date().toISOString(),
-        resolvedProvider: resolved.provider || tx.provider || null,
-        providerResponse: result?.raw || null,
-      },
-    };
-
-    await tx.save(sessOpts);
-
-    if (canUseSession()) {
-      await session.commitTransaction();
-    }
-
+  } finally {
     safeEndSession(session);
-
-    return {
-      success: true,
-      transactionId: tx._id.toString(),
-      status: tx.status,
-      providerStatus: tx.providerStatus,
-      providerReference: tx.providerReference,
-      provider: tx.provider || resolved.provider || null,
-    };
-  } catch (err) {
-    try {
-      if (canUseSession()) {
-        await session.abortTransaction();
-      }
-    } catch (_) {}
-
-    safeEndSession(session);
-    throw err;
   }
+
+  return {
+    success: true,
+    transactionId: tx._id.toString(),
+    status: tx.status,
+    providerStatus: tx.providerStatus,
+    providerReference: tx.providerReference,
+    provider: tx.provider || resolved.provider || null,
+  };
 }
 
 module.exports = {

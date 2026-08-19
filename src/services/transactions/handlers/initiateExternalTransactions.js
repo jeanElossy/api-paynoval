@@ -17,6 +17,7 @@ const {
   startTxSession,
   maybeSessionOpts,
   canUseSharedSession,
+  safeCommit,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
@@ -942,7 +943,7 @@ async function initiateOutboundExternal(req, res, next) {
 
     await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
 
-    if (canUseSharedSession()) await session.commitTransaction();
+    if (canUseSharedSession()) await safeCommit(session);
 
     session.endSession();
 
@@ -1383,7 +1384,7 @@ async function initiateInboundExternal(req, res, next) {
     await notifyTransactionEvent(tx, "processing", session, currencyTargetISO);
 
     if (canUseSharedSession()) {
-      await session.commitTransaction();
+      await safeCommit(session);
     }
 
     session.endSession();

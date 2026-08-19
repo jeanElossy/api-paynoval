@@ -6,6 +6,7 @@ const { getTxConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteSettlementModel = require("../models/CagnotteSettlement");
+const { commitWithRetry } = require("../utils/commitWithRetry");
 const {
   resolveTreasuryFromSystemType,
   normalizeTreasurySystemType,
@@ -405,7 +406,7 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
 
         const settlement = settlementDocs[0];
 
-        await session.commitTransaction();
+        await commitWithRetry(session);
         committed = true;
 
         return {

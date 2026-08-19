@@ -20,6 +20,8 @@
 
 // const { notifyTransactionEvent } = require("../transactionNotificationService");
 // const { syncReferralAfterConfirmedTx } = require("../../referralSyncService");
+//   ^ module SUPPRIME le 2026-08-19. L'appel direct apres commit a ete remplace
+//     par l'Outbox transactionnel : voir `referral/referralEventOutbox` plus bas.
 
 // const {
 //   sanitize,
@@ -813,10 +815,13 @@ const {
   maybeSessionOpts,
   canUseSharedSession,
   assertTransition,
+  safeCommit,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
-const { syncReferralAfterConfirmedTx } = require("../../referralSyncService");
+const {
+  enqueueReferralActivityEvent,
+} = require("../../referral/referralEventOutbox");
 
 const {
   sanitize,
@@ -1083,7 +1088,7 @@ async function handleSandboxConfirm({ req, res, tx, sessOpts, session }) {
   await tx.save(sessOpts);
 
   if (canUseSharedSession()) {
-    await session.commitTransaction();
+    await safeCommit(session);
   }
 
   await endQuietly(session);
@@ -1653,19 +1658,41 @@ async function confirmController(req, res, next) {
       await tx.save(sessOpts);
       await notifyTransactionEvent(tx, "confirmed", session, sourceCurrency);
 
-      if (canUseSharedSession()) {
-        await session.commitTransaction();
-      }
-
-      await endQuietly(session);
-
+      /**
+       * PARRAINAGE — mise en file AVANT le commit, dans le régime de session du
+       * handler.
+       *
+       * L'ancienne version appelait le backend principal en HTTP APRÈS le
+       * commit, sans file ni reprise : une indisponibilité d'une seconde, un
+       * redéploiement, un réseau qui hoquette, et l'événement était perdu
+       * définitivement — le filleul ne touchait son bonus que s'il refaisait,
+       * par chance, une transaction qualifiante plus tard.
+       *
+       * Écrite ici, la mise en file est solidaire de la confirmation
+       * elle-même. La livraison est ensuite assurée par le worker, avec
+       * réessais à backoff exponentiel.
+       */
       let referralSync = null;
 
       try {
-        referralSync = await syncReferralAfterConfirmedTx(tx);
+        referralSync = await enqueueReferralActivityEvent({
+          transaction: tx,
+          sessionOpts,
+        });
       } catch (refErr) {
+        /**
+         * Une mise en file impossible ne doit pas annuler un mouvement financier
+         * déjà exécuté et légitime. Le job de réconciliation rattrapera le
+         * parrainage ; l'erreur est journalisée pour être vue.
+         */
         referralSync = buildReferralSyncError(refErr);
       }
+
+      if (canUseSharedSession()) {
+        await safeCommit(session);
+      }
+
+      await endQuietly(session);
 
       return res.json({
         success: true,
@@ -1699,7 +1726,7 @@ async function confirmController(req, res, next) {
     await notifyTransactionEvent(tx, "processing", session, sourceCurrency);
 
     if (canUseSharedSession()) {
-      await session.commitTransaction();
+      await safeCommit(session);
     }
 
     await endQuietly(session);
