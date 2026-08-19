@@ -23,6 +23,7 @@ const xssClean = require("xss-clean");
 const hpp = require("hpp");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
+const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const yaml = require("js-yaml");
 const swaggerUi = require("swagger-ui-express");
@@ -395,11 +396,91 @@ try {
   // fallback mémoire
 }
 
+/**
+ * ═══ LE PLAFOND SE COMPTE PAR COMPTE, PLUS PAR ADRESSE ══════════════════════
+ *
+ * Tx-Core n'est jamais joint directement : tout son trafic utilisateur arrive
+ * par la passerelle, donc d'une poignée d'adresses. Le plafond par IP — la clé
+ * par défaut d'`express-rate-limit` — comptait donc les requêtes de TOUS les
+ * clients dans un seul seau de 100. Le 2026-08-19, un utilisateur seul l'a
+ * épuisé et `GET /api/v1/transactions` a répondu 429 ; la passerelle a traduit
+ * l'échec en liste vide, et l'historique a paru disparaître.
+ *
+ * Stripe, PayPal et Wise comptent par compte, jamais par adresse réseau. La
+ * défense contre les inondations appartient à la couche qui voit les vraies
+ * adresses — chez nous la passerelle. Chaque étage protège ce qu'il est seul à
+ * pouvoir observer.
+ *
+ * La décision vit dans `src/utils/rateLimitKey.js`, module pur et testé.
+ */
+const rateLimitKey = require("./utils/rateLimitKey");
+
+const RL_AUTH_MAX = (() => {
+  const n = Number(process.env.RATE_LIMIT_AUTH_MAX);
+  return Number.isFinite(n) && n > 0 ? n : rateLimitKey.DEFAULT_AUTH_MAX;
+})();
+
+const RL_ANON_MAX = (() => {
+  const n = Number(process.env.RATE_LIMIT_ANON_MAX);
+  return Number.isFinite(n) && n > 0 ? n : rateLimitKey.DEFAULT_ANON_MAX;
+})();
+
+/**
+ * Vérifie la SIGNATURE, et rien d'autre.
+ *
+ * On ne contrôle ni l'émetteur ni l'audience ici : ces règles appartiennent à
+ * `authMiddleware`, qui s'exécute plus loin et rejette pour de bon. Les
+ * dupliquer les ferait diverger — et un jeton refusé ici mais accepté là
+ * retomberait dans le seau partagé sans que personne ne comprenne pourquoi.
+ * Tout ce qu'on demande à cette étape, c'est de ne pas prendre pour argent
+ * comptant un identifiant que l'appelant aurait écrit lui-même.
+ */
+function verifyForRateLimit(token) {
+  const secret = process.env.JWT_SECRET || "";
+  if (!secret) return null;
+
+  return jwt.verify(token, secret, { algorithms: ["HS256"] });
+}
+
+function identifyCaller(req) {
+  return rateLimitKey.identify(req, verifyForRateLimit);
+}
+
 const baseRateLimitConfig = {
   windowMs: 15 * 60 * 1000,
-  max: 100,
+
+  keyGenerator: (req) =>
+    rateLimitKey.bucketFor({ ...identifyCaller(req), ip: req.ip }),
+
+  max: (req) =>
+    rateLimitKey.limitFor(identifyCaller(req), {
+      authMax: RL_AUTH_MAX,
+      anonMax: RL_ANON_MAX,
+    }),
+
   standardHeaders: true,
   legacyHeaders: false,
+
+  /**
+   * `Retry-After` est ce qui rend le 429 exploitable : sans lui, un client
+   * réessaie immédiatement et aggrave la saturation qu'il vient de provoquer.
+   */
+  handler: (req, res) => {
+    const resetTime = req.rateLimit?.resetTime;
+    const seconds = resetTime
+      ? Math.max(1, Math.ceil((new Date(resetTime).getTime() - Date.now()) / 1000))
+      : 60;
+
+    res.set("Retry-After", String(seconds));
+
+    return res.status(429).json({
+      success: false,
+      code: "rate_limited",
+      error: "Trop de requêtes, veuillez réessayer plus tard.",
+      retryAfterSec: seconds,
+    });
+  },
+
   message: {
     success: false,
     error: "Trop de requêtes, veuillez réessayer plus tard.",
