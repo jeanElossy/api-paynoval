@@ -94,7 +94,8 @@ deviceSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      fingerprintHash: { $type: "string", $ne: "" },
+      // `$ne` interdit dans un filtre partiel : `$gt: ""` exclut la chaîne vide.
+      fingerprintHash: { $type: "string", $gt: "" },
     },
     name: "uniq_user_fingerprint",
   }
@@ -117,7 +118,7 @@ deviceSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      pushToken: { $type: "string", $ne: "" },
+      pushToken: { $type: "string", $gt: "" },
     },
     name: "uniq_push_token_string",
   }

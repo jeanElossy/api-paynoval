@@ -760,8 +760,16 @@ transactionSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      sender: { $exists: true, $ne: null },
-      idempotencyKey: { $exists: true, $type: "string" },
+      /**
+       * `$ne` est INTERDIT dans un partialFilterExpression : MongoDB rejette la
+       * création avec « Expression not supported in partial index ». L'index
+       * n'était donc pas seulement absent de la base — il était INCRÉABLE, et
+       * `autoIndex` étant désactivé en production, rien ne le signalait.
+       * `$type` exprime la même intention (présent ET du bon type, donc ni
+       * absent ni null) avec un opérateur autorisé.
+       */
+      sender: { $type: "objectId" },
+      idempotencyKey: { $type: "string", $gt: "" },
     },
   }
 );
@@ -771,8 +779,8 @@ transactionSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      userId: { $exists: true, $ne: null },
-      reference: { $exists: true, $type: "string" },
+      userId: { $type: "objectId" },
+      reference: { $type: "string", $gt: "" },
     },
   }
 );
@@ -782,8 +790,8 @@ transactionSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      userId: { $exists: true, $ne: null },
-      idempotencyKey: { $exists: true, $type: "string" },
+      userId: { $type: "objectId" },
+      idempotencyKey: { $type: "string", $gt: "" },
     },
   }
 );

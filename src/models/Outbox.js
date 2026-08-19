@@ -121,7 +121,7 @@ outboxSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      idempotencyKey: { $type: "string", $ne: "" },
+      idempotencyKey: { $type: "string", $gt: "" },
     },
     name: "uniq_outbox_idempotency_key",
   }
