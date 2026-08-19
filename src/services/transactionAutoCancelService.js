@@ -526,28 +526,29 @@ async function cancelLockedTransaction(lockedTx, workerId) {
 
       await tx.save(getSessionOptions(useSession ? session : null));
 
-      if (typeof runtime.logTransaction === "function") {
-        runtime
-          .logTransaction({
-            userId: String(tx.sender || tx.userId || ""),
-            type: "auto_cancel",
-            provider: tx.provider || tx.destination || "paynoval",
-            amount: resolveReservedAmount(tx),
-            currency: resolveReservedCurrency(tx),
-            toEmail: tx.recipientEmail || tx.receiverEmail || "",
-            details: {
-              transactionId: String(tx._id),
-              reference: tx.reference,
-              reason,
-              autoCancelledAt: now,
-              reserveRelease: releaseResult,
-            },
-            flagged: false,
-            flagReason: "",
-            transactionId: tx._id,
-          })
-          .catch(() => {});
-      }
+      /**
+       * L'entrée d'audit est PRÉPARÉE ici mais ÉCRITE après le commit : ce
+       * corps est rejouable, et une trace d'audit en double vaut une trace
+       * fausse.
+       */
+      const auditEntry = {
+        userId: String(tx.sender || tx.userId || ""),
+        type: "auto_cancel",
+        provider: tx.provider || tx.destination || "paynoval",
+        amount: resolveReservedAmount(tx),
+        currency: resolveReservedCurrency(tx),
+        toEmail: tx.recipientEmail || tx.receiverEmail || "",
+        details: {
+          transactionId: String(tx._id),
+          reference: tx.reference,
+          reason,
+          autoCancelledAt: now,
+          reserveRelease: releaseResult,
+        },
+        flagged: false,
+        flagReason: "",
+        transactionId: tx._id,
+      };
 
       try {
         await notifyTransactionEvent(
@@ -557,6 +558,14 @@ async function cancelLockedTransaction(lockedTx, workerId) {
           resolveReservedCurrency(tx)
         );
       } catch (notifyErr) {
+        /**
+         * Un `catch` posé dans un corps rejouable avale aussi le conflit
+         * d'écriture que le pilote attend pour rejouer — et la transaction
+         * serait alors validée sans la notification. On ne rattrape donc que
+         * ce qui est propre à la notification.
+         */
+        if (runtime.isTransactionLevelError(notifyErr)) throw notifyErr;
+
         logger.warn?.("[TX AUTO CANCEL] notification auto-cancel ignorée", {
           transactionId: String(tx._id),
           err: notifyErr?.message || notifyErr,
@@ -574,8 +583,13 @@ async function cancelLockedTransaction(lockedTx, workerId) {
         ok: true,
         transactionId: String(tx._id),
         reserveRelease: releaseResult,
+        auditEntry,
       };
     });
+
+    if (result?.auditEntry && typeof runtime.logTransaction === "function") {
+      runtime.logTransaction(result.auditEntry).catch(() => {});
+    }
 
     /**
      * Libération du verrou : écriture HORS transaction, volontairement. Elle ne

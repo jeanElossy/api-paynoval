@@ -16,8 +16,9 @@ const {
   normalizeTreasurySystemType,
   startTxSession,
   maybeSessionOpts,
-  canUseSharedSession,
-  safeCommit,
+  runInTransaction,
+  safeAbort,
+  safeEndSession,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
@@ -549,7 +550,6 @@ async function initiateOutboundExternal(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (canUseSharedSession()) session.startTransaction();
 
     const body = req.body || {};
     const flow = resolveExternalFlow(body);
@@ -595,13 +595,24 @@ async function initiateOutboundExternal(req, res, next) {
 
     await validationService.validateTransactionAmount({ amount: amt });
 
-    const sessOpts = maybeSessionOpts(session);
+    /**
+     * ════════════════════════════════════════════════════════════════════
+     * PHASE 1 — PRÉPARATION. AUCUNE TRANSACTION OUVERTE.
+     * ════════════════════════════════════════════════════════════════════
+     *
+     * `buildPricingContext()` appelle la passerelle en HTTP POST avec un
+     * délai d'attente de DOUZE SECONDES. Le laisser dans la transaction,
+     * c'est tenir des verrous Mongo pendant qu'on attend un autre service —
+     * et au-delà de `transactionLifetimeLimitSeconds` (60 s par défaut) le
+     * serveur tue la transaction sous nos pieds.
+     *
+     * Tout ce bloc ne fait que lire, valider et calculer : rien à annuler.
+     */
 
     const senderUser = await User.findById(senderId)
       .select(USER_CORRIDOR_SELECT)
       .lean()
-      .session(sessOpts.session || null);
-
+      .session(null);
     if (!senderUser) {
       throw createError(403, "Utilisateur invalide");
     }
@@ -772,141 +783,167 @@ async function initiateOutboundExternal(req, res, next) {
         ? "bank"
         : "visa_direct";
 
-    const [tx] = await Transaction.create(
-      [
-        {
-          userId: senderUser._id,
-          internalImported: false,
+    /**
+     * ════════════════════════════════════════════════════════════════════
+     * PHASE 2 — UNITÉ DE TRAVAIL. REJOUABLE DE BOUT EN BOUT.
+     * ════════════════════════════════════════════════════════════════════
+     *
+     * Ne reste ici que ce qui doit être atomique : la création de la
+     * transaction et la réservation des fonds. Rien n'en sort — ni réseau,
+     * ni réponse HTTP, ni journal d'audit — donc le pilote peut réexécuter
+     * ce corps autant de fois que Mongo le demande.
+     */
+    const tx = await runInTransaction(session, async (sess) => {
+      const sessOpts = maybeSessionOpts(sess);
 
-          flow,
-          operationKind: "transfer",
-          initiatedBy: "user",
-          context: "external_payout",
-          contextId: null,
+      const [tx] = await Transaction.create(
+        [
+          {
+            userId: senderUser._id,
+            internalImported: false,
 
-          reference,
-          idempotencyKey: body.idempotencyKey || null,
+            flow,
+            operationKind: "transfer",
+            initiatedBy: "user",
+            context: "external_payout",
+            contextId: null,
 
-          sender: senderUser._id,
-          receiver: null,
+            reference,
+            idempotencyKey: body.idempotencyKey || null,
 
-          senderName: senderUser.fullName,
-          senderEmail: senderUser.email,
-          nameDestinataire: pickExternalDisplayName(body),
-          recipientEmail: pickExternalRecipientEmail(body),
+            sender: senderUser._id,
+            receiver: null,
 
-          destination: destinationValue,
-          funds: "paynoval",
-          provider,
-          operator:
-            body.operator || body.operatorName || txMetadata?.provider || null,
-          country: sanitize(corridorLock.lockedTargetCountry),
+            senderName: senderUser.fullName,
+            senderEmail: senderUser.email,
+            nameDestinataire: pickExternalDisplayName(body),
+            recipientEmail: pickExternalRecipientEmail(body),
 
-          amount: dec2(pricingCtx.amountSourceStd),
-          transactionFees: dec2(pricingCtx.feeSourceStd),
-          netAmount: dec2(pricingCtx.netFrom),
-          exchangeRate: dec2(pricingCtx.rateUsed),
-          localAmount: dec2(pricingCtx.amountTargetStd),
+            destination: destinationValue,
+            funds: "paynoval",
+            provider,
+            operator:
+              body.operator || body.operatorName || txMetadata?.provider || null,
+            country: sanitize(corridorLock.lockedTargetCountry),
 
-          senderCurrencySymbol: currencySourceISO,
-          localCurrencySymbol: currencyTargetISO,
+            amount: dec2(pricingCtx.amountSourceStd),
+            transactionFees: dec2(pricingCtx.feeSourceStd),
+            netAmount: dec2(pricingCtx.netFrom),
+            exchangeRate: dec2(pricingCtx.rateUsed),
+            localAmount: dec2(pricingCtx.amountTargetStd),
 
-          amountSource: dec2(pricingCtx.amountSourceStd),
-          amountTarget: dec2(pricingCtx.amountTargetStd),
-          feeSource: dec2(pricingCtx.feeSourceStd),
-          fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
-          currencySource: currencySourceISO,
-          currencyTarget: currencyTargetISO,
+            senderCurrencySymbol: currencySourceISO,
+            localCurrencySymbol: currencyTargetISO,
 
-          money: {
-            source: {
-              amount: pricingCtx.amountSourceStd,
-              currency: currencySourceISO,
+            amountSource: dec2(pricingCtx.amountSourceStd),
+            amountTarget: dec2(pricingCtx.amountTargetStd),
+            feeSource: dec2(pricingCtx.feeSourceStd),
+            fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
+            currencySource: currencySourceISO,
+            currencyTarget: currencyTargetISO,
+
+            money: {
+              source: {
+                amount: pricingCtx.amountSourceStd,
+                currency: currencySourceISO,
+              },
+              feeSource: {
+                amount: pricingCtx.feeSourceStd,
+                currency: currencySourceISO,
+              },
+              target: {
+                amount: pricingCtx.amountTargetStd,
+                currency: currencyTargetISO,
+              },
+              fxRateSourceToTarget: pricingCtx.rateUsed,
             },
-            feeSource: {
-              amount: pricingCtx.feeSourceStd,
-              currency: currencySourceISO,
+
+            pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
+            pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
+            pricingFxRuleApplied:
+              pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+
+            feeSnapshot: {
+              fee: pricingCtx.feeSourceStd,
+              netAfterFees: pricingCtx.netFrom,
+              convertedNetAfterFees: pricingCtx.amountTargetStd,
+              exchangeRate: pricingCtx.rateUsed,
+              pricingDebug: pricingCtx.pricingSnapshot?.debug || null,
             },
-            target: {
-              amount: pricingCtx.amountTargetStd,
-              currency: currencyTargetISO,
-            },
-            fxRateSourceToTarget: pricingCtx.rateUsed,
+            feeActual: null,
+            feeId: null,
+
+            treasuryRevenue: pricingCtx.treasuryRevenue,
+            treasuryRevenueCredited: false,
+            treasuryRevenueCreditedAt: null,
+            treasuryUserId: treasurySeed.treasuryUserId,
+            treasurySystemType: treasurySeed.treasurySystemType,
+            treasuryLabel: treasurySeed.treasuryLabel,
+
+            securityQuestion: q,
+            securityAnswerHash,
+            securityCode: securityAnswerHash,
+
+            amlSnapshot,
+            amlStatus: amlSnapshot?.status || "passed",
+
+            description: sanitize(description),
+            orderId: body.orderId || null,
+
+            metadata: txMetadata,
+            meta: txMeta,
+
+            status: "pending",
+            providerReference: pickExternalRef(body),
+            providerStatus: "PENDING_USER_CONFIRMATION",
+
+            ...autoCancelFields,
+
+            fundsReserved: false,
+            fundsReservedAt: null,
+            fundsCaptured: false,
+            fundsCapturedAt: null,
+            beneficiaryCredited: false,
+            beneficiaryCreditedAt: null,
+            reserveReleased: false,
+            reserveReleasedAt: null,
+            reversedAt: null,
+            executedAt: null,
+            attemptCount: 0,
+            lastAttemptAt: null,
+            lockedUntil: null,
           },
+        ],
+        sessOpts
+      );
 
-          pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-          pricingRuleApplied: pricingCtx.pricingSnapshot?.ruleApplied || null,
-          pricingFxRuleApplied:
-            pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+      await reserveSenderFunds({
+        transaction: tx,
+        senderId: senderUser._id,
+        amount: pricingCtx.amountSourceStd,
+        currency: currencySourceISO,
+        session: sess,
+      });
 
-          feeSnapshot: {
-            fee: pricingCtx.feeSourceStd,
-            netAfterFees: pricingCtx.netFrom,
-            convertedNetAfterFees: pricingCtx.amountTargetStd,
-            exchangeRate: pricingCtx.rateUsed,
-            pricingDebug: pricingCtx.pricingSnapshot?.debug || null,
-          },
-          feeActual: null,
-          feeId: null,
+      tx.fundsReserved = true;
+      tx.fundsReservedAt = new Date();
+      tx.providerStatus = "FUNDS_RESERVED";
 
-          treasuryRevenue: pricingCtx.treasuryRevenue,
-          treasuryRevenueCredited: false,
-          treasuryRevenueCreditedAt: null,
-          treasuryUserId: treasurySeed.treasuryUserId,
-          treasurySystemType: treasurySeed.treasurySystemType,
-          treasuryLabel: treasurySeed.treasuryLabel,
+      await tx.save(sessOpts);
 
-          securityQuestion: q,
-          securityAnswerHash,
-          securityCode: securityAnswerHash,
+      /**
+       * Écrit dans l'Outbox SOUS LA MÊME SESSION : si la réservation est
+       * annulée, l'événement disparaît avec elle.
+       */
+      await notifyTransactionEvent(tx, "initiated", sess, currencySourceISO);
 
-          amlSnapshot,
-          amlStatus: amlSnapshot?.status || "passed",
-
-          description: sanitize(description),
-          orderId: body.orderId || null,
-
-          metadata: txMetadata,
-          meta: txMeta,
-
-          status: "pending",
-          providerReference: pickExternalRef(body),
-          providerStatus: "PENDING_USER_CONFIRMATION",
-
-          ...autoCancelFields,
-
-          fundsReserved: false,
-          fundsReservedAt: null,
-          fundsCaptured: false,
-          fundsCapturedAt: null,
-          beneficiaryCredited: false,
-          beneficiaryCreditedAt: null,
-          reserveReleased: false,
-          reserveReleasedAt: null,
-          reversedAt: null,
-          executedAt: null,
-          attemptCount: 0,
-          lastAttemptAt: null,
-          lockedUntil: null,
-        },
-      ],
-      sessOpts
-    );
-
-    await reserveSenderFunds({
-      transaction: tx,
-      senderId: senderUser._id,
-      amount: pricingCtx.amountSourceStd,
-      currency: currencySourceISO,
-      session,
+      return tx;
     });
 
-    tx.fundsReserved = true;
-    tx.fundsReservedAt = new Date();
-    tx.providerStatus = "FUNDS_RESERVED";
-
-    await tx.save(sessOpts);
-
+    /**
+     * Journal d'audit : APRÈS le commit, jamais dedans. Un rejeu du corps le
+     * dupliquerait, et une trace d'audit en double vaut une trace fausse.
+     */
     logTransaction({
       userId: senderId,
       type: "initiate",
@@ -940,12 +977,6 @@ async function initiateOutboundExternal(req, res, next) {
       transactionId: tx._id,
       ip: req.ip,
     }).catch(() => {});
-
-    await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
-
-    if (canUseSharedSession()) await safeCommit(session);
-
-    session.endSession();
 
     let execution = null;
 
@@ -1001,12 +1032,10 @@ async function initiateOutboundExternal(req, res, next) {
       flow: safeResolveFlow(req.body),
     });
 
-    try {
-      if (canUseSharedSession()) await session.abortTransaction();
-    } catch {}
-
-    session.endSession();
+    await safeAbort(session);
     next(err);
+  } finally {
+    await safeEndSession(session);
   }
 }
 
@@ -1014,7 +1043,6 @@ async function initiateInboundExternal(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (canUseSharedSession()) session.startTransaction();
 
     const body = req.body || {};
     const flow = resolveExternalFlow(body);
@@ -1043,12 +1071,19 @@ async function initiateInboundExternal(req, res, next) {
 
     await validationService.validateTransactionAmount({ amount: amt });
 
-    const sessOpts = maybeSessionOpts(session);
+    /**
+     * PHASE 1 — PRÉPARATION, HORS TRANSACTION.
+     *
+     * Même motif que le volet sortant : `buildPricingContext()` interroge la
+     * passerelle en HTTP (12 s de délai d'attente). Aucun appel réseau ne
+     * doit se trouver à l'intérieur d'une transaction Mongo.
+     */
+
 
     const receiverUser = await User.findById(receiverId)
       .select(USER_CORRIDOR_SELECT)
       .lean()
-      .session(sessOpts.session || null);
+      .session(null);
 
     if (!receiverUser) {
       throw createError(403, "Utilisateur invalide");
@@ -1225,133 +1260,151 @@ async function initiateInboundExternal(req, res, next) {
         ? "visa_direct"
         : "stripe";
 
-    const [tx] = await Transaction.create(
-      [
-        {
-          userId: receiverUser._id,
-          internalImported: false,
+    /**
+     * PHASE 2 — UNITÉ DE TRAVAIL, REJOUABLE.
+     *
+     * Encaissement entrant : aucun fonds n'est encore réservé ici, la
+     * transaction ne couvre que la création du document et la mise en file
+     * de l'événement — les deux doivent tenir ou tomber ensemble.
+     */
+    const tx = await runInTransaction(session, async (sess) => {
+      const sessOpts = maybeSessionOpts(sess);
 
-          flow,
-          operationKind: "transfer",
-          initiatedBy: "user",
-          context: "external_collection",
-          contextId: null,
+      const [tx] = await Transaction.create(
+        [
+          {
+            userId: receiverUser._id,
+            internalImported: false,
 
-          reference,
-          idempotencyKey: body.idempotencyKey || null,
+            flow,
+            operationKind: "transfer",
+            initiatedBy: "user",
+            context: "external_collection",
+            contextId: null,
 
-          sender: null,
-          receiver: receiverUser._id,
+            reference,
+            idempotencyKey: body.idempotencyKey || null,
 
-          senderName: sanitize(
-            body.senderName ||
-              body.accountHolder ||
-              body.cardHolder ||
-              "Source externe"
-          ),
-          senderEmail: null,
-          nameDestinataire: receiverUser.fullName,
-          recipientEmail: receiverUser.email,
+            sender: null,
+            receiver: receiverUser._id,
 
-          destination: "paynoval",
-          funds: fundsValue,
-          provider,
-          operator:
-            body.operator || body.operatorName || txMetadata?.provider || null,
-          country: sanitize(corridorLock.lockedTargetCountry),
+            senderName: sanitize(
+              body.senderName ||
+                body.accountHolder ||
+                body.cardHolder ||
+                "Source externe"
+            ),
+            senderEmail: null,
+            nameDestinataire: receiverUser.fullName,
+            recipientEmail: receiverUser.email,
 
-          amount: dec2(pricingCtx.amountSourceStd),
-          transactionFees: dec2(pricingCtx.feeSourceStd),
-          netAmount: dec2(pricingCtx.netFrom),
-          exchangeRate: dec2(pricingCtx.rateUsed),
-          localAmount: dec2(pricingCtx.amountTargetStd),
+            destination: "paynoval",
+            funds: fundsValue,
+            provider,
+            operator:
+              body.operator || body.operatorName || txMetadata?.provider || null,
+            country: sanitize(corridorLock.lockedTargetCountry),
 
-          senderCurrencySymbol: currencySourceISO,
-          localCurrencySymbol: currencyTargetISO,
+            amount: dec2(pricingCtx.amountSourceStd),
+            transactionFees: dec2(pricingCtx.feeSourceStd),
+            netAmount: dec2(pricingCtx.netFrom),
+            exchangeRate: dec2(pricingCtx.rateUsed),
+            localAmount: dec2(pricingCtx.amountTargetStd),
 
-          amountSource: dec2(pricingCtx.amountSourceStd),
-          amountTarget: dec2(pricingCtx.amountTargetStd),
-          feeSource: dec2(pricingCtx.feeSourceStd),
-          fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
-          currencySource: currencySourceISO,
-          currencyTarget: currencyTargetISO,
+            senderCurrencySymbol: currencySourceISO,
+            localCurrencySymbol: currencyTargetISO,
 
-          money: {
-            source: {
-              amount: pricingCtx.amountSourceStd,
-              currency: currencySourceISO,
+            amountSource: dec2(pricingCtx.amountSourceStd),
+            amountTarget: dec2(pricingCtx.amountTargetStd),
+            feeSource: dec2(pricingCtx.feeSourceStd),
+            fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
+            currencySource: currencySourceISO,
+            currencyTarget: currencyTargetISO,
+
+            money: {
+              source: {
+                amount: pricingCtx.amountSourceStd,
+                currency: currencySourceISO,
+              },
+              feeSource: {
+                amount: pricingCtx.feeSourceStd,
+                currency: currencySourceISO,
+              },
+              target: {
+                amount: pricingCtx.amountTargetStd,
+                currency: currencyTargetISO,
+              },
+              fxRateSourceToTarget: pricingCtx.rateUsed,
             },
-            feeSource: {
-              amount: pricingCtx.feeSourceStd,
-              currency: currencySourceISO,
+
+            pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
+            pricingRuleApplied:
+              pricingCtx.pricingSnapshot?.ruleApplied || null,
+            pricingFxRuleApplied:
+              pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+
+            feeSnapshot: {
+              fee: pricingCtx.feeSourceStd,
+              netAfterFees: pricingCtx.netFrom,
+              convertedNetAfterFees: pricingCtx.amountTargetStd,
+              exchangeRate: pricingCtx.rateUsed,
+              pricingDebug: pricingCtx.pricingSnapshot?.debug || null,
             },
-            target: {
-              amount: pricingCtx.amountTargetStd,
-              currency: currencyTargetISO,
-            },
-            fxRateSourceToTarget: pricingCtx.rateUsed,
+            feeActual: null,
+            feeId: null,
+
+            treasuryRevenue: pricingCtx.treasuryRevenue,
+            treasuryRevenueCredited: false,
+            treasuryRevenueCreditedAt: null,
+            treasuryUserId: treasurySeed.treasuryUserId,
+            treasurySystemType: treasurySeed.treasurySystemType,
+            treasuryLabel: treasurySeed.treasuryLabel,
+
+            securityQuestion: null,
+            securityAnswerHash: null,
+            securityCode: null,
+
+            amlSnapshot,
+            amlStatus: amlSnapshot?.status || "passed",
+
+            description: sanitize(description),
+            orderId: body.orderId || null,
+
+            metadata: txMetadata,
+            meta: txMeta,
+
+            status: "processing",
+            providerReference: pickExternalRef(body),
+            providerStatus: "AWAITING_PROVIDER_PAYMENT",
+
+            ...autoCancelFields,
+
+            fundsReserved: false,
+            fundsReservedAt: null,
+            fundsCaptured: false,
+            fundsCapturedAt: null,
+            beneficiaryCredited: false,
+            beneficiaryCreditedAt: null,
+            reserveReleased: false,
+            reserveReleasedAt: null,
+            reversedAt: null,
+            executedAt: null,
+            attemptCount: 0,
+            lastAttemptAt: null,
+            lockedUntil: null,
           },
+        ],
+        sessOpts
+      );
 
-          pricingSnapshot: normalizePricingSnapshot(pricingCtx.pricingSnapshot),
-          pricingRuleApplied:
-            pricingCtx.pricingSnapshot?.ruleApplied || null,
-          pricingFxRuleApplied:
-            pricingCtx.pricingSnapshot?.fxRuleApplied || null,
+      await notifyTransactionEvent(tx, "processing", sess, currencyTargetISO);
 
-          feeSnapshot: {
-            fee: pricingCtx.feeSourceStd,
-            netAfterFees: pricingCtx.netFrom,
-            convertedNetAfterFees: pricingCtx.amountTargetStd,
-            exchangeRate: pricingCtx.rateUsed,
-            pricingDebug: pricingCtx.pricingSnapshot?.debug || null,
-          },
-          feeActual: null,
-          feeId: null,
+      return tx;
+    });
 
-          treasuryRevenue: pricingCtx.treasuryRevenue,
-          treasuryRevenueCredited: false,
-          treasuryRevenueCreditedAt: null,
-          treasuryUserId: treasurySeed.treasuryUserId,
-          treasurySystemType: treasurySeed.treasurySystemType,
-          treasuryLabel: treasurySeed.treasuryLabel,
-
-          securityQuestion: null,
-          securityAnswerHash: null,
-          securityCode: null,
-
-          amlSnapshot,
-          amlStatus: amlSnapshot?.status || "passed",
-
-          description: sanitize(description),
-          orderId: body.orderId || null,
-
-          metadata: txMetadata,
-          meta: txMeta,
-
-          status: "processing",
-          providerReference: pickExternalRef(body),
-          providerStatus: "AWAITING_PROVIDER_PAYMENT",
-
-          ...autoCancelFields,
-
-          fundsReserved: false,
-          fundsReservedAt: null,
-          fundsCaptured: false,
-          fundsCapturedAt: null,
-          beneficiaryCredited: false,
-          beneficiaryCreditedAt: null,
-          reserveReleased: false,
-          reserveReleasedAt: null,
-          reversedAt: null,
-          executedAt: null,
-          attemptCount: 0,
-          lastAttemptAt: null,
-          lockedUntil: null,
-        },
-      ],
-      sessOpts
-    );
-
+    /**
+     * Journal d'audit : après le commit. Un rejeu du corps le dupliquerait.
+     */
     logTransaction({
       userId: receiverId,
       type: "initiate",
@@ -1380,14 +1433,6 @@ async function initiateInboundExternal(req, res, next) {
       transactionId: tx._id,
       ip: req.ip,
     }).catch(() => {});
-
-    await notifyTransactionEvent(tx, "processing", session, currencyTargetISO);
-
-    if (canUseSharedSession()) {
-      await safeCommit(session);
-    }
-
-    session.endSession();
 
     let execution = null;
 
@@ -1441,14 +1486,10 @@ async function initiateInboundExternal(req, res, next) {
       flow: safeResolveFlow(req.body),
     });
 
-    try {
-      if (canUseSharedSession()) {
-        await session.abortTransaction();
-      }
-    } catch {}
-
-    session.endSession();
+    await safeAbort(session);
     next(err);
+  } finally {
+    await safeEndSession(session);
   }
 }
 

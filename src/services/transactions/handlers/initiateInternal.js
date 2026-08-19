@@ -213,19 +213,6 @@ function safeSessionChain(query, session) {
   return session ? query.session(session) : query;
 }
 
-async function abortQuietly(session) {
-  try {
-    if (session && runtime.canUseSharedSession()) {
-      await session.abortTransaction();
-    }
-  } catch {}
-}
-
-async function endQuietly(session) {
-  try {
-    if (session) session.endSession();
-  } catch {}
-}
 
 function maskSecret(v) {
   return v ? "***" : undefined;
@@ -324,9 +311,6 @@ async function initiateInternal(req, res, next) {
     if (!User) throw createError(500, "User model indisponible");
     if (!Transaction) throw createError(500, "Transaction model indisponible");
 
-    if (runtime.canUseSharedSession()) {
-      session.startTransaction();
-    }
 
     const body = isPlainObject(req.body) ? req.body : {};
 
@@ -421,8 +405,19 @@ async function initiateInternal(req, res, next) {
         null,
     });
 
-    const sessOpts = runtime.maybeSessionOpts(session);
-    const activeSession = sessOpts?.session || null;
+    /**
+     * PHASE 1 — PRÉPARATION, HORS TRANSACTION.
+     *
+     * `fetchPricingQuoteFromGateway()` part en HTTP POST vers la passerelle
+     * avec douze secondes de délai d'attente. Aucun appel réseau ne doit se
+     * trouver dans une transaction Mongo : les verrous resteraient tenus le
+     * temps de l'attente, et au-delà de `transactionLifetimeLimitSeconds`
+     * (60 s par défaut) le serveur tuerait la transaction sous nos pieds.
+     *
+     * Les lectures de profil se font donc sans session — elles ne servent
+     * qu'à valider. L'écriture, elle, est atomique en phase 2.
+     */
+    const activeSession = null;
 
     let senderQuery = User.findById(senderId).select(USER_CORRIDOR_SELECT);
 
@@ -787,22 +782,39 @@ async function initiateInternal(req, res, next) {
       lockedUntil: null,
     };
 
-    const [tx] = await Transaction.create([txDoc], sessOpts);
+    /**
+     * PHASE 2 — UNITÉ DE TRAVAIL, REJOUABLE DE BOUT EN BOUT.
+     *
+     * Création de la transaction et réservation des fonds : les deux tiennent
+     * ou tombent ensemble. Rien n'en sort — ni réseau, ni réponse HTTP, ni
+     * journal d'audit.
+     */
+    const tx = await runtime.runInTransaction(session, async (sess) => {
+      const sessOpts = runtime.maybeSessionOpts(sess);
 
-    await reserveSenderFunds({
-      transaction: tx,
-      senderId: senderUser._id,
-      amount: amountSourceStd,
-      currency: currencySourceISO,
-      session,
+      const [tx] = await Transaction.create([txDoc], sessOpts);
+
+      await reserveSenderFunds({
+        transaction: tx,
+        senderId: senderUser._id,
+        amount: amountSourceStd,
+        currency: currencySourceISO,
+        session: sess,
+      });
+
+      tx.fundsReserved = true;
+      tx.fundsReservedAt = new Date();
+      tx.providerStatus = "FUNDS_RESERVED";
+
+      await tx.save(sessOpts);
+
+      /** Outbox sous la même session : annulée avec elle le cas échéant. */
+      await notifyTransactionEvent(tx, "initiated", sess, currencySourceISO);
+
+      return tx;
     });
 
-    tx.fundsReserved = true;
-    tx.fundsReservedAt = new Date();
-    tx.providerStatus = "FUNDS_RESERVED";
-
-    await tx.save(sessOpts);
-
+    /** Journal d'audit : après le commit — un rejeu le dupliquerait. */
     logTransaction({
       userId: senderId,
       type: "initiate",
@@ -838,14 +850,6 @@ async function initiateInternal(req, res, next) {
       transactionId: tx._id,
       ip: req.ip,
     }).catch(() => {});
-
-    await notifyTransactionEvent(tx, "initiated", session, currencySourceISO);
-
-    if (runtime.canUseSharedSession()) {
-      await runtime.safeCommit(session);
-    }
-
-    await endQuietly(session);
 
     return res.status(201).json({
       success: true,
@@ -885,9 +889,10 @@ async function initiateInternal(req, res, next) {
       ip: req.ip || null,
     });
 
-    await abortQuietly(session);
-    await endQuietly(session);
+    await runtime.safeAbort(session);
     next(err);
+  } finally {
+    await runtime.safeEndSession(session);
   }
 }
 
