@@ -1,14 +1,55 @@
 "use strict";
 
+const crypto = require("crypto");
+
 const {
   User,
-  Notification,
-  Outbox,
   notifyTransactionViaGateway,
   logger,
   PRINCIPAL_URL,
   maybeSessionOpts,
+  usersConn,
 } = require("./runtime");
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * POURQUOI CES DEUX MODÈLES NE VIENNENT PAS DE `runtime`
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * `runtime.Notification` et `runtime.Outbox` sont branchés sur la connexion
+ * TRANSACTIONS — `api_transactions_paynoval`. Or :
+ *
+ *   - le worker qui livre les notifications vit dans le backend principal et
+ *     lit `paynoval.outboxes` ;
+ *   - l'application mobile lit `paynoval.notifications`.
+ *
+ * Écrire dans les collections du tx-core, c'est donc écrire dans un cul-de-sac :
+ * l'ordre de livraison n'est jamais drainé, et la notification n'est jamais
+ * affichée. `runtime` porte d'ailleurs cet avertissement en toutes lettres sur
+ * `getOutboxModel()` — ce fichier l'ignorait.
+ *
+ * Mesuré avant correctif : `api_transactions_paynoval.notifications` et
+ * `.outboxes` contenaient 0 document, quand `paynoval` en comptait 172 et 52.
+ * Le seul appelant est `externalSettlementController` ; le piège était armé
+ * sans avoir encore tiré.
+ *
+ * `transactionNotificationService` fait déjà le bon choix — on l'aligne.
+ */
+const Notification = require("../../../models/Notification")(usersConn);
+const Outbox = require("../../../models/Outbox")(usersConn);
+
+/**
+ * Même construction de clé que `transactionNotificationService`, et pour la
+ * même raison : ce corps est REJOUABLE. Sans clé, un rejeu sur conflit
+ * d'écriture notifierait l'utilisateur deux fois du même règlement. L'index
+ * unique partiel de `paynoval.outboxes` fait le reste.
+ */
+function buildOutboxIdempotencyKey(txId, userId, status) {
+  return crypto
+    .createHash("sha256")
+    .update(`settlement:${txId}:${userId}:${status}`)
+    .digest("hex");
+}
 
 const { toFloat, pickCurrency } = require("./helpers");
 
@@ -155,14 +196,24 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
           service: "notifications",
           event: `transaction_${status}`,
           payload: { userId: sender._id.toString(), data: dataSender },
+          idempotencyKey: buildOutboxIdempotencyKey(
+            tx._id.toString(),
+            sender._id.toString(),
+            status
+          ),
         },
         {
           service: "notifications",
           event: `transaction_${status}`,
           payload: { userId: receiver._id.toString(), data: dataReceiver },
+          idempotencyKey: buildOutboxIdempotencyKey(
+            tx._id.toString(),
+            receiver._id.toString(),
+            status
+          ),
         },
       ],
-      sessOpts
+      { ordered: false, ...sessOpts }
     );
 
     notifyTransactionViaGateway(status, {
