@@ -9,6 +9,19 @@ const {
   getUsersConnectionSafe,
 } = require("./shared/runtime");
 
+/**
+ * Lecture des montants : logique pure, isolée dans `utils/txMoneyFields.js`
+ * pour être testable sans connexion Mongo ni environnement complet. Voir ce
+ * fichier pour la raison — contre-intuitive — pour laquelle `tx.amount` est le
+ * TOTAL débité et non le montant envoyé.
+ */
+const {
+  readMoneyField,
+  buildSenderFee,
+  buildSenderNet,
+  buildSenderTotal,
+} = require("../../utils/txMoneyFields");
+
 const Notification = require("../../models/Notification")(getUsersConnectionSafe());
 const Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
 
@@ -201,14 +214,36 @@ function buildMessages(status, ctx) {
   };
 }
 
-function buildNotificationData(tx, status, amount, currency, sender, receiver) {
+function buildNotificationData(tx, status, amount, currency, sender, receiver, options = {}) {
   const normalizedCurrency = normalizeCurrencyCode(currency);
+
+  /**
+   * Les frais ne concernent que l'expéditeur : le destinataire reçoit un
+   * montant net, aucun prélèvement n'est opéré sur lui. Lui envoyer une ligne
+   * « Frais » — fût-elle à zéro — laisserait croire le contraire.
+   */
+  const isSender = options.role === "sender";
+  const fee = isSender ? buildSenderFee(tx) : null;
+  const net = isSender ? buildSenderNet(tx) : null;
+  const total = isSender ? buildSenderTotal(tx) : null;
 
   return {
     transactionId: tx?._id?.toString?.() || "",
     reference: tx?.reference || "",
     status,
+
+    /**
+     * `amount` reste ce qu'il a toujours été pour ne casser aucun consommateur
+     * (application mobile, push, back-office). Pour l'EXPÉDITEUR, l'e-mail
+     * affiche `net` en « Montant » afin que Montant + Frais = Total soit vrai.
+     */
     amount,
+    net,
+    fee,
+    total,
+    feeCurrency: normalizedCurrency,
+    totalCurrency: normalizedCurrency,
+
     currency: normalizedCurrency,
     displayAmount: formatAmount(amount, normalizedCurrency),
     senderId: sender?._id?.toString?.() || "",
@@ -219,6 +254,14 @@ function buildNotificationData(tx, status, amount, currency, sender, receiver) {
     receiverName: receiver?.fullName || receiver?.email || "",
     dateIso: buildTxDateIso(tx),
     flow: tx?.flow || tx?.txType || "PAYNOVAL_INTERNAL_TRANSFER",
+
+    /**
+     * Langue et pays du DESTINATAIRE de l'e-mail — pas ceux de la transaction.
+     * Sans eux, le backend principal ne peut ni traduire le message ni choisir
+     * le bon numéro de support.
+     */
+    locale: options.locale || "",
+    countryCode: options.countryCode || "",
     reason: tx?.cancelReason || tx?.reason || "",
   };
 }
@@ -322,12 +365,12 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
 
     const [sender, receiver] = await Promise.all([
       User.findById(tx.sender)
-        .select("_id email fullName wantsEmail notificationPreferences")
+        .select("_id email fullName wantsEmail notificationPreferences preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),
 
       User.findById(tx.receiver)
-        .select("_id email fullName wantsEmail notificationPreferences")
+        .select("_id email fullName wantsEmail notificationPreferences preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),
     ]);
@@ -363,7 +406,12 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       senderAmount,
       senderCurrency,
       sender,
-      receiver
+      receiver,
+      {
+        role: "sender",
+        locale: sender.preferences?.language || "",
+        countryCode: sender.countryCode || sender.country || "",
+      }
     );
 
     const receiverData = buildNotificationData(
@@ -372,7 +420,12 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       receiverAmount,
       receiverCurrency,
       sender,
-      receiver
+      receiver,
+      {
+        role: "receiver",
+        locale: receiver.preferences?.language || "",
+        countryCode: receiver.countryCode || receiver.country || "",
+      }
     );
 
     const senderChannels = [];
@@ -430,4 +483,8 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
 
 module.exports = {
   notifyTransactionEvent,
+
+  // Exposé pour les tests d'intégration ; la lecture des montants, elle, se
+  // teste directement sur `utils/txMoneyFields.js`.
+  buildNotificationData,
 };
