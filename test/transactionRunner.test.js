@@ -13,7 +13,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { runWithTransaction } = require("../src/utils/transactionRunner");
+const {
+  runWithTransaction,
+  isTransactionLevelError,
+} = require("../src/utils/transactionRunner");
 
 /** Session factice reproduisant le pilote 5.x : le retour du corps est perdu. */
 function driver5Session() {
@@ -83,4 +86,55 @@ test("un rejeu du corps rend la valeur de la DERNIÈRE exécution", async () => 
   });
 
   assert.equal(result, "execution-2");
+});
+
+/**
+ * `isTransactionLevelError` existe pour un cas précis : un `try/catch` posé
+ * autour d'une étape secondaire À L'INTÉRIEUR d'une transaction rejouable
+ * avale, sans le vouloir, le conflit d'écriture que le pilote attend pour
+ * déclencher le rejeu. La transaction est alors validée alors que l'étape
+ * avalée n'a jamais eu lieu.
+ *
+ * D'où la règle : on distingue par ÉTIQUETTE, jamais par le texte du message.
+ */
+test("reconnaît un conflit d'écriture par son étiquette", () => {
+  const err = new Error("WriteConflict");
+  err.errorLabels = ["TransientTransactionError"];
+
+  assert.equal(isTransactionLevelError(err), true);
+});
+
+test("reconnaît l'étiquette via hasErrorLabel(), comme la pose le pilote", () => {
+  const err = new Error("commit incertain");
+  err.hasErrorLabel = (l) => l === "UnknownTransactionCommitResult";
+
+  assert.equal(isTransactionLevelError(err), true);
+});
+
+test("reconnaît WriteConflict par son code même sans étiquette", () => {
+  const err = new Error("peu importe le texte");
+  err.code = 112;
+
+  assert.equal(isTransactionLevelError(err), true);
+});
+
+test("une erreur métier n'est PAS une erreur de transaction", () => {
+  // Le point du test : c'est celle-là qu'il faut continuer à avaler.
+  const err = new Error("Please retry the operation");
+  err.status = 409;
+
+  assert.equal(isTransactionLevelError(err), false);
+});
+
+test("un doublon E11000 n'est PAS une erreur de transaction", () => {
+  // Déjà en file : comportement voulu, pas un incident transactionnel.
+  const err = new Error("E11000 duplicate key");
+  err.code = 11000;
+
+  assert.equal(isTransactionLevelError(err), false);
+});
+
+test("ni null ni undefined ne déclenchent le rejeu", () => {
+  assert.equal(isTransactionLevelError(null), false);
+  assert.equal(isTransactionLevelError(undefined), false);
 });

@@ -22,7 +22,10 @@ const { convertAmount } = require("../../../tools/currency");
 const { normCur } = require("../../../utils/currency");
 const generateTransactionRef = require("../../../utils/generateRef");
 const { commitWithRetry } = require("../../../utils/commitWithRetry");
-const { runWithTransaction } = require("../../../utils/transactionRunner");
+const {
+  runWithTransaction,
+  isTransactionLevelError,
+} = require("../../../utils/transactionRunner");
 
 const {
   reserveSenderFunds,
@@ -560,6 +563,9 @@ Object.defineProperties(runtime, {
   },
   runInTransaction: {
     get: () => runInTransaction,
+  },
+  isTransactionLevelError: {
+    get: () => isTransactionLevelError,
   },
   safeAbort: {
     get: () => safeAbort,

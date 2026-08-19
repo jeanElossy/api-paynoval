@@ -813,9 +813,11 @@ const {
   normalizeTreasurySystemType,
   startTxSession,
   maybeSessionOpts,
-  canUseSharedSession,
   assertTransition,
-  safeCommit,
+  runInTransaction,
+  isTransactionLevelError,
+  safeAbort,
+  safeEndSession,
 } = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
@@ -1038,14 +1040,17 @@ function isFinalNegativeStatus(status) {
   );
 }
 
-async function handleSandboxConfirm({ req, res, tx, sessOpts, session }) {
+/**
+ * Volet sandbox : mute et enregistre dans la session reçue, puis rend le corps
+ * de la réponse. Ne valide pas la session et n'écrit pas sur `res` — la
+ * transaction pouvant être rejouée, une réponse émise d'ici partirait deux
+ * fois.
+ */
+async function applySandboxConfirm({ req, tx, sessOpts }) {
   assertSandboxOwner({ req, tx });
 
   if (isFinalNegativeStatus(tx.status)) {
-    throw createError(
-      410,
-      "Cette transaction sandbox n’est plus confirmable."
-    );
+    throw createError(410, "Cette transaction sandbox n’est plus confirmable.");
   }
 
   const now = new Date();
@@ -1067,7 +1072,7 @@ async function handleSandboxConfirm({ req, res, tx, sessOpts, session }) {
   tx.completedAt = tx.completedAt || now;
 
   tx.isSandbox = true;
-  tx.fundsCaptured = tx.fundsCaptured === true ? true : true;
+  tx.fundsCaptured = true;
 
   tx.metadata = {
     ...(tx.metadata || {}),
@@ -1087,25 +1092,22 @@ async function handleSandboxConfirm({ req, res, tx, sessOpts, session }) {
 
   await tx.save(sessOpts);
 
-  if (canUseSharedSession()) {
-    await safeCommit(session);
-  }
-
-  await endQuietly(session);
-
-  return res.json({
-    success: true,
-    sandbox: true,
-    transactionId: tx._id.toString(),
-    reference: tx.reference,
-    flow: tx.flow,
-    status: tx.status,
-    providerStatus: tx.providerStatus,
-    providerReference: tx.providerReference,
-    fundsCaptured: !!tx.fundsCaptured,
-    beneficiaryCredited: !!tx.beneficiaryCredited,
-    message: "Transaction sandbox déjà simulée avec succès.",
-  });
+  return {
+    statusCode: 200,
+    body: {
+      success: true,
+      sandbox: true,
+      transactionId: tx._id.toString(),
+      reference: tx.reference,
+      flow: tx.flow,
+      status: tx.status,
+      providerStatus: tx.providerStatus,
+      providerReference: tx.providerReference,
+      fundsCaptured: !!tx.fundsCaptured,
+      beneficiaryCredited: !!tx.beneficiaryCredited,
+      message: "Transaction sandbox déjà simulée avec succès.",
+    },
+  };
 }
 
 function assertCorridorLockIsValid(tx) {
@@ -1323,28 +1325,245 @@ function isExpiredBeforeConfirmation(tx, now = new Date()) {
   );
 }
 
-async function endQuietly(session) {
-  try {
-    if (session) session.endSession();
-  } catch {}
+/**
+ * Les champs nécessaires à la confirmation. Un seul endroit : la phase de
+ * contrôle et la phase transactionnelle doivent lire le même jeu de champs.
+ */
+const CONFIRM_SELECT = [
+  "+userId",
+  "+flow",
+  "+provider",
+  "+channel",
+  "+providerStatus",
+  "+providerReference",
+  "+isSandbox",
+  "+securityAnswerHash",
+  "+securityCode",
+
+  "+amount",
+  "+transactionFees",
+  "+netAmount",
+  "+senderCurrencySymbol",
+  "+localCurrencySymbol",
+  "+localAmount",
+  "+currencySource",
+  "+currencyTarget",
+  "+money",
+
+  "+receiver",
+  "+receiverUserId",
+  "+sender",
+  "+createdBy",
+  "+ownerUserId",
+  "+user",
+
+  "+feeSnapshot",
+  "+attemptCount",
+  "+lastAttemptAt",
+  "+lockedUntil",
+  "+status",
+  "+exchangeRate",
+  "+country",
+  "+funds",
+  "+recipientEmail",
+
+  "+pricingSnapshot",
+  "+treasuryRevenue",
+  "+treasuryRevenueCredited",
+  "+treasuryRevenueCreditedAt",
+  "+treasuryUserId",
+  "+treasurySystemType",
+  "+treasuryLabel",
+
+  "+fundsReserved",
+  "+fundsCaptured",
+  "+fundsCapturedAt",
+  "+beneficiaryCredited",
+  "+beneficiaryCreditedAt",
+  "+reserveReleased",
+
+  "+reference",
+  "+confirmedAt",
+  "+executedAt",
+  "+completedAt",
+
+  "+autoCancelAt",
+  "+autoCancelledAt",
+  "+autoCancelReason",
+  "+autoCancelLockAt",
+  "+autoCancelWorkerId",
+  "+lastAutoCancelError",
+
+  "+metadata",
+  "+meta",
+];
+
+function loadConfirmTarget(transactionId, sessOpts) {
+  return Transaction.findById(transactionId)
+    .select(CONFIRM_SELECT)
+    .session(sessOpts?.session || null);
 }
 
-async function abortQuietly(session) {
-  try {
-    if (session && canUseSharedSession()) {
-      await session.abortTransaction();
+/**
+ * Toutes les vérifications d'état et d'autorisation, sans aucune écriture.
+ *
+ * Exécutées deux fois : hors transaction pour rejeter tôt, puis DANS la
+ * transaction sur l'état lu sous session — c'est cette seconde exécution qui
+ * fait autorité.
+ */
+function assertConfirmable({ req, tx, now }) {
+  if (isAlreadyAutoCancelledOrFinal(tx)) {
+    throw createError(
+      410,
+      "Cette transaction a déjà été annulée automatiquement ou n’est plus confirmable."
+    );
+  }
+
+  if (isExpiredBeforeConfirmation(tx, now)) {
+    throw createError(
+      410,
+      "Cette transaction a expiré. Elle sera annulée automatiquement."
+    );
+  }
+
+  if (tx.lockedUntil && tx.lockedUntil > now) {
+    throw createError(
+      423,
+      `Transaction bloquée, réessayez après ${tx.lockedUntil.toLocaleTimeString(
+        "fr-FR"
+      )}`
+    );
+  }
+
+  if (isInboundExternalCollection(tx)) {
+    throw createError(
+      409,
+      "Cette transaction est pilotée par callback provider et ne se confirme pas manuellement."
+    );
+  }
+
+  if (isInternalTransfer(tx)) {
+    assertTransition(tx.status, "confirmed");
+
+    if (String(tx.receiver) !== getAuthedUserId(req)) {
+      throw createError(
+        403,
+        "Vous n’êtes pas le destinataire de cette transaction"
+      );
     }
-  } catch {}
+  } else if (isOutboundExternalPayout(tx)) {
+    if (
+      !["pending", "pending_review", "relaunch"].includes(
+        normalizeStatus(tx.status)
+      )
+    ) {
+      throw createError(409, "Transaction non confirmable dans son état actuel");
+    }
+
+    if (String(tx.sender) !== getAuthedUserId(req)) {
+      throw createError(
+        403,
+        "Vous n’êtes pas autorisé à confirmer cette transaction"
+      );
+    }
+  } else {
+    throw createError(400, `Flow non supporté pour confirm: ${tx.flow}`);
+  }
+}
+
+/** Comparaison à temps constant de la réponse de sécurité. Aucune écriture. */
+function securityAnswerMatches(tx, provided) {
+  const storedHash =
+    String(tx.securityAnswerHash || "") || String(tx.securityCode || "");
+
+  if (!storedHash) {
+    throw createError(500, "securityAnswerHash manquant sur la transaction");
+  }
+
+  const inputHash = sha256Hex(provided);
+
+  return looksLikeSha256Hex(storedHash)
+    ? safeEqualHex(inputHash, storedHash)
+    : safeEqualHex(inputHash, sha256Hex(String(storedHash)));
+}
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * ÉCHEC D'AUTHENTIFICATION — COMPTABILISÉ HORS DE TOUTE TRANSACTION
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * C'est le point le plus important de ce fichier.
+ *
+ * L'ancienne version incrémentait `attemptCount`, sauvegardait DANS la
+ * transaction, puis levait une erreur. Or lever une erreur annule la
+ * transaction : l'incrément partait avec elle. Le compteur ne montait jamais,
+ * `lockedUntil` n'était jamais posé, et le verrouillage après
+ * MAX_CONFIRM_ATTEMPTS essais ne se déclenchait tout simplement pas. La
+ * réponse de sécurité d'un virement était devenue devinable à volonté.
+ *
+ * Un compteur d'échecs n'appartient pas au mouvement financier : c'est une
+ * trace de sécurité, et elle doit survivre à l'annulation de l'opération qui
+ * l'a produite. Stripe, PayPal et Wise procèdent tous ainsi — les compteurs
+ * de tentatives et les verrous sont écrits hors du périmètre transactionnel.
+ *
+ * L'incrément est de surcroît ATOMIQUE (`$inc`), là où l'ancien
+ * lecture-modification-écriture perdait des incréments quand plusieurs
+ * tentatives arrivaient en parallèle — exactement le scénario d'une attaque.
+ */
+async function registerFailedAttempt({ transactionId, now }) {
+  const updated = await Transaction.findOneAndUpdate(
+    { _id: transactionId },
+    { $inc: { attemptCount: 1 }, $set: { lastAttemptAt: now } },
+    { new: true }
+  );
+
+  const attemptCount = Number(updated?.attemptCount || 0);
+
+  if (attemptCount < MAX_CONFIRM_ATTEMPTS) {
+    throw createError(
+      401,
+      `Réponse incorrecte. Il vous reste ${
+        MAX_CONFIRM_ATTEMPTS - attemptCount
+      } essai(s).`
+    );
+  }
+
+  /**
+   * `status: { $ne: "locked" }` rend la pose du verrou idempotente : si
+   * plusieurs tentatives franchissent le seuil en même temps, une seule pose
+   * le verrou et une seule notification part.
+   */
+  const locked = await Transaction.findOneAndUpdate(
+    { _id: transactionId, status: { $ne: "locked" } },
+    {
+      $set: {
+        lockedUntil: new Date(now.getTime() + LOCK_MINUTES * 60 * 1000),
+        status: "locked",
+        providerStatus: "LOCKED_TOO_MANY_ATTEMPTS",
+      },
+    },
+    { new: true }
+  );
+
+  if (locked) {
+    await notifyTransactionEvent(
+      locked,
+      "locked",
+      null,
+      locked.senderCurrencySymbol
+    );
+  }
+
+  throw createError(
+    423,
+    `Réponse incorrecte. Transaction bloquée ${LOCK_MINUTES} min.`
+  );
 }
 
 async function confirmController(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (canUseSharedSession()) {
-      session.startTransaction();
-    }
-
     const { transactionId, securityAnswer, securityCode } = req.body || {};
     const provided = sanitize(securityAnswer || securityCode || "");
 
@@ -1358,397 +1577,268 @@ async function confirmController(req, res, next) {
       throw createError(401, "Token manquant");
     }
 
-    const sessOpts = maybeSessionOpts(session);
+    const now = new Date();
 
-    const tx = await Transaction.findById(transactionId)
-      .select([
-        "+userId",
-        "+flow",
-        "+provider",
-        "+channel",
-        "+providerStatus",
-        "+providerReference",
-        "+isSandbox",
-        "+securityAnswerHash",
-        "+securityCode",
+    /**
+     * ════════════════════════════════════════════════════════════════════
+     * PHASE 1 — CONTRÔLE D'ACCÈS. HORS TRANSACTION, PAR NÉCESSITÉ.
+     * ════════════════════════════════════════════════════════════════════
+     *
+     * Hors transaction parce que le seul effet de bord possible ici est
+     * l'enregistrement d'un échec, et qu'il doit précisément SURVIVRE à
+     * l'annulation (voir `registerFailedAttempt`).
+     */
+    const preview = await loadConfirmTarget(transactionId, null);
 
-        "+amount",
-        "+transactionFees",
-        "+netAmount",
-        "+senderCurrencySymbol",
-        "+localCurrencySymbol",
-        "+localAmount",
-        "+currencySource",
-        "+currencyTarget",
-        "+money",
-
-        "+receiver",
-        "+receiverUserId",
-        "+sender",
-        "+createdBy",
-        "+ownerUserId",
-        "+user",
-
-        "+feeSnapshot",
-        "+attemptCount",
-        "+lastAttemptAt",
-        "+lockedUntil",
-        "+status",
-        "+exchangeRate",
-        "+country",
-        "+funds",
-        "+recipientEmail",
-
-        "+pricingSnapshot",
-        "+treasuryRevenue",
-        "+treasuryRevenueCredited",
-        "+treasuryRevenueCreditedAt",
-        "+treasuryUserId",
-        "+treasurySystemType",
-        "+treasuryLabel",
-
-        "+fundsReserved",
-        "+fundsCaptured",
-        "+fundsCapturedAt",
-        "+beneficiaryCredited",
-        "+beneficiaryCreditedAt",
-        "+reserveReleased",
-
-        "+reference",
-        "+confirmedAt",
-        "+executedAt",
-        "+completedAt",
-
-        "+autoCancelAt",
-        "+autoCancelledAt",
-        "+autoCancelReason",
-        "+autoCancelLockAt",
-        "+autoCancelWorkerId",
-        "+lastAutoCancelError",
-
-        "+metadata",
-        "+meta",
-      ])
-      .session(sessOpts.session || null);
-
-    if (!tx) {
+    if (!preview) {
       throw createError(404, "Transaction introuvable");
     }
 
-    if (isSandboxTx(tx)) {
-      return handleSandboxConfirm({
-        req,
-        res,
-        tx,
-        sessOpts,
-        session,
-      });
-    }
+    const previewIsSandbox = isSandboxTx(preview);
 
-    if (!provided) {
-      throw createError(400, "securityAnswer est requis");
-    }
-
-    const now = new Date();
-
-    if (isAlreadyAutoCancelledOrFinal(tx)) {
-      throw createError(
-        410,
-        "Cette transaction a déjà été annulée automatiquement ou n’est plus confirmable."
-      );
-    }
-
-    if (isExpiredBeforeConfirmation(tx, now)) {
-      throw createError(
-        410,
-        "Cette transaction a expiré. Elle sera annulée automatiquement."
-      );
-    }
-
-    if (tx.lockedUntil && tx.lockedUntil > now) {
-      throw createError(
-        423,
-        `Transaction bloquée, réessayez après ${tx.lockedUntil.toLocaleTimeString(
-          "fr-FR"
-        )}`
-      );
-    }
-
-    if (isInboundExternalCollection(tx)) {
-      throw createError(
-        409,
-        "Cette transaction est pilotée par callback provider et ne se confirme pas manuellement."
-      );
-    }
-
-    if (isInternalTransfer(tx)) {
-      assertTransition(tx.status, "confirmed");
-
-      if (String(tx.receiver) !== getAuthedUserId(req)) {
-        throw createError(
-          403,
-          "Vous n’êtes pas le destinataire de cette transaction"
-        );
-      }
-    } else if (isOutboundExternalPayout(tx)) {
-      if (
-        !["pending", "pending_review", "relaunch"].includes(
-          normalizeStatus(tx.status)
-        )
-      ) {
-        throw createError(409, "Transaction non confirmable dans son état actuel");
+    if (!previewIsSandbox) {
+      if (!provided) {
+        throw createError(400, "securityAnswer est requis");
       }
 
-      if (String(tx.sender) !== getAuthedUserId(req)) {
-        throw createError(
-          403,
-          "Vous n’êtes pas autorisé à confirmer cette transaction"
-        );
+      assertConfirmable({ req, tx: preview, now });
+
+      if (!securityAnswerMatches(preview, provided)) {
+        await registerFailedAttempt({ transactionId: preview._id, now });
       }
-    } else {
-      throw createError(400, `Flow non supporté pour confirm: ${tx.flow}`);
     }
 
-    const storedHash =
-      String(tx.securityAnswerHash || "") || String(tx.securityCode || "");
+    /**
+     * ════════════════════════════════════════════════════════════════════
+     * PHASE 2 — UNITÉ DE TRAVAIL. REJOUABLE DE BOUT EN BOUT.
+     * ════════════════════════════════════════════════════════════════════
+     *
+     * Relecture sous session, revalidation de tout ce qui a été vérifié en
+     * phase 1, puis le mouvement financier. Aucun appel réseau, aucune
+     * réponse HTTP, aucun effet de bord non annulable : le pilote peut
+     * réexécuter ce corps autant de fois que Mongo le demande.
+     */
+    const outcome = await runInTransaction(session, async (sess) => {
+      const sessOpts = maybeSessionOpts(sess);
 
-    if (!storedHash) {
-      throw createError(500, "securityAnswerHash manquant sur la transaction");
-    }
+      const tx = await loadConfirmTarget(transactionId, sessOpts);
 
-    const inputHash = sha256Hex(provided);
-
-    const ok = looksLikeSha256Hex(storedHash)
-      ? safeEqualHex(inputHash, storedHash)
-      : safeEqualHex(inputHash, sha256Hex(String(storedHash)));
-
-    if (!ok) {
-      tx.attemptCount = (tx.attemptCount || 0) + 1;
-      tx.lastAttemptAt = now;
-
-      if (tx.attemptCount >= MAX_CONFIRM_ATTEMPTS) {
-        tx.lockedUntil = new Date(now.getTime() + LOCK_MINUTES * 60 * 1000);
-        tx.status = "locked";
-        tx.providerStatus = "LOCKED_TOO_MANY_ATTEMPTS";
-
-        await tx.save(sessOpts);
-
-        await notifyTransactionEvent(
-          tx,
-          "locked",
-          session,
-          tx.senderCurrencySymbol
-        );
-
-        throw createError(
-          423,
-          `Réponse incorrecte. Transaction bloquée ${LOCK_MINUTES} min.`
-        );
+      if (!tx) {
+        throw createError(404, "Transaction introuvable");
       }
 
-      await tx.save(sessOpts);
-
-      throw createError(
-        401,
-        `Réponse incorrecte. Il vous reste ${
-          MAX_CONFIRM_ATTEMPTS - tx.attemptCount
-        } essai(s).`
-      );
-    }
-
-    const corridorLock = assertCorridorLockIsValid(tx);
-
-    await assertCurrentProfilesStillMatchCorridor({
-      tx,
-      lock: corridorLock,
-      session: sessOpts.session || null,
-    });
-
-    tx.attemptCount = 0;
-    tx.lastAttemptAt = null;
-    tx.lockedUntil = null;
-
-    const grossSource = round2(toFloat(tx.amount));
-    const targetAmount = round2(toFloat(tx.localAmount));
-
-    const sourceCurrency =
-      normalizeCurrency(tx.senderCurrencySymbol) ||
-      normalizeCurrency(tx.currencySource) ||
-      normalizeCurrency(tx.money?.source?.currency);
-
-    const targetCurrency =
-      normalizeCurrency(tx.localCurrencySymbol) ||
-      normalizeCurrency(tx.currencyTarget) ||
-      normalizeCurrency(tx.money?.target?.currency);
-
-    if (!Number.isFinite(grossSource) || grossSource <= 0) {
-      throw createError(409, "Montant source invalide");
-    }
-
-    if (!Number.isFinite(targetAmount) || targetAmount <= 0) {
-      throw createError(409, "Montant destination invalide");
-    }
-
-    if (!sourceCurrency) {
-      throw createError(409, "Devise source invalide");
-    }
-
-    if (!targetCurrency) {
-      throw createError(409, "Devise destination invalide");
-    }
-
-    if (!tx.fundsReserved) {
-      throw createError(409, "Fonds non réservés sur cette transaction");
-    }
-
-    if (!tx.fundsCaptured) {
-      await captureSenderReserve({
-        transaction: tx,
-        senderId: tx.sender,
-        amount: grossSource,
-        currency: sourceCurrency,
-        session,
-      });
-
-      tx.fundsCaptured = true;
-      tx.fundsCapturedAt = new Date();
-      tx.providerStatus = "FUNDS_CAPTURED";
-    }
-
-    if (isInternalTransfer(tx)) {
-      if (!tx.beneficiaryCredited) {
-        await creditReceiverFunds({
-          transaction: tx,
-          receiverId: tx.receiver,
-          amount: targetAmount,
-          currency: targetCurrency,
-          session,
-        });
-
-        tx.beneficiaryCredited = true;
-        tx.beneficiaryCreditedAt = new Date();
-        tx.providerStatus = "BENEFICIARY_CREDITED";
+      if (isSandboxTx(tx)) {
+        return applySandboxConfirm({ req, tx, sessOpts });
       }
 
-      if (!tx.treasuryRevenueCredited) {
-        const treasuryMeta = resolveFeesTreasuryMeta(tx);
-
-        const creditResult = await creditTreasuryRevenue({
-          transaction: tx,
-          pricingSnapshot: tx.pricingSnapshot || {},
-          treasurySystemType: treasuryMeta.treasurySystemType,
-          treasuryLabel: treasuryMeta.treasuryLabel,
-          session,
-        });
-
-        tx.treasuryRevenue = creditResult?.treasuryRevenue || null;
-        tx.treasuryRevenueCredited = true;
-        tx.treasuryRevenueCreditedAt = new Date();
-        tx.treasuryUserId = treasuryMeta.treasuryUserId;
-        tx.treasurySystemType = treasuryMeta.treasurySystemType;
-        tx.treasuryLabel = treasuryMeta.treasuryLabel;
-        tx.providerStatus = "TREASURY_REVENUE_CREDITED";
-      }
-
-      tx.status = "confirmed";
-      tx.confirmedAt = now;
-      tx.executedAt = now;
-      tx.providerStatus = "SUCCESS";
-
-      await tx.save(sessOpts);
-      await notifyTransactionEvent(tx, "confirmed", session, sourceCurrency);
+      assertConfirmable({ req, tx, now });
 
       /**
-       * PARRAINAGE — mise en file AVANT le commit, dans le régime de session du
-       * handler.
-       *
-       * L'ancienne version appelait le backend principal en HTTP APRÈS le
-       * commit, sans file ni reprise : une indisponibilité d'une seconde, un
-       * redéploiement, un réseau qui hoquette, et l'événement était perdu
-       * définitivement — le filleul ne touchait son bonus que s'il refaisait,
-       * par chance, une transaction qualifiante plus tard.
-       *
-       * Écrite ici, la mise en file est solidaire de la confirmation
-       * elle-même. La livraison est ensuite assurée par le worker, avec
-       * réessais à backoff exponentiel.
+       * Revérification de la réponse de sécurité sur l'état lu sous session :
+       * elle ferme la fenêtre entre la lecture de la phase 1 et celle-ci. Pas
+       * d'incrément de compteur ici — l'échec a déjà été comptabilisé, et un
+       * compteur incrémenté dans la transaction serait annulé avec elle.
        */
-      let referralSync = null;
-
-      try {
-        referralSync = await enqueueReferralActivityEvent({
-          transaction: tx,
-          sessionOpts,
-        });
-      } catch (refErr) {
-        /**
-         * Une mise en file impossible ne doit pas annuler un mouvement financier
-         * déjà exécuté et légitime. Le job de réconciliation rattrapera le
-         * parrainage ; l'erreur est journalisée pour être vue.
-         */
-        referralSync = buildReferralSyncError(refErr);
+      if (!securityAnswerMatches(tx, provided)) {
+        throw createError(401, "Réponse incorrecte.");
       }
 
-      if (canUseSharedSession()) {
-        await safeCommit(session);
-      }
+      const corridorLock = assertCorridorLockIsValid(tx);
 
-      await endQuietly(session);
-
-      return res.json({
-        success: true,
-        transactionId: tx._id.toString(),
-        reference: tx.reference,
-        flow: tx.flow,
-        status: tx.status,
-        providerStatus: tx.providerStatus,
-        credited: targetAmount,
-        currencyCredited: targetCurrency,
-        pricingSnapshot: tx.pricingSnapshot || null,
-        treasuryRevenue: tx.treasuryRevenue || null,
-        fundsCaptured: !!tx.fundsCaptured,
-        beneficiaryCredited: !!tx.beneficiaryCredited,
-        treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
-        treasuryUserId: tx.treasuryUserId || null,
-        treasurySystemType: tx.treasurySystemType || null,
-        treasuryLabel: tx.treasuryLabel || null,
-        autoCancelAt: tx.autoCancelAt || null,
-        corridorLock,
-        referralSync,
+      await assertCurrentProfilesStillMatchCorridor({
+        tx,
+        lock: corridorLock,
+        session: sessOpts.session || null,
       });
-    }
 
-    tx.status = "processing";
-    tx.providerStatus = tx.providerReference
-      ? "PROVIDER_SUBMITTED"
-      : "CONFIRMED_BY_USER_PENDING_PROVIDER";
+      tx.attemptCount = 0;
+      tx.lastAttemptAt = null;
+      tx.lockedUntil = null;
 
-    await tx.save(sessOpts);
-    await notifyTransactionEvent(tx, "processing", session, sourceCurrency);
+      const grossSource = round2(toFloat(tx.amount));
+      const targetAmount = round2(toFloat(tx.localAmount));
 
-    if (canUseSharedSession()) {
-      await safeCommit(session);
-    }
+      const sourceCurrency =
+        normalizeCurrency(tx.senderCurrencySymbol) ||
+        normalizeCurrency(tx.currencySource) ||
+        normalizeCurrency(tx.money?.source?.currency);
 
-    await endQuietly(session);
+      const targetCurrency =
+        normalizeCurrency(tx.localCurrencySymbol) ||
+        normalizeCurrency(tx.currencyTarget) ||
+        normalizeCurrency(tx.money?.target?.currency);
 
-    return res.status(202).json({
-      success: true,
-      transactionId: tx._id.toString(),
-      reference: tx.reference,
-      flow: tx.flow,
-      status: tx.status,
-      providerStatus: tx.providerStatus,
-      fundsCaptured: !!tx.fundsCaptured,
-      beneficiaryCredited: !!tx.beneficiaryCredited,
-      treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
-      autoCancelAt: tx.autoCancelAt || null,
-      corridorLock,
-      message: "Transaction confirmée côté utilisateur et en attente du provider.",
+      if (!Number.isFinite(grossSource) || grossSource <= 0) {
+        throw createError(409, "Montant source invalide");
+      }
+
+      if (!Number.isFinite(targetAmount) || targetAmount <= 0) {
+        throw createError(409, "Montant destination invalide");
+      }
+
+      if (!sourceCurrency) {
+        throw createError(409, "Devise source invalide");
+      }
+
+      if (!targetCurrency) {
+        throw createError(409, "Devise destination invalide");
+      }
+
+      if (!tx.fundsReserved) {
+        throw createError(409, "Fonds non réservés sur cette transaction");
+      }
+
+      if (!tx.fundsCaptured) {
+        await captureSenderReserve({
+          transaction: tx,
+          senderId: tx.sender,
+          amount: grossSource,
+          currency: sourceCurrency,
+          session: sess,
+        });
+
+        tx.fundsCaptured = true;
+        tx.fundsCapturedAt = new Date();
+        tx.providerStatus = "FUNDS_CAPTURED";
+      }
+
+      if (isInternalTransfer(tx)) {
+        if (!tx.beneficiaryCredited) {
+          await creditReceiverFunds({
+            transaction: tx,
+            receiverId: tx.receiver,
+            amount: targetAmount,
+            currency: targetCurrency,
+            session: sess,
+          });
+
+          tx.beneficiaryCredited = true;
+          tx.beneficiaryCreditedAt = new Date();
+          tx.providerStatus = "BENEFICIARY_CREDITED";
+        }
+
+        if (!tx.treasuryRevenueCredited) {
+          const treasuryMeta = resolveFeesTreasuryMeta(tx);
+
+          const creditResult = await creditTreasuryRevenue({
+            transaction: tx,
+            pricingSnapshot: tx.pricingSnapshot || {},
+            treasurySystemType: treasuryMeta.treasurySystemType,
+            treasuryLabel: treasuryMeta.treasuryLabel,
+            session: sess,
+          });
+
+          tx.treasuryRevenue = creditResult?.treasuryRevenue || null;
+          tx.treasuryRevenueCredited = true;
+          tx.treasuryRevenueCreditedAt = new Date();
+          tx.treasuryUserId = treasuryMeta.treasuryUserId;
+          tx.treasurySystemType = treasuryMeta.treasurySystemType;
+          tx.treasuryLabel = treasuryMeta.treasuryLabel;
+          tx.providerStatus = "TREASURY_REVENUE_CREDITED";
+        }
+
+        tx.status = "confirmed";
+        tx.confirmedAt = now;
+        tx.executedAt = now;
+        tx.providerStatus = "SUCCESS";
+
+        await tx.save(sessOpts);
+        await notifyTransactionEvent(tx, "confirmed", sess, sourceCurrency);
+
+        /**
+         * PARRAINAGE — mise en file dans LA MÊME transaction que la
+         * confirmation. L'événement est donc solidaire du mouvement : s'il est
+         * annulé, l'événement disparaît avec lui ; s'il est validé,
+         * l'événement est acquis et le worker le livrera avec réessais.
+         *
+         * L'argument s'appelait `sessionOpts` — un identifiant qui n'existe
+         * nulle part dans ce fichier. En mode strict, l'évaluation de l'objet
+         * levait donc une ReferenceError AVANT même l'appel, aussitôt avalée
+         * par le `catch` ci-dessous et transformée en un champ `referralSync`
+         * d'apparence anodine dans la réponse. Résultat : plus aucun événement
+         * de parrainage n'était mis en file, et rien ne le signalait.
+         */
+        let referralSync = null;
+
+        try {
+          referralSync = await enqueueReferralActivityEvent({
+            transaction: tx,
+            sessionOpts: sessOpts,
+          });
+        } catch (refErr) {
+          /**
+           * Le rejeu impose la prudence : si l'on avale l'erreur ici alors que
+           * Mongo signalait un conflit d'écriture, on valide une transaction
+           * dont la mise en file a échoué. On ne rattrape donc que ce qui est
+           * réellement propre au parrainage, et l'on laisse remonter tout ce
+           * qui relève de la transaction elle-même.
+           */
+          if (isTransactionLevelError(refErr)) throw refErr;
+
+          referralSync = buildReferralSyncError(refErr);
+        }
+
+        return {
+          statusCode: 200,
+          body: {
+            success: true,
+            transactionId: tx._id.toString(),
+            reference: tx.reference,
+            flow: tx.flow,
+            status: tx.status,
+            providerStatus: tx.providerStatus,
+            credited: targetAmount,
+            currencyCredited: targetCurrency,
+            pricingSnapshot: tx.pricingSnapshot || null,
+            treasuryRevenue: tx.treasuryRevenue || null,
+            fundsCaptured: !!tx.fundsCaptured,
+            beneficiaryCredited: !!tx.beneficiaryCredited,
+            treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
+            treasuryUserId: tx.treasuryUserId || null,
+            treasurySystemType: tx.treasurySystemType || null,
+            treasuryLabel: tx.treasuryLabel || null,
+            autoCancelAt: tx.autoCancelAt || null,
+            corridorLock,
+            referralSync,
+          },
+        };
+      }
+
+      tx.status = "processing";
+      tx.providerStatus = tx.providerReference
+        ? "PROVIDER_SUBMITTED"
+        : "CONFIRMED_BY_USER_PENDING_PROVIDER";
+
+      await tx.save(sessOpts);
+      await notifyTransactionEvent(tx, "processing", sess, sourceCurrency);
+
+      return {
+        statusCode: 202,
+        body: {
+          success: true,
+          transactionId: tx._id.toString(),
+          reference: tx.reference,
+          flow: tx.flow,
+          status: tx.status,
+          providerStatus: tx.providerStatus,
+          fundsCaptured: !!tx.fundsCaptured,
+          beneficiaryCredited: !!tx.beneficiaryCredited,
+          treasuryRevenueCredited: !!tx.treasuryRevenueCredited,
+          autoCancelAt: tx.autoCancelAt || null,
+          corridorLock,
+          message:
+            "Transaction confirmée côté utilisateur et en attente du provider.",
+        },
+      };
     });
+
+    /** PHASE 3 — la réponse, une seule fois, après le commit. */
+    return res.status(outcome.statusCode).json(outcome.body);
   } catch (err) {
-    await abortQuietly(session);
-    await endQuietly(session);
+    await safeAbort(session);
     next(err);
+  } finally {
+    await safeEndSession(session);
   }
 }
 
