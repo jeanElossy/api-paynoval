@@ -4,39 +4,25 @@ const crypto = require("crypto");
 
 const {
   User,
+  Notification,
+  NotificationOutbox: Outbox,
   notifyTransactionViaGateway,
   logger,
   PRINCIPAL_URL,
   maybeSessionOpts,
-  usersConn,
 } = require("./runtime");
 
 /**
- * ══════════════════════════════════════════════════════════════════════════
- * POURQUOI CES DEUX MODÈLES NE VIENNENT PAS DE `runtime`
- * ══════════════════════════════════════════════════════════════════════════
+ * `Notification` et `NotificationOutbox` viennent de `runtime`, et pointent
+ * tous deux sur la base USERS — c'est là que le mobile lit ses notifications
+ * et que le worker du backend principal draine la file.
  *
- * `runtime.Notification` et `runtime.Outbox` sont branchés sur la connexion
- * TRANSACTIONS — `api_transactions_paynoval`. Or :
- *
- *   - le worker qui livre les notifications vit dans le backend principal et
- *     lit `paynoval.outboxes` ;
- *   - l'application mobile lit `paynoval.notifications`.
- *
- * Écrire dans les collections du tx-core, c'est donc écrire dans un cul-de-sac :
- * l'ordre de livraison n'est jamais drainé, et la notification n'est jamais
- * affichée. `runtime` porte d'ailleurs cet avertissement en toutes lettres sur
- * `getOutboxModel()` — ce fichier l'ignorait.
- *
- * Mesuré avant correctif : `api_transactions_paynoval.notifications` et
- * `.outboxes` contenaient 0 document, quand `paynoval` en comptait 172 et 52.
- * Le seul appelant est `externalSettlementController` ; le piège était armé
- * sans avoir encore tiré.
- *
- * `transactionNotificationService` fait déjà le bon choix — on l'aligne.
+ * Ce fichier prenait auparavant `Outbox` de `runtime`, un nom qui désignait
+ * alors la file du PARRAINAGE, dans la base transactions. Les notifications
+ * des règlements externes y partaient donc sans lecteur : jamais délivrées,
+ * jamais signalées. `runtime.Outbox` lève désormais une erreur explicite pour
+ * que personne n'y retombe.
  */
-const Notification = require("../../../models/Notification")(usersConn);
-const Outbox = require("../../../models/Outbox")(usersConn);
 
 /**
  * Même construction de clé que `transactionNotificationService`, et pour la

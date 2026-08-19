@@ -61,7 +61,8 @@ let _txConn = null;
 let _User = null;
 let _Device = null;
 let _Notification = null;
-let _Outbox = null;
+let _NotificationOutbox = null;
+let _ReferralOutbox = null;
 let _Transaction = null;
 let _UserWalletBalance = null;
 let _SystemBalance = null;
@@ -127,36 +128,85 @@ function getDeviceModel() {
   return _Device;
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * DEUX BASES, DEUX FILES, ET UN NOM QUI NE DISAIT PAS LAQUELLE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `Notification` et `Outbox` existent dans LES DEUX bases — `config/db.js` les
+ * enregistre sur la connexion transactions, et la connexion users les porte
+ * aussi. Le nom seul ne disait donc pas où l'on écrivait, et se tromper ne
+ * produisait aucune erreur : juste une notification que personne ne lira.
+ *
+ * La répartition réelle, mesurée le 2026-08-19 :
+ *
+ *   paynoval.notifications                   172 documents — lue par le MOBILE
+ *   paynoval.outboxes                         52 documents — drainée par le
+ *                                             worker du backend principal
+ *   api_transactions_paynoval.outboxes         0 document  — file des
+ *                                             ÉVÉNEMENTS DE PARRAINAGE,
+ *                                             drainée par referralOutboxWorker
+ *   api_transactions_paynoval.notifications    0 document  — personne
+ *
+ * Les deux Outbox sont donc légitimes, mais pour des usages différents. C'est
+ * l'ambiguïté du nom qui était le défaut, pas la présence de deux files : un
+ * `Outbox` sans qualificatif invite à écrire dans la mauvaise.
+ * `shared/notifications.js` y est effectivement tombé, et rien ne l'a signalé
+ * puisque le seul symptôme est une notification qui n'arrive jamais.
+ *
+ * Trois accesseurs explicites remplacent donc le nom ambigu, et `Outbox` LÈVE
+ * désormais une erreur : mieux vaut un démarrage qui échoue bruyamment qu'un
+ * message perdu en silence.
+ */
+
+/** Notifications lues par le mobile. Toujours la base users. */
 function getNotificationModel() {
   if (_Notification) return _Notification;
 
-  /**
-   * Dans ton db.js, Notification est enregistré sur txConn.
-   * Donc ici on doit aussi le charger depuis txConn.
-   */
-  _Notification = require("../../../models/Notification")(getTxConnectionSafe());
+  _Notification = require("../../../models/Notification")(
+    getUsersConnectionSafe()
+  );
+
   return _Notification;
 }
 
-function getOutboxModel() {
-  if (_Outbox) return _Outbox;
+/** File des notifications, drainée par le worker du backend principal. */
+function getNotificationOutboxModel() {
+  if (_NotificationOutbox) return _NotificationOutbox;
 
-  /**
-   * Outbox est enregistré sur txConn dans `config/db.js`, donc chargé d'ici.
-   *
-   * ⚠️ PIÈGE. Ce modèle pointe vers `api_transactions_paynoval.outboxes`, que
-   * **personne ne draine** : le worker de livraison vit dans le backend
-   * principal et lit `paynoval.outboxes`. Écrire un événement ici, c'est
-   * l'écrire dans une file sans lecteur — la notification ne partira jamais, et
-   * rien ne le signalera.
-   *
-   * Aucun code n'écrit actuellement par ce chemin :
-   * `transactions/transactionNotificationService.js` charge délibérément son
-   * Outbox depuis `getUsersConnectionSafe()`. Ne pas « corriger » cette
-   * asymétrie apparente sans déplacer d'abord le worker.
-   */
-  _Outbox = require("../../../models/Outbox")(getTxConnectionSafe());
-  return _Outbox;
+  _NotificationOutbox = require("../../../models/Outbox")(
+    getUsersConnectionSafe()
+  );
+
+  return _NotificationOutbox;
+}
+
+/**
+ * File des événements de parrainage, drainée par `referralOutboxWorker` — qui
+ * vit dans CE service et lit bien la base transactions.
+ */
+function getReferralOutboxModel() {
+  if (_ReferralOutbox) return _ReferralOutbox;
+
+  _ReferralOutbox = require("../../../models/Outbox")(getTxConnectionSafe());
+  return _ReferralOutbox;
+}
+
+/**
+ * Ancien nom, volontairement inutilisable.
+ *
+ * Il ne désignait rien de précis et pointait vers la file du parrainage, où
+ * les notifications se perdaient sans bruit. Le laisser fonctionner en le
+ * rebranchant serait pire : un appelant qui voulait vraiment la file du
+ * parrainage écrirait alors dans celle des notifications, avec le même silence
+ * dans l'autre sens.
+ */
+function getOutboxModel() {
+  throw new Error(
+    "runtime.Outbox est ambigu : deux Outbox coexistent. " +
+      "Utiliser NotificationOutbox (base users, drainée par le backend) " +
+      "ou ReferralOutbox (base transactions, drainée par referralOutboxWorker)."
+  );
 }
 
 function getTransactionModel() {
@@ -334,7 +384,8 @@ function getRuntime() {
     User: getUserModel(),
     Device: getDeviceModel(),
     Notification: getNotificationModel(),
-    Outbox: getOutboxModel(),
+    NotificationOutbox: getNotificationOutboxModel(),
+    ReferralOutbox: getReferralOutboxModel(),
     Transaction: getTransactionModel(),
     Balance: getBalanceModel(),
     UserWalletBalance: getUserWalletBalanceModel(),
@@ -392,7 +443,8 @@ function getRuntime() {
     getUserModel,
     getDeviceModel,
     getNotificationModel,
-    getOutboxModel,
+    getNotificationOutboxModel,
+    getReferralOutboxModel,
     getTransactionModel,
     getBalanceModel,
     getUserWalletBalanceModel,
@@ -495,8 +547,19 @@ Object.defineProperties(runtime, {
   Notification: {
     get: () => getNotificationModel(),
   },
+  /**
+   * `Outbox` lève : voir l'explication au-dessus de `getOutboxModel`. Le getter
+   * est conservé pour que l'erreur soit explicite plutôt qu'un `undefined` qui
+   * planterait plus loin, sur un appel de méthode, loin de la cause.
+   */
   Outbox: {
     get: () => getOutboxModel(),
+  },
+  NotificationOutbox: {
+    get: () => getNotificationOutboxModel(),
+  },
+  ReferralOutbox: {
+    get: () => getReferralOutboxModel(),
   },
   Transaction: {
     get: () => getTransactionModel(),
@@ -530,8 +593,11 @@ Object.defineProperties(runtime, {
   getNotificationModel: {
     get: () => getNotificationModel,
   },
-  getOutboxModel: {
-    get: () => getOutboxModel,
+  getNotificationOutboxModel: {
+    get: () => getNotificationOutboxModel,
+  },
+  getReferralOutboxModel: {
+    get: () => getReferralOutboxModel,
   },
   getTransactionModel: {
     get: () => getTransactionModel,
