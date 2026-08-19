@@ -14,7 +14,7 @@ const txConn = getTxConn();
 const User = require("../models/User")(usersConn);
 const TxWalletBalance = require("../models/TxWalletBalance")(txConn);
 const Transaction = require("../models/Transaction")(txConn);
-const { commitWithRetry } = require("../utils/commitWithRetry");
+const { runWithTransaction } = require("../utils/transactionRunner");
 
 const sanitize = (text) =>
   String(text || "").replace(/[<>\\/{};]/g, "").trim();
@@ -34,10 +34,22 @@ function sameMongoClient(connA, connB) {
   }
 }
 
-const CAN_USE_SHARED_SESSION = sameMongoClient(usersConn, txConn);
+/**
+ * ⚠️ ÉVALUÉE À CHAQUE APPEL, jamais figée au chargement du fichier.
+ *
+ * Une constante calculée au `require` vaudrait `false` pour toujours si le
+ * module était chargé avant la connexion. Ce serait sans gravité pour la
+ * session — on retomberait en mode dégradé — mais la COMPENSATION MANUELLE du
+ * bloc `catch` s'appuie sur cette valeur : figée à `false` alors que la
+ * transaction est réelle, elle rembourserait un débit que l'annulation a déjà
+ * défait. Soit un crédit en double.
+ */
+function canShareSession() {
+  return sameMongoClient(usersConn, txConn);
+}
 
 async function startTxSession() {
-  if (!CAN_USE_SHARED_SESSION) return null;
+  if (!canShareSession()) return null;
   if (typeof txConn?.startSession === "function") return txConn.startSession();
   return mongoose.startSession();
 }
@@ -237,178 +249,257 @@ exports.createInternalPayment = async (req, res, next) => {
   let debitCurrency = "XOF";
 
   try {
-    if (session) session.startTransaction();
+    /**
+     * UNITÉ DE TRAVAIL REJOUABLE.
+     *
+     * `withTransaction` peut exécuter ce corps plusieurs fois — sur conflit
+     * d'écriture, la transaction précédente est annulée et tout est rejoué. Les
+     * lectures sont donc refaites, et les `$inc` de portefeuille repartent d'un
+     * état propre : rien ne se cumule.
+     *
+     * Les trois sorties RENVOIENT un résultat au lieu de répondre. Écrire la
+     * réponse ici l'enverrait autant de fois qu'il y a de tentatives.
+     */
+    const outcome = await runWithTransaction(session, async () => {
+      const {
+        kind,
+        amount,
+        currencySymbol,
+        currency,
+        fromUserId,
+        toUserId,
+        reason,
+        description,
+        country,
+        context,
+        contextId,
+        orderId,
+        metadata,
+        targetVaultId,
+        targetVaultName,
+      } = req.body;
 
-    const {
-      kind,
-      amount,
-      currencySymbol,
-      currency,
-      fromUserId,
-      toUserId,
-      reason,
-      description,
-      country,
-      context,
-      contextId,
-      orderId,
-      metadata,
-      targetVaultId,
-      targetVaultName,
-    } = req.body;
+      const effectiveCurrency = normalizeCurrency(currency || currencySymbol || "XOF");
+      const idempotencyKey = getIdempotencyKey(req, metadata);
 
-    const effectiveCurrency = normalizeCurrency(currency || currencySymbol || "XOF");
-    const idempotencyKey = getIdempotencyKey(req, metadata);
+      logger.info("[internal-payments] start", {
+        correlationId,
+        kind,
+        amount,
+        currency: effectiveCurrency,
+        fromUserId,
+        toUserId,
+        context,
+        contextId,
+        orderId,
+        idempotencyKey,
+      });
 
-    logger.info("[internal-payments] start", {
-      correlationId,
-      kind,
-      amount,
-      currency: effectiveCurrency,
-      fromUserId,
-      toUserId,
-      context,
-      contextId,
-      orderId,
-      idempotencyKey,
-    });
-
-    const amt = Number(amount);
-    if (!amt || Number.isNaN(amt) || amt <= 0) {
-      throw createError(400, "Montant interne invalide.");
-    }
-    if (amt > 1_000_000_000) {
-      throw createError(400, "Montant interne trop élevé (limite de sécurité).");
-    }
-
-    const { mode } = resolveKind(kind);
-    const isLogOnly = mode === "log-only";
-    const isDebitOnly = mode === "debit_only";
-
-    if (idempotencyKey) {
-      const existing = await Transaction.findOne({
-        "metadata.idempotencyKey": idempotencyKey,
-      })
-        .select("_id reference metadata sender receiver amount status confirmedAt")
-        .lean()
-        .session(session || null);
-
-      if (existing) {
-        if (session) await commitWithRetry(session);
-        if (session) session.endSession();
-
-        logger.warn("[internal-payments] idempotent-hit", {
-          correlationId,
-          idempotencyKey,
-          txId: existing._id,
-        });
-
-        return res.status(200).json({
-          success: true,
-          idempotent: true,
-          transactionId: String(existing._id),
-          reference: existing.reference,
-          kind,
-          mode,
-        });
+      const amt = Number(amount);
+      if (!amt || Number.isNaN(amt) || amt <= 0) {
+        throw createError(400, "Montant interne invalide.");
       }
-    }
+      if (amt > 1_000_000_000) {
+        throw createError(400, "Montant interne trop élevé (limite de sécurité).");
+      }
 
-    if (mode === "transfer") {
-      if (!fromUserId || !toUserId) {
+      const { mode } = resolveKind(kind);
+      const isLogOnly = mode === "log-only";
+      const isDebitOnly = mode === "debit_only";
+
+      if (idempotencyKey) {
+        const existing = await Transaction.findOne({
+          "metadata.idempotencyKey": idempotencyKey,
+        })
+          .select("_id reference metadata sender receiver amount status confirmedAt")
+          .lean()
+          .session(session || null);
+
+        if (existing) {
+          logger.warn("[internal-payments] idempotent-hit", {
+            correlationId,
+            idempotencyKey,
+            txId: existing._id,
+          });
+
+          return { outcome: "idempotent", existing, kind, mode };
+        }
+      }
+
+      if (mode === "transfer") {
+        if (!fromUserId || !toUserId) {
+          throw createError(
+            400,
+            "fromUserId et toUserId sont requis pour un transfert interne."
+          );
+        }
+        if (String(fromUserId) === String(toUserId)) {
+          throw createError(400, "fromUserId et toUserId ne peuvent pas être identiques.");
+        }
+      }
+
+      if (mode === "credit" && !toUserId) {
         throw createError(
           400,
-          "fromUserId et toUserId sont requis pour un transfert interne."
+          "toUserId est requis pour un crédit interne (bonus, cashback)."
         );
       }
-      if (String(fromUserId) === String(toUserId)) {
-        throw createError(400, "fromUserId et toUserId ne peuvent pas être identiques.");
+
+      if ((mode === "debit" || isDebitOnly) && !fromUserId) {
+        throw createError(400, "fromUserId est requis pour un débit interne.");
       }
-    }
 
-    if (mode === "credit" && !toUserId) {
-      throw createError(
-        400,
-        "toUserId est requis pour un crédit interne (bonus, cashback)."
-      );
-    }
+      if (mode === "generic" && !fromUserId && !toUserId) {
+        throw createError(
+          400,
+          "Au moins fromUserId ou toUserId doit être renseigné pour une opération générique."
+        );
+      }
 
-    if ((mode === "debit" || isDebitOnly) && !fromUserId) {
-      throw createError(400, "fromUserId est requis pour un débit interne.");
-    }
+      const vaultIdCandidate = isDebitOnly
+        ? isValidObjectId(targetVaultId)
+          ? String(targetVaultId)
+          : isValidObjectId(contextId)
+          ? String(contextId)
+          : null
+        : null;
 
-    if (mode === "generic" && !fromUserId && !toUserId) {
-      throw createError(
-        400,
-        "Au moins fromUserId ou toUserId doit être renseigné pour une opération générique."
-      );
-    }
+      if (kind === "cagnotte_participation" && !vaultIdCandidate) {
+        throw createError(
+          400,
+          "Participation cagnotte: targetVaultId (ObjectId) requis (ou contextId doit être un ObjectId)."
+        );
+      }
 
-    const vaultIdCandidate = isDebitOnly
-      ? isValidObjectId(targetVaultId)
-        ? String(targetVaultId)
-        : isValidObjectId(contextId)
-        ? String(contextId)
-        : null
-      : null;
+      logger.info("[internal-payments] load-admin", { correlationId });
 
-    if (kind === "cagnotte_participation" && !vaultIdCandidate) {
-      throw createError(
-        400,
-        "Participation cagnotte: targetVaultId (ObjectId) requis (ou contextId doit être un ObjectId)."
-      );
-    }
-
-    logger.info("[internal-payments] load-admin", { correlationId });
-
-    const adminUser = await User.findOne({ email: ADMIN_EMAIL })
-      .select("_id email fullName country")
-      .session(session || null);
-
-    if (!adminUser) {
-      throw createError(500, `Compte administrateur "${ADMIN_EMAIL}" introuvable.`);
-    }
-
-    let fromUser = null;
-    let toUser = null;
-
-    if (fromUserId) {
-      logger.info("[internal-payments] load-fromUser", { correlationId, fromUserId });
-      fromUser = await User.findById(fromUserId)
+      const adminUser = await User.findOne({ email: ADMIN_EMAIL })
         .select("_id email fullName country")
         .session(session || null);
 
-      if (!fromUser) throw createError(404, "Utilisateur fromUserId introuvable.");
-    }
-
-    if (toUserId) {
-      logger.info("[internal-payments] load-toUser", { correlationId, toUserId });
-      toUser = await User.findById(toUserId)
-        .select("_id email fullName country")
-        .session(session || null);
-
-      if (!toUser) throw createError(404, "Utilisateur toUserId introuvable.");
-    }
-
-    if (mode === "credit" && !fromUser) fromUser = adminUser;
-    if (mode === "debit" && !toUser) toUser = adminUser;
-
-    if (isDebitOnly) {
-      if (!fromUser) {
-        throw createError(500, "fromUser introuvable pour une opération debit_only.");
+      if (!adminUser) {
+        throw createError(500, `Compte administrateur "${ADMIN_EMAIL}" introuvable.`);
       }
-      toUser = null;
-    }
 
-    if (isLogOnly) {
-      const sender = fromUser || adminUser;
-      const receiver = adminUser;
+      let fromUser = null;
+      let toUser = null;
+
+      if (fromUserId) {
+        logger.info("[internal-payments] load-fromUser", { correlationId, fromUserId });
+        fromUser = await User.findById(fromUserId)
+          .select("_id email fullName country")
+          .session(session || null);
+
+        if (!fromUser) throw createError(404, "Utilisateur fromUserId introuvable.");
+      }
+
+      if (toUserId) {
+        logger.info("[internal-payments] load-toUser", { correlationId, toUserId });
+        toUser = await User.findById(toUserId)
+          .select("_id email fullName country")
+          .session(session || null);
+
+        if (!toUser) throw createError(404, "Utilisateur toUserId introuvable.");
+      }
+
+      if (mode === "credit" && !fromUser) fromUser = adminUser;
+      if (mode === "debit" && !toUser) toUser = adminUser;
+
+      if (isDebitOnly) {
+        if (!fromUser) {
+          throw createError(500, "fromUser introuvable pour une opération debit_only.");
+        }
+        toUser = null;
+      }
+
+      if (isLogOnly) {
+        const sender = fromUser || adminUser;
+        const receiver = adminUser;
+
+        const tx = await createInternalTransactionDocument({
+          session,
+          kind,
+          senderUser: sender,
+          receiverUser: receiver,
+          amount: amt,
+          currencyCode: effectiveCurrency,
+          country,
+          reason,
+          description,
+          context,
+          contextId,
+          orderId,
+          metadata,
+          receiverOverrideId: null,
+          receiverOverrideName: null,
+          idempotencyKey,
+        });
+
+        return { outcome: "log-only", tx };
+      }
+
+      if (mode === "debit" || mode === "transfer" || isDebitOnly) {
+        const sourceUser = fromUser || adminUser;
+
+        logger.info("[internal-payments] debit(wallet)", {
+          correlationId,
+          userId: String(sourceUser._id),
+          amt,
+          currency: effectiveCurrency,
+        });
+
+        await TxWalletBalance.debit(
+          sourceUser._id,
+          effectiveCurrency,
+          amt,
+          maybeSessionOpts(session)
+        );
+
+        debited = true;
+        debitUserId = String(sourceUser._id);
+        debitAmount = amt;
+        debitCurrency = effectiveCurrency;
+      }
+
+      if (mode === "credit" || mode === "transfer") {
+        const targetUser = toUser || adminUser;
+
+        logger.info("[internal-payments] credit(wallet)", {
+          correlationId,
+          userId: String(targetUser._id),
+          amt,
+          currency: effectiveCurrency,
+        });
+
+        await TxWalletBalance.credit(
+          targetUser._id,
+          effectiveCurrency,
+          amt,
+          maybeSessionOpts(session)
+        );
+      }
+
+      const senderUser = fromUser || adminUser;
+      const receiverUser = toUser || adminUser;
+
+      const receiverOverrideId = isDebitOnly ? vaultIdCandidate : null;
+      const receiverOverrideName = isDebitOnly
+        ? targetVaultName ||
+          (metadata && metadata.vaultName) ||
+          "Coffre Cagnotte"
+        : null;
+
+      logger.info("[internal-payments] create-tx-doc", {
+        correlationId,
+        receiverOverrideId,
+        receiverOverrideName,
+      });
 
       const tx = await createInternalTransactionDocument({
         session,
         kind,
-        senderUser: sender,
-        receiverUser: receiver,
+        senderUser,
+        receiverUser,
         amount: amt,
         currencyCode: effectiveCurrency,
         country,
@@ -418,126 +509,69 @@ exports.createInternalPayment = async (req, res, next) => {
         contextId,
         orderId,
         metadata,
-        receiverOverrideId: null,
-        receiverOverrideName: null,
+        receiverOverrideId,
+        receiverOverrideName,
         idempotencyKey,
       });
 
-      if (session) await commitWithRetry(session);
-      if (session) session.endSession();
+        logger.info("[internal-payments] done", {
+          correlationId,
+          txId: String(tx._id),
+          ref: tx.reference,
+        });
 
+        return { outcome: "done", tx, kind, mode };
+    });
+
+    session?.endSession?.();
+
+    /* RÉPONSE — écrite une seule fois, après la transaction. */
+
+    if (outcome.outcome === "idempotent") {
+      return res.status(200).json({
+        success: true,
+        idempotent: true,
+        transactionId: String(outcome.existing._id),
+        reference: outcome.existing.reference,
+        kind: outcome.kind,
+        mode: outcome.mode,
+      });
+    }
+
+    if (outcome.outcome === "log-only") {
       return res.status(201).json({
         success: true,
         mode: "log-only",
-        transactionId: tx._id.toString(),
-        reference: tx.reference,
+        transactionId: outcome.tx._id.toString(),
+        reference: outcome.tx.reference,
       });
     }
-
-    if (mode === "debit" || mode === "transfer" || isDebitOnly) {
-      const sourceUser = fromUser || adminUser;
-
-      logger.info("[internal-payments] debit(wallet)", {
-        correlationId,
-        userId: String(sourceUser._id),
-        amt,
-        currency: effectiveCurrency,
-      });
-
-      await TxWalletBalance.debit(
-        sourceUser._id,
-        effectiveCurrency,
-        amt,
-        maybeSessionOpts(session)
-      );
-
-      debited = true;
-      debitUserId = String(sourceUser._id);
-      debitAmount = amt;
-      debitCurrency = effectiveCurrency;
-    }
-
-    if (mode === "credit" || mode === "transfer") {
-      const targetUser = toUser || adminUser;
-
-      logger.info("[internal-payments] credit(wallet)", {
-        correlationId,
-        userId: String(targetUser._id),
-        amt,
-        currency: effectiveCurrency,
-      });
-
-      await TxWalletBalance.credit(
-        targetUser._id,
-        effectiveCurrency,
-        amt,
-        maybeSessionOpts(session)
-      );
-    }
-
-    const senderUser = fromUser || adminUser;
-    const receiverUser = toUser || adminUser;
-
-    const receiverOverrideId = isDebitOnly ? vaultIdCandidate : null;
-    const receiverOverrideName = isDebitOnly
-      ? targetVaultName ||
-        (metadata && metadata.vaultName) ||
-        "Coffre Cagnotte"
-      : null;
-
-    logger.info("[internal-payments] create-tx-doc", {
-      correlationId,
-      receiverOverrideId,
-      receiverOverrideName,
-    });
-
-    const tx = await createInternalTransactionDocument({
-      session,
-      kind,
-      senderUser,
-      receiverUser,
-      amount: amt,
-      currencyCode: effectiveCurrency,
-      country,
-      reason,
-      description,
-      context,
-      contextId,
-      orderId,
-      metadata,
-      receiverOverrideId,
-      receiverOverrideName,
-      idempotencyKey,
-    });
-
-    if (session) await commitWithRetry(session);
-    if (session) session.endSession();
-
-    logger.info("[internal-payments] done", {
-      correlationId,
-      txId: String(tx._id),
-      ref: tx.reference,
-    });
 
     return res.status(201).json({
       success: true,
-      transactionId: tx._id.toString(),
-      reference: tx.reference,
-      kind,
-      mode,
+      transactionId: outcome.tx._id.toString(),
+      reference: outcome.tx.reference,
+      kind: outcome.kind,
+      mode: outcome.mode,
     });
   } catch (err) {
+    // `withTransaction` a déjà annulé avant de propager ; garde défensive.
     try {
-      if (session) await session.abortTransaction();
+      if (session?.inTransaction?.()) await session.abortTransaction();
     } catch (e) {
       logger.error("[internal-payments] rollback error", {
         message: e?.message || e,
       });
     } finally {
-      if (session) session.endSession();
+      session?.endSession?.();
     }
 
-    if (!CAN_USE_SHARED_SESSION && debited && debitUserId && debitAmount > 0) {
+    /**
+     * Compensation manuelle du débit — UNIQUEMENT en mode dégradé. Quand la
+     * transaction est réelle, l'annulation a déjà défait le débit : rembourser
+     * ici créditerait une seconde fois.
+     */
+    if (!canShareSession() && debited && debitUserId && debitAmount > 0) {
       try {
         logger.warn("[internal-payments] compensate(refund) after error", {
           debitUserId,

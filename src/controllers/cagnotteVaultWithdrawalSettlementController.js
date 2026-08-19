@@ -343,7 +343,7 @@ const mongoose = require("mongoose");
 const { getTxConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
-const { commitWithRetry } = require("../utils/commitWithRetry");
+const { runWithTransaction } = require("../utils/transactionRunner");
 
 function normalizeCurrencyCode(raw) {
   const s = String(raw || "").trim().toUpperCase();
@@ -510,85 +510,90 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
   }
 
   const session = await txConn.startSession();
-  let committed = false;
 
   try {
-    session.startTransaction();
-
-    const userWallet = await ensureWalletForUser({
-      TxWalletBalance,
-      userId: beneficiaryUserId,
-      currency: creditCurrency,
-      session,
-    });
-
-    const updatedUserWallet = await TxWalletBalance.findOneAndUpdate(
-      { _id: userWallet._id },
-      {
-        $inc: {
-          amount: creditAmount,
-          availableAmount: creditAmount,
-        },
-      },
-      { new: true, session }
-    );
-
-    if (!updatedUserWallet) {
-      await session.abortTransaction();
-      return res.status(409).json({
-        success: false,
-        error: "Impossible de créditer le wallet utilisateur.",
+    /**
+     * Unité de travail rejouable.
+     *
+     * Rejouabilité vérifiée : crédit du portefeuille et création du règlement,
+     * toutes deux sur la base Transactions, aucun appel réseau. Un rejeu repart
+     * d'un état annulé — le `$inc` n'est donc pas cumulé.
+     *
+     * Le refus métier ne répond plus depuis l'intérieur : il LÈVE. La réponse
+     * HTTP s'écrit dehors, une seule fois, quel que soit le nombre de rejeux.
+     */
+    const settlement = await runWithTransaction(session, async () => {
+      const userWallet = await ensureWalletForUser({
+        TxWalletBalance,
+        userId: beneficiaryUserId,
+        currency: creditCurrency,
+        session,
       });
-    }
 
-    const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
-      [
+      const updatedUserWallet = await TxWalletBalance.findOneAndUpdate(
+        { _id: userWallet._id },
         {
-          reference: ref,
-          idempotencyKey: idem,
-          userId: beneficiaryUserId,
-          vaultId: vId,
-          cagnotteId: cId,
-          cagnotteName: String(cagnotteName || "").trim(),
-          mode: m,
-          credit: {
+          $inc: {
             amount: creditAmount,
-            currency: creditCurrency,
+            availableAmount: creditAmount,
           },
-          feeDebit: {
-            amount: 0,
-            currency: undefined,
-            baseAmount: 0,
-            baseCurrencyCode: undefined,
-          },
-          status: "confirmed",
-          userWalletAfter: {
-            walletId: String(updatedUserWallet._id),
-            currency: updatedUserWallet.currency,
-            amount: round2(updatedUserWallet.amount),
-            availableAmount: round2(updatedUserWallet.availableAmount),
-            reservedAmount: round2(updatedUserWallet.reservedAmount || 0),
-          },
-          treasuryWalletAfter: null,
-          meta: {
-            ...(meta || {}),
-            settlementKind: "cagnotte_vault_withdrawal",
-            noFeeApplied: true,
-            walletSeparation: {
-              payerWalletModel: "TxWalletBalance",
-              treasuryWalletModel: null,
+        },
+        { new: true, session }
+      );
+
+      if (!updatedUserWallet) {
+        const refus = new Error("Impossible de créditer le wallet utilisateur.");
+        refus.statusCode = 409;
+        throw refus;
+      }
+
+      const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
+        [
+          {
+            reference: ref,
+            idempotencyKey: idem,
+            userId: beneficiaryUserId,
+            vaultId: vId,
+            cagnotteId: cId,
+            cagnotteName: String(cagnotteName || "").trim(),
+            mode: m,
+            credit: {
+              amount: creditAmount,
+              currency: creditCurrency,
+            },
+            feeDebit: {
+              amount: 0,
+              currency: undefined,
+              baseAmount: 0,
+              baseCurrencyCode: undefined,
+            },
+            status: "confirmed",
+            userWalletAfter: {
+              walletId: String(updatedUserWallet._id),
+              currency: updatedUserWallet.currency,
+              amount: round2(updatedUserWallet.amount),
+              availableAmount: round2(updatedUserWallet.availableAmount),
+              reservedAmount: round2(updatedUserWallet.reservedAmount || 0),
+            },
+            treasuryWalletAfter: null,
+            meta: {
+              ...(meta || {}),
+              settlementKind: "cagnotte_vault_withdrawal",
+              noFeeApplied: true,
+              walletSeparation: {
+                payerWalletModel: "TxWalletBalance",
+                treasuryWalletModel: null,
+              },
             },
           },
-        },
-      ],
-      { session }
-    );
+        ],
+        { session }
+      );
 
-    const settlement = settlementDocs[0];
+      return settlementDocs[0];
+    });
 
-    await commitWithRetry(session);
-    committed = true;
-
+    // Réponse écrite APRÈS la transaction.
     return res.status(201).json({
       success: true,
       transactionId: String(settlement._id),
@@ -601,10 +606,11 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
     });
   } catch (err) {
     try {
-      if (!committed) await session.abortTransaction();
+      if (session.inTransaction?.()) await session.abortTransaction();
     } catch {}
 
-    return res.status(500).json({
+    // Un refus métier levé dans l'unité de travail garde son code.
+    return res.status(err?.statusCode || 500).json({
       success: false,
       error: err?.message || "Erreur interne TX Core.",
     });

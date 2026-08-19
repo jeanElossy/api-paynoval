@@ -29,7 +29,7 @@ const {
   startTxSession,
   maybeSessionOpts,
   canUseSharedSession,
-  safeCommit,
+  runInTransaction,
 } = require("../services/transactions/shared/runtime");
 
 const {
@@ -310,17 +310,16 @@ function resolveTargetAmount(tx) {
   );
 }
 
-async function commitAndEnd(session) {
-  try {
-    if (canUseSharedSession() && session) {
-      await safeCommit(session);
-    }
-  } finally {
-    try {
-      session?.endSession?.();
-    } catch {}
-  }
-}
+/**
+ * `commitAndEnd` vivait ici et validait la transaction depuis SEPT endroits
+ * différents — dont quatre sous-fonctions de règlement. Une transaction validée
+ * au milieu d'un traitement ne peut pas être rejouée : le rejeu repartirait d'un
+ * état déjà figé.
+ *
+ * Retirée le 2026-08-19 : le handler enveloppe désormais tout le traitement dans
+ * une seule unité de travail, `withTransaction` valide une fois, et la session
+ * se ferme dans le `finally` du handler.
+ */
 
 async function abortAndEnd(session) {
   try {
@@ -364,8 +363,6 @@ async function settleProcessingWebhook({
     payload.status || payload.providerStatus || "PROVIDER_PROCESSING";
 
   await tx.save(sessOpts);
-  await commitAndEnd(session);
-
   return {
     statusCode: 202,
     body: {
@@ -445,8 +442,6 @@ async function settleOutboundSuccess({
   // Mise en file AVANT le commit : l'evenement de parrainage est solidaire de
   // la confirmation. Voir referralEventOutbox pour le detail du motif.
   const referralSync = await runReferralSync(tx, sessOpts);
-
-  await commitAndEnd(session);
 
   return {
     statusCode: 200,
@@ -534,8 +529,6 @@ async function settleInboundSuccess({
   // la confirmation. Voir referralEventOutbox pour le detail du motif.
   const referralSync = await runReferralSync(tx, sessOpts);
 
-  await commitAndEnd(session);
-
   return {
     statusCode: 200,
     body: {
@@ -613,8 +606,6 @@ async function settleFailureWebhook({
 
   await tx.save(sessOpts);
   await notifyParties(tx, "failed", session, notifyCurrency);
-  await commitAndEnd(session);
-
   return {
     statusCode: 200,
     body: {
@@ -632,11 +623,25 @@ async function settleExternalTransactionWebhook(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (canUseSharedSession() && session) {
-      session.startTransaction();
-    }
-
-    const sessOpts = maybeSessionOpts(session);
+    /**
+     * UNITÉ DE TRAVAIL UNIQUE.
+     *
+     * Le règlement validait auparavant depuis sept endroits — trois ici, quatre
+     * dans les sous-fonctions. Une transaction validée en cours de route ne peut
+     * pas être rejouée : le rejeu repartirait d'un état déjà figé, et une moitié
+     * de règlement serait acquise sans l'autre.
+     *
+     * Tout le traitement tient désormais dans un seul `withTransaction`. Chaque
+     * chemin RENVOIE `{statusCode, body}` ; la réponse HTTP s'écrit après, une
+     * seule fois.
+     *
+     * Rejouabilité : lectures, écritures sur la transaction, et mise en file de
+     * l'événement de parrainage dans l'Outbox — aucun appel réseau, aucun envoi
+     * direct. Un rejeu refait la file dans une transaction annulée, donc sans
+     * doublon.
+     */
+    const result = await runInTransaction(session, async (activeSession) => {
+    const sessOpts = maybeSessionOpts(activeSession);
     const payload = req.body || {};
     const mapped = mapProviderState(payload);
 
@@ -650,17 +655,18 @@ async function settleExternalTransactionWebhook(req, res, next) {
     }
 
     if (hasWebhookEventBeenSeen(tx, payload)) {
-      await commitAndEnd(session);
-
-      return res.status(200).json({
-        success: true,
-        duplicate: true,
-        ignored: true,
-        transactionId: tx._id.toString(),
-        status: tx.status,
-        providerStatus: tx.providerStatus,
-        eventId: payload.eventId || null,
-      });
+      return {
+        statusCode: 200,
+        body: {
+          success: true,
+          duplicate: true,
+          ignored: true,
+          transactionId: tx._id.toString(),
+          status: tx.status,
+          providerStatus: tx.providerStatus,
+          eventId: payload.eventId || null,
+        },
+      };
     }
 
     appendWebhookHistory(tx, payload);
@@ -673,19 +679,20 @@ async function settleExternalTransactionWebhook(req, res, next) {
 
     if (isFinalOrAutoCancelled(tx)) {
       await tx.save(sessOpts);
-      await commitAndEnd(session);
-
-      return res.status(200).json({
-        success: true,
-        ignored: true,
-        reason: tx.autoCancelledAt
-          ? "TRANSACTION_ALREADY_AUTO_CANCELLED"
-          : "TRANSACTION_ALREADY_FINAL",
-        transactionId: tx._id.toString(),
-        status: tx.status,
-        providerStatus: tx.providerStatus,
-        eventId: payload.eventId || null,
-      });
+      return {
+        statusCode: 200,
+        body: {
+          success: true,
+          ignored: true,
+          reason: tx.autoCancelledAt
+            ? "TRANSACTION_ALREADY_AUTO_CANCELLED"
+            : "TRANSACTION_ALREADY_FINAL",
+          transactionId: tx._id.toString(),
+          status: tx.status,
+          providerStatus: tx.providerStatus,
+          eventId: payload.eventId || null,
+        },
+      };
     }
 
     if (isExpiredBeforeSettlement(tx)) {
@@ -693,18 +700,19 @@ async function settleExternalTransactionWebhook(req, res, next) {
       tx.lastAutoCancelError = "Webhook reçu après expiration autoCancelAt";
 
       await tx.save(sessOpts);
-      await commitAndEnd(session);
-
-      return res.status(200).json({
-        success: true,
-        ignored: true,
-        reason: "TRANSACTION_EXPIRED_PENDING_AUTO_CANCEL",
-        transactionId: tx._id.toString(),
-        status: tx.status,
-        providerStatus: tx.providerStatus,
-        autoCancelAt: tx.autoCancelAt || null,
-        eventId: payload.eventId || null,
-      });
+      return {
+        statusCode: 200,
+        body: {
+          success: true,
+          ignored: true,
+          reason: "TRANSACTION_EXPIRED_PENDING_AUTO_CANCEL",
+          transactionId: tx._id.toString(),
+          status: tx.status,
+          providerStatus: tx.providerStatus,
+          autoCancelAt: tx.autoCancelAt || null,
+          eventId: payload.eventId || null,
+        },
+      };
     }
 
     const sourceCurrency = resolveSourceCurrency(tx);
@@ -723,7 +731,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
         session,
       });
 
-      return res.status(result.statusCode).json(result.body);
+      return result;
     }
 
     if (mapped === "SUCCESS") {
@@ -738,7 +746,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
           notifyCurrency,
         });
 
-        return res.status(result.statusCode).json(result.body);
+        return result;
       }
 
       if (isInboundExternalFlow(tx.flow)) {
@@ -752,7 +760,7 @@ async function settleExternalTransactionWebhook(req, res, next) {
           notifyCurrency,
         });
 
-        return res.status(result.statusCode).json(result.body);
+        return result;
       }
 
       throw createError(400, `Flow externe non supporté en SUCCESS: ${tx.flow}`);
@@ -768,10 +776,18 @@ async function settleExternalTransactionWebhook(req, res, next) {
       notifyCurrency,
     });
 
+      return result;
+    });
+
+    // Réponse écrite APRÈS la transaction, une seule fois.
     return res.status(result.statusCode).json(result.body);
   } catch (err) {
     await abortAndEnd(session);
     return next(err);
+  } finally {
+    try {
+      session?.endSession?.();
+    } catch {}
   }
 }
 

@@ -455,130 +455,141 @@ async function cancelLockedTransaction(lockedTx, workerId) {
     session = await runtime.startTxSession();
     useSession = !!session && runtime.canUseSharedSession();
 
-    if (useSession) {
-      session.startTransaction();
-    }
+    /**
+     * UNITÉ DE TRAVAIL REJOUABLE.
+     *
+     * Le worker peut tourner sur plusieurs instances : un conflit d'écriture sur
+     * la même transaction est donc un cas normal, pas une anomalie. Le pilote
+     * rejoue le corps, qui relit l'état et refait son verdict d'éligibilité —
+     * c'est précisément ce qu'il faut : rejouer un jugement, pas le supposer.
+     *
+     * La sortie « plus éligible » RENVOIE au lieu d'annuler puis de sortir : la
+     * libération du verrou est une écriture HORS transaction, elle doit rester
+     * après.
+     */
+    const result = await runtime.runInTransaction(session, async () => {
+      const tx = await Transaction.findOne({
+        _id: lockedTx._id,
+        autoCancelWorkerId: workerId,
+      }).session(useSession ? session : null);
 
-    const tx = await Transaction.findOne({
-      _id: lockedTx._id,
-      autoCancelWorkerId: workerId,
-    }).session(useSession ? session : null);
-
-    if (!tx || !isTxEligibleForAutoCancel(tx)) {
-      if (useSession) {
-        await session.abortTransaction();
+      if (!tx || !isTxEligibleForAutoCancel(tx)) {
+        return {
+          ok: false,
+          skipped: true,
+          reason: "NOT_ELIGIBLE_ANYMORE",
+        };
       }
 
-      await clearAutoCancelLock(lockedTx, workerId);
+      const releaseResult = await releaseReservedFundsIfNeeded(
+        tx,
+        useSession ? session : null
+      );
+
+      const now = new Date();
+
+      tx.status = "cancelled";
+      tx.providerStatus = "AUTO_CANCELLED_EXPIRED";
+
+      tx.cancelledAt = tx.cancelledAt || now;
+      tx.cancelReason = tx.cancelReason || reason;
+
+      tx.autoCancelledAt = now;
+      tx.autoCancelReason = reason;
+      tx.autoCancelLockAt = null;
+      tx.autoCancelWorkerId = "";
+      tx.lastAutoCancelError = "";
+
+      tx.reserveReleased = tx.reserveReleased || releaseResult.released;
+      tx.reserveReleasedAt =
+        tx.reserveReleasedAt || (releaseResult.released ? now : null);
+
+      tx.reversedAt = tx.reversedAt || now;
+
+      tx.meta = {
+        ...(tx.meta && typeof tx.meta === "object" ? tx.meta : {}),
+        autoCancelled: true,
+        autoCancelReason: reason,
+        autoCancelWorkerId: workerId,
+        autoCancelledAt: now,
+        reserveRelease: releaseResult,
+      };
+
+      tx.metadata = {
+        ...(tx.metadata && typeof tx.metadata === "object" ? tx.metadata : {}),
+        autoCancelled: true,
+        autoCancelReason: reason,
+        autoCancelWorkerId: workerId,
+        autoCancelledAt: now,
+        reserveRelease: releaseResult,
+      };
+
+      await tx.save(getSessionOptions(useSession ? session : null));
+
+      if (typeof runtime.logTransaction === "function") {
+        runtime
+          .logTransaction({
+            userId: String(tx.sender || tx.userId || ""),
+            type: "auto_cancel",
+            provider: tx.provider || tx.destination || "paynoval",
+            amount: resolveReservedAmount(tx),
+            currency: resolveReservedCurrency(tx),
+            toEmail: tx.recipientEmail || tx.receiverEmail || "",
+            details: {
+              transactionId: String(tx._id),
+              reference: tx.reference,
+              reason,
+              autoCancelledAt: now,
+              reserveRelease: releaseResult,
+            },
+            flagged: false,
+            flagReason: "",
+            transactionId: tx._id,
+          })
+          .catch(() => {});
+      }
+
+      try {
+        await notifyTransactionEvent(
+          tx,
+          "cancelled",
+          useSession ? session : null,
+          resolveReservedCurrency(tx)
+        );
+      } catch (notifyErr) {
+        logger.warn?.("[TX AUTO CANCEL] notification auto-cancel ignorée", {
+          transactionId: String(tx._id),
+          err: notifyErr?.message || notifyErr,
+        });
+      }
+
+      logger.info?.("[TX AUTO CANCEL] transaction annulée automatiquement", {
+        transactionId: String(tx._id),
+        reference: tx.reference,
+        workerId,
+        reserveRelease: releaseResult,
+      });
 
       return {
-        ok: false,
-        skipped: true,
-        reason: "NOT_ELIGIBLE_ANYMORE",
-      };
-    }
-
-    const releaseResult = await releaseReservedFundsIfNeeded(
-      tx,
-      useSession ? session : null
-    );
-
-    const now = new Date();
-
-    tx.status = "cancelled";
-    tx.providerStatus = "AUTO_CANCELLED_EXPIRED";
-
-    tx.cancelledAt = tx.cancelledAt || now;
-    tx.cancelReason = tx.cancelReason || reason;
-
-    tx.autoCancelledAt = now;
-    tx.autoCancelReason = reason;
-    tx.autoCancelLockAt = null;
-    tx.autoCancelWorkerId = "";
-    tx.lastAutoCancelError = "";
-
-    tx.reserveReleased = tx.reserveReleased || releaseResult.released;
-    tx.reserveReleasedAt =
-      tx.reserveReleasedAt || (releaseResult.released ? now : null);
-
-    tx.reversedAt = tx.reversedAt || now;
-
-    tx.meta = {
-      ...(tx.meta && typeof tx.meta === "object" ? tx.meta : {}),
-      autoCancelled: true,
-      autoCancelReason: reason,
-      autoCancelWorkerId: workerId,
-      autoCancelledAt: now,
-      reserveRelease: releaseResult,
-    };
-
-    tx.metadata = {
-      ...(tx.metadata && typeof tx.metadata === "object" ? tx.metadata : {}),
-      autoCancelled: true,
-      autoCancelReason: reason,
-      autoCancelWorkerId: workerId,
-      autoCancelledAt: now,
-      reserveRelease: releaseResult,
-    };
-
-    await tx.save(getSessionOptions(useSession ? session : null));
-
-    if (typeof runtime.logTransaction === "function") {
-      runtime
-        .logTransaction({
-          userId: String(tx.sender || tx.userId || ""),
-          type: "auto_cancel",
-          provider: tx.provider || tx.destination || "paynoval",
-          amount: resolveReservedAmount(tx),
-          currency: resolveReservedCurrency(tx),
-          toEmail: tx.recipientEmail || tx.receiverEmail || "",
-          details: {
-            transactionId: String(tx._id),
-            reference: tx.reference,
-            reason,
-            autoCancelledAt: now,
-            reserveRelease: releaseResult,
-          },
-          flagged: false,
-          flagReason: "",
-          transactionId: tx._id,
-        })
-        .catch(() => {});
-    }
-
-    try {
-      await notifyTransactionEvent(
-        tx,
-        "cancelled",
-        useSession ? session : null,
-        resolveReservedCurrency(tx)
-      );
-    } catch (notifyErr) {
-      logger.warn?.("[TX AUTO CANCEL] notification auto-cancel ignorée", {
+        ok: true,
         transactionId: String(tx._id),
-        err: notifyErr?.message || notifyErr,
-      });
-    }
-
-    if (useSession) {
-      await runtime.safeCommit(session);
-    }
-
-    logger.info?.("[TX AUTO CANCEL] transaction annulée automatiquement", {
-      transactionId: String(tx._id),
-      reference: tx.reference,
-      workerId,
-      reserveRelease: releaseResult,
+        reserveRelease: releaseResult,
+      };
     });
 
-    return {
-      ok: true,
-      transactionId: String(tx._id),
-      reserveRelease: releaseResult,
-    };
+    /**
+     * Libération du verrou : écriture HORS transaction, volontairement. Elle ne
+     * doit pas être annulée avec le travail — sinon le verrou resterait posé et
+     * la transaction ne serait plus jamais reprise.
+     */
+    if (result?.skipped) {
+      await clearAutoCancelLock(lockedTx, workerId);
+    }
+
+    return result;
   } catch (err) {
     try {
-      if (useSession && session) {
+      if (session?.inTransaction?.()) {
         await session.abortTransaction();
       }
     } catch {}

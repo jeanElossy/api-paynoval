@@ -6,7 +6,7 @@ const { getTxConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteSettlementModel = require("../models/CagnotteSettlement");
-const { commitWithRetry } = require("../utils/commitWithRetry");
+const { runWithTransaction } = require("../utils/transactionRunner");
 const {
   resolveTreasuryFromSystemType,
   normalizeTreasurySystemType,
@@ -56,44 +56,17 @@ function toUserClauses(userId) {
   return clauses;
 }
 
-function isRetryableMongoTxError(err) {
-  const msg = String(err?.message || "").toLowerCase();
-
-  if (Array.isArray(err?.errorLabels)) {
-    if (err.errorLabels.includes("TransientTransactionError")) return true;
-    if (err.errorLabels.includes("UnknownTransactionCommitResult")) return true;
-  }
-
-  return (
-    msg.includes("please retry the operation") ||
-    msg.includes("please retry your operation") ||
-    msg.includes("multi-document transaction") ||
-    msg.includes("transienttransactionerror") ||
-    msg.includes("unknowntransactioncommitresult") ||
-    msg.includes("unable to write to collection") ||
-    msg.includes("due to catalog changes")
-  );
-}
-
-async function runWithMongoTxRetry(work, { retries = 3, backoffMs = 150 } = {}) {
-  let lastErr = null;
-
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
-    try {
-      return await work(attempt);
-    } catch (err) {
-      lastErr = err;
-
-      if (!isRetryableMongoTxError(err) || attempt >= retries) {
-        throw err;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt));
-    }
-  }
-
-  throw lastErr;
-}
+/**
+ * `isRetryableMongoTxError` et `runWithMongoTxRetry` vivaient ici : une boucle
+ * de rejeu maison (3 tentatives, 150 ms, détection par correspondance de
+ * chaînes dans les messages d'erreur).
+ *
+ * Retirées le 2026-08-19 au profit de `session.withTransaction()`, via
+ * `utils/transactionRunner.js`. Le pilote MongoDB reconnaît les cas rejouables
+ * par ÉTIQUETTE d'erreur — pas par texte, qui change d'une version de serveur à
+ * l'autre — rejoue dans une fenêtre de 120 s, et rejoue aussi le COMMIT sur
+ * `UnknownTransactionCommitResult`, ce que cette boucle ne faisait pas.
+ */
 
 async function findUserWallet({ TxWalletBalance, userId, currency, session }) {
   const cur = normalizeCurrencyCode(currency);
@@ -243,23 +216,28 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await runWithMongoTxRetry(
-    async () => {
-      const session = await txConn.startSession();
-      let committed = false;
+  /**
+   * Ce contrôleur avait DÉJÀ la bonne forme : l'unité de travail renvoie
+   * `{statusCode, body}` et la réponse s'écrit dehors. Il ne lui manquait que le
+   * bon outil de rejeu.
+   *
+   * Il embarquait une boucle maison (`runWithMongoTxRetry` : 3 tentatives,
+   * 150 ms, détection par correspondance de chaînes dans les messages d'erreur).
+   * `session.withTransaction()` fait la même chose en mieux — étiquettes
+   * d'erreur plutôt que texte, fenêtre de 120 s, et rejeu du commit en plus du
+   * rejeu du corps. On prend celle du pilote.
+   */
+  const result = await (async () => {
+    const session = await txConn.startSession();
 
-      try {
-        session.startTransaction();
-
+    try {
+      return await runWithTransaction(session, async () => {
         const existingInTx = await CagnotteSettlement.findOne({
           reference: ref,
         }).session(session);
 
+        // Aucune écriture n'a eu lieu : sortir valide une transaction vide.
         if (existingInTx) {
-          try {
-            await session.abortTransaction();
-          } catch {}
-
           return {
             statusCode: 200,
             body: {
@@ -278,10 +256,6 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
         });
 
         if (!payerWallet) {
-          try {
-            await session.abortTransaction();
-          } catch {}
-
           return {
             statusCode: 404,
             body: {
@@ -406,9 +380,6 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
 
         const settlement = settlementDocs[0];
 
-        await commitWithRetry(session);
-        committed = true;
-
         return {
           statusCode: 201,
           body: {
@@ -416,19 +387,13 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
             data: settlement.toObject ? settlement.toObject() : settlement,
           },
         };
-      } catch (err) {
-        try {
-          if (!committed) await session.abortTransaction();
-        } catch {}
-        throw err;
-      } finally {
-        try {
-          session.endSession();
-        } catch {}
-      }
-    },
-    { retries: 3, backoffMs: 150 }
-  );
+      });
+    } finally {
+      try {
+        session.endSession();
+      } catch {}
+    }
+  })();
 
   return res.status(result.statusCode).json(result.body);
 });

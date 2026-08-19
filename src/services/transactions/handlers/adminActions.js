@@ -10,7 +10,7 @@ const {
   chargeCancellationFee,
   startTxSession,
   maybeSessionOpts,
-  CAN_USE_SHARED_SESSION,
+  runInTransaction,
   assertTransition,
   safeCommit,
 } = require("../shared/runtime");
@@ -96,115 +96,129 @@ async function refundController(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    /**
+     * UNITÉ DE TRAVAIL REJOUABLE.
+     *
+     * ⚠️ Ce fichier DÉSTRUCTURAIT `CAN_USE_SHARED_SESSION` depuis `runtime`.
+     * Or `runtime` l'expose par un accesseur, précisément pour qu'il soit évalué
+     * à chaque lecture — son commentaire dit noir sur blanc « ne pas figer au
+     * chargement du fichier ». Déstructurer appelle l'accesseur UNE fois et fige
+     * le résultat : chargé avant la connexion, ce contrôleur de REMBOURSEMENT
+     * aurait tourné sans transaction pour toujours.
+     *
+     * `runInTransaction` évalue la disponibilité à l'appel, et confie le rejeu
+     * au pilote.
+     */
+    const result = await runInTransaction(session, async (activeSession) => {
+      const { transactionId, reason = "Remboursement demandé" } = req.body;
+      const sessOpts = maybeSessionOpts(activeSession);
 
-    const { transactionId, reason = "Remboursement demandé" } = req.body;
-    const sessOpts = maybeSessionOpts(session);
+      const tx = await Transaction.findById(transactionId)
+        .select([
+          "+reference",
+          "+flow",
+          "+status",
+          "+sender",
+          "+receiver",
+          "+localAmount",
+          "+localCurrencySymbol",
+          "+amount",
+          "+senderCurrencySymbol",
+          "+beneficiaryCredited",
+          "+fundsCaptured",
+          "+pricingSnapshot",
+        ])
+        .session(sessOpts.session || null);
 
-    const tx = await Transaction.findById(transactionId)
-      .select([
-        "+reference",
-        "+flow",
-        "+status",
-        "+sender",
-        "+receiver",
-        "+localAmount",
-        "+localCurrencySymbol",
-        "+amount",
-        "+senderCurrencySymbol",
-        "+beneficiaryCredited",
-        "+fundsCaptured",
-        "+pricingSnapshot",
-      ])
-      .session(sessOpts.session || null);
+      if (!tx) throw createError(404, "Transaction introuvable");
 
-    if (!tx) throw createError(404, "Transaction introuvable");
+      if (!isInternalTransfer(tx)) {
+        throw createError(
+          409,
+          "Le remboursement automatique n’est supporté ici que pour les transactions internes."
+        );
+      }
 
-    if (!isInternalTransfer(tx)) {
-      throw createError(
-        409,
-        "Le remboursement automatique n’est supporté ici que pour les transactions internes."
-      );
-    }
+      assertTransition(tx.status, "refunded");
 
-    assertTransition(tx.status, "refunded");
+      if (!tx.beneficiaryCredited || !tx.fundsCaptured) {
+        throw createError(409, "Transaction non exécutable en remboursement");
+      }
 
-    if (!tx.beneficiaryCredited || !tx.fundsCaptured) {
-      throw createError(409, "Transaction non exécutable en remboursement");
-    }
+      const targetAmount = round2(toFloat(tx.localAmount));
+      const targetCurrency = String(tx.localCurrencySymbol || "").trim().toUpperCase();
+      const senderAmount = round2(toFloat(tx.amount));
+      const senderCurrency = String(tx.senderCurrencySymbol || "").trim().toUpperCase();
 
-    const targetAmount = round2(toFloat(tx.localAmount));
-    const targetCurrency = String(tx.localCurrencySymbol || "").trim().toUpperCase();
-    const senderAmount = round2(toFloat(tx.amount));
-    const senderCurrency = String(tx.senderCurrencySymbol || "").trim().toUpperCase();
-
-    await debitReceiverFunds({
-      transaction: tx,
-      receiverId: tx.receiver,
-      amount: targetAmount,
-      currency: targetCurrency,
-      session,
-    });
-
-    await refundSenderFunds({
-      transaction: tx,
-      senderId: tx.sender,
-      amount: senderAmount,
-      currency: senderCurrency,
-      session,
-    });
-
-    let cancellationFeeResult = null;
-    const feeInput = pickCancellationFeeInput(req.body, tx);
-
-    if (
-      feeInput.feeSourceAmount > 0 ||
-      feeInput.treasuryFeeAmount > 0
-    ) {
-      cancellationFeeResult = await chargeCancellationFee({
+      await debitReceiverFunds({
         transaction: tx,
-        senderId: tx.sender,
-        senderCurrency: feeInput.senderCurrency || senderCurrency,
-        feeSourceAmount: feeInput.feeSourceAmount,
-        treasuryUserId: null,
-        treasurySystemType: "FEES_TREASURY",
-        treasuryLabel: "PayNoval Fees Treasury",
-        treasuryFeeAmount: feeInput.treasuryFeeAmount,
-        treasuryFeeCurrency:
-          feeInput.treasuryFeeCurrency || feeInput.senderCurrency || senderCurrency,
-        conversionRateToTreasury: feeInput.conversionRateToTreasury,
-        feeType: feeInput.feeType,
-        feePercent: feeInput.feePercent,
-        feeId: feeInput.feeId,
+        receiverId: tx.receiver,
+        amount: targetAmount,
+        currency: targetCurrency,
         session,
       });
-    }
 
-    tx.status = "refunded";
-    tx.refundedAt = new Date();
-    tx.refundReason = sanitize(reason);
-    tx.providerStatus = "REFUNDED";
-    tx.reversedAt = new Date();
-    tx.cancellationFeeResult = cancellationFeeResult || null;
-    await tx.save(sessOpts);
+      await refundSenderFunds({
+        transaction: tx,
+        senderId: tx.sender,
+        amount: senderAmount,
+        currency: senderCurrency,
+        session,
+      });
 
-    if (CAN_USE_SHARED_SESSION) await safeCommit(session);
+      let cancellationFeeResult = null;
+      const feeInput = pickCancellationFeeInput(req.body, tx);
+
+      if (
+        feeInput.feeSourceAmount > 0 ||
+        feeInput.treasuryFeeAmount > 0
+      ) {
+        cancellationFeeResult = await chargeCancellationFee({
+          transaction: tx,
+          senderId: tx.sender,
+          senderCurrency: feeInput.senderCurrency || senderCurrency,
+          feeSourceAmount: feeInput.feeSourceAmount,
+          treasuryUserId: null,
+          treasurySystemType: "FEES_TREASURY",
+          treasuryLabel: "PayNoval Fees Treasury",
+          treasuryFeeAmount: feeInput.treasuryFeeAmount,
+          treasuryFeeCurrency:
+            feeInput.treasuryFeeCurrency || feeInput.senderCurrency || senderCurrency,
+          conversionRateToTreasury: feeInput.conversionRateToTreasury,
+          feeType: feeInput.feeType,
+          feePercent: feeInput.feePercent,
+          feeId: feeInput.feeId,
+          session,
+        });
+      }
+
+      tx.status = "refunded";
+      tx.refundedAt = new Date();
+      tx.refundReason = sanitize(reason);
+      tx.providerStatus = "REFUNDED";
+      tx.reversedAt = new Date();
+      tx.cancellationFeeResult = cancellationFeeResult || null;
+      await tx.save(sessOpts);
+
+      return {
+        transactionId: tx._id.toString(),
+        reference: tx.reference,
+        flow: tx.flow,
+        status: tx.status,
+        providerStatus: tx.providerStatus,
+        refunded: targetAmount,
+        currency: targetCurrency,
+        cancellationFeeResult,
+      };
+    });
+
     session.endSession();
 
-    return res.json({
-      success: true,
-      transactionId: tx._id.toString(),
-      reference: tx.reference,
-      flow: tx.flow,
-      status: tx.status,
-      providerStatus: tx.providerStatus,
-      refunded: targetAmount,
-      currency: targetCurrency,
-      cancellationFeeResult,
-    });
+    // Réponse écrite APRÈS la transaction, une seule fois.
+    return res.json({ success: true, ...result });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (session.inTransaction?.()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);
@@ -289,58 +303,59 @@ async function reassignController(req, res, next) {
   const session = await startTxSession();
 
   try {
-    if (CAN_USE_SHARED_SESSION) session.startTransaction();
+    // Même unité de travail rejouable que ci-dessus.
+    const result = await runInTransaction(session, async (activeSession) => {
+      const { transactionId, newReceiverEmail } = req.body;
+      const sessOpts = maybeSessionOpts(activeSession);
 
-    const { transactionId, newReceiverEmail } = req.body;
-    const sessOpts = maybeSessionOpts(session);
+      const tx = await Transaction.findById(transactionId).session(sessOpts.session || null);
 
-    const tx = await Transaction.findById(transactionId).session(sessOpts.session || null);
+      if (!tx) throw createError(404, "Transaction introuvable");
 
-    if (!tx) throw createError(404, "Transaction introuvable");
+      if (!isInternalTransfer(tx)) {
+        throw createError(409, "La réassignation n’est supportée que pour le flow interne.");
+      }
 
-    if (!isInternalTransfer(tx)) {
-      throw createError(409, "La réassignation n’est supportée que pour le flow interne.");
-    }
+      if (!["pending", "confirmed"].includes(tx.status)) {
+        throw createError(400, "Transaction non réassignable");
+      }
 
-    if (!["pending", "confirmed"].includes(tx.status)) {
-      throw createError(400, "Transaction non réassignable");
-    }
+      const cleanNewEmail = String(newReceiverEmail || "").trim().toLowerCase();
+      if (!isEmailLike(cleanNewEmail)) {
+        throw createError(400, "Email destinataire invalide");
+      }
 
-    const cleanNewEmail = String(newReceiverEmail || "").trim().toLowerCase();
-    if (!isEmailLike(cleanNewEmail)) {
-      throw createError(400, "Email destinataire invalide");
-    }
+      const newReceiver = await User.findOne({ email: cleanNewEmail })
+        .select("_id fullName email")
+        .session(sessOpts.session || null);
 
-    const newReceiver = await User.findOne({ email: cleanNewEmail })
-      .select("_id fullName email")
-      .session(sessOpts.session || null);
+      if (!newReceiver) throw createError(404, "Nouveau destinataire introuvable");
+      if (String(newReceiver._id) === String(tx.receiver)) {
+        throw createError(400, "Déjà affectée à ce destinataire");
+      }
 
-    if (!newReceiver) throw createError(404, "Nouveau destinataire introuvable");
-    if (String(newReceiver._id) === String(tx.receiver)) {
-      throw createError(400, "Déjà affectée à ce destinataire");
-    }
+      tx.receiver = newReceiver._id;
+      tx.nameDestinataire = newReceiver.fullName;
+      tx.recipientEmail = newReceiver.email;
+      tx.reassignedAt = new Date();
+      tx.providerStatus = "REASSIGNED";
+      await tx.save(sessOpts);
 
-    tx.receiver = newReceiver._id;
-    tx.nameDestinataire = newReceiver.fullName;
-    tx.recipientEmail = newReceiver.email;
-    tx.reassignedAt = new Date();
-    tx.providerStatus = "REASSIGNED";
-    await tx.save(sessOpts);
+      return {
+        transactionId: tx._id.toString(),
+        newReceiver: {
+          id: newReceiver._id,
+          email: newReceiver.email,
+        },
+      };
+    });
 
-    if (CAN_USE_SHARED_SESSION) await safeCommit(session);
     session.endSession();
 
-    return res.json({
-      success: true,
-      transactionId: tx._id.toString(),
-      newReceiver: {
-        id: newReceiver._id,
-        email: newReceiver.email,
-      },
-    });
+    return res.json({ success: true, ...result });
   } catch (err) {
     try {
-      if (CAN_USE_SHARED_SESSION) await session.abortTransaction();
+      if (session.inTransaction?.()) await session.abortTransaction();
     } catch {}
     session.endSession();
     next(err);

@@ -281,7 +281,7 @@ const asyncHandler = require("express-async-handler");
 const { getTxConn } = require("../config/db");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
-const { commitWithRetry } = require("../utils/commitWithRetry");
+const { runWithTransaction } = require("../utils/transactionRunner");
 const {
   resolveTreasuryFromSystemType,
   normalizeTreasurySystemType,
@@ -470,66 +470,76 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
   }
 
   const session = await txConn.startSession();
-  let committed = false;
 
   try {
-    session.startTransaction();
+    /**
+     * Unité de travail rejouable.
+     *
+     * `runWithTransaction` s'appuie sur `session.withTransaction()`, qui rejoue
+     * le corps sur conflit d'écriture et le commit sur réponse perdue.
+     *
+     * Rejouabilité vérifiée : les deux écritures portent sur la base
+     * Transactions et rien d'autre, aucun appel réseau, aucune réponse HTTP à
+     * l'intérieur. Un rejeu repart d'un état annulé — le crédit de trésorerie
+     * n'est donc pas cumulé, et la clé d'idempotence du règlement ne collisionne
+     * pas avec sa propre tentative précédente.
+     */
+    const settlement = await runWithTransaction(session, async () => {
+      const updatedTreasuryWallet = await creditTreasurySystemWallet({
+        TxSystemBalance,
+        treasuryUserId: treasuryMeta.treasuryUserId,
+        treasurySystemType: treasuryMeta.treasurySystemType,
+        treasuryLabel: treasuryMeta.treasuryLabel,
+        currency: feeCurrency,
+        amount: feeAmount,
+        session,
+      });
 
-    const updatedTreasuryWallet = await creditTreasurySystemWallet({
-      TxSystemBalance,
-      treasuryUserId: treasuryMeta.treasuryUserId,
-      treasurySystemType: treasuryMeta.treasurySystemType,
-      treasuryLabel: treasuryMeta.treasuryLabel,
-      currency: feeCurrency,
-      amount: feeAmount,
-      session,
-    });
-
-    const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
-      [
-        {
-          reference: ref,
-          idempotencyKey: idem,
-          userId: initiatorId,
-          treasuryUserId: treasuryMeta.treasuryUserId,
-          treasurySystemType: treasuryMeta.treasurySystemType,
-          treasuryLabel: treasuryMeta.treasuryLabel,
-          vaultId: vId,
-          cagnotteId: cId,
-          cagnotteName: String(meta?.cagnotteName || "").trim(),
-          mode: "partial",
-          credit: {
-            amount: 0,
-            currency: feeCurrency,
-          },
-          feeDebit: {
-            amount: feeAmount,
-            currency: feeCurrency,
-            baseAmount: feeBaseAmount,
-            baseCurrencyCode: feeBaseCurrencyCode,
-          },
-          status: "confirmed",
-          userWalletAfter: null,
-          treasuryWalletAfter: updatedTreasuryWallet,
-          meta: {
-            ...(meta || {}),
-            settlementKind: "cagnotte_closure_fee_credit",
-            initiatedByUserId: initiatorId,
-            walletSeparation: {
-              payerWalletModel: null,
-              treasuryWalletModel: "TxSystemBalance",
+      const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
+        [
+          {
+            reference: ref,
+            idempotencyKey: idem,
+            userId: initiatorId,
+            treasuryUserId: treasuryMeta.treasuryUserId,
+            treasurySystemType: treasuryMeta.treasurySystemType,
+            treasuryLabel: treasuryMeta.treasuryLabel,
+            vaultId: vId,
+            cagnotteId: cId,
+            cagnotteName: String(meta?.cagnotteName || "").trim(),
+            mode: "partial",
+            credit: {
+              amount: 0,
+              currency: feeCurrency,
+            },
+            feeDebit: {
+              amount: feeAmount,
+              currency: feeCurrency,
+              baseAmount: feeBaseAmount,
+              baseCurrencyCode: feeBaseCurrencyCode,
+            },
+            status: "confirmed",
+            userWalletAfter: null,
+            treasuryWalletAfter: updatedTreasuryWallet,
+            meta: {
+              ...(meta || {}),
+              settlementKind: "cagnotte_closure_fee_credit",
+              initiatedByUserId: initiatorId,
+              walletSeparation: {
+                payerWalletModel: null,
+                treasuryWalletModel: "TxSystemBalance",
+              },
             },
           },
-        },
-      ],
-      { session }
-    );
+        ],
+        { session }
+      );
 
-    const settlement = settlementDocs[0];
+      return settlementDocs[0];
+    });
 
-    await commitWithRetry(session);
-    committed = true;
-
+    // Réponse écrite APRÈS la transaction : un rejeu ne doit jamais renvoyer
+    // deux fois.
     return res.status(201).json({
       success: true,
       transactionId: String(settlement._id),
@@ -541,8 +551,10 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
       data: settlement.toObject ? settlement.toObject() : settlement,
     });
   } catch (err) {
+    // `withTransaction` a déjà annulé avant de propager ; cette garde ne couvre
+    // que le cas d'une transaction restée ouverte.
     try {
-      if (!committed) await session.abortTransaction();
+      if (session.inTransaction?.()) await session.abortTransaction();
     } catch {}
 
     return res.status(500).json({
