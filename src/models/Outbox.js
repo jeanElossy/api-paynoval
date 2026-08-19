@@ -91,7 +91,19 @@ const outboxSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "",
-      index: true,
+      /**
+       * PAS de `index: true` ici.
+       *
+       * Il créait un SECOND index, `idempotencyKey_1`, simple et NON UNIQUE, à
+       * côté de l'index unique partiel déclaré plus bas. Deux index sur la même
+       * clé : l'un porte la garantie, l'autre ne porte rien — et c'est le
+       * second qui existe en base aujourd'hui, le premier n'ayant jamais été
+       * créé (`autoIndex` est désactivé en production).
+       *
+       * Le code, lui, s'appuie sur l'unicité : `referralEventOutbox` compte sur
+       * un E11000 pour reconnaître un événement déjà en file. Sans l'index
+       * unique, ce E11000 ne se produit jamais et le dédoublonnage est muet.
+       */
     },
   },
   {

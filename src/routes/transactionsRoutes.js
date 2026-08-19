@@ -770,9 +770,31 @@ const { isValidInternalToken } = require("../middleware/internalAuth");
  * d'attente réseau, reprise de la passerelle — rend la réponse d'origine au
  * lieu de produire un second mouvement.
  *
- * La clé est EXIGÉE par défaut. `IDEMPOTENCY_REQUIRED=false` assouplit sans
- * redéploiement, le temps que le parc mobile installé passe à une version qui
- * l'envoie — le mobile la produit depuis le 2026-08-19.
+ * L'EXIGENCE EST DÉCLARÉE PAR ROUTE, pas globalement — et cette distinction
+ * n'est pas cosmétique : c'est elle qui rend le futur basculement sûr.
+ *
+ * Modèle de Wise, le plus proche de notre cas : la clé est exigée sur la seule
+ * CRÉATION de virement, jamais sur les transitions d'état qui suivent.
+ *
+ *   `/initiate`  crée un document et réserve des fonds. Rien d'autre ne
+ *                dédoublonne un double appui : c'est la seule route qui a
+ *                réellement besoin de la clé. Elle suit `IDEMPOTENCY_REQUIRED`,
+ *                aujourd'hui souple, à basculer quand le parc mobile l'envoie.
+ *
+ *   `/confirm`   `/cancel`  `/refund` — transitions d'état, déjà protégées par
+ *                la machine à états (`assertTransition`) et ses drapeaux
+ *                (`fundsCaptured`, `beneficiaryCredited`, `reserveReleased`),
+ *                le tout sous transaction Mongo. Elles sont donc marquées
+ *                `required: false` EN DUR.
+ *
+ * Pourquoi en dur : le mobile n'envoie de clé que sur `/initiate`. Un
+ * `IDEMPOTENCY_REQUIRED=true` posé un jour sur l'environnement couperait ces
+ * trois routes pour tout le monde — y compris la version la plus récente. C'est
+ * exactement ce qui se produisait, la variable n'étant déclarée nulle part et
+ * le défaut du code valant alors « exigée ». Marquer l'exigence à l'endroit où
+ * l'on sait ce que le client envoie supprime le piège au lieu de le documenter.
+ *
+ * La clé reste HONORÉE sur ces trois routes si le client en envoie une.
  */
 const idempotency = require("../middleware/idempotency");
 
@@ -1285,7 +1307,7 @@ router.post(
 router.post(
   "/confirm",
   protect,
-  idempotency(),
+  idempotency({ required: false }),
   normalizeProviderRails,
   normalizeConfirmBody,
   [
@@ -1332,7 +1354,7 @@ router.post(
 router.post(
   "/cancel",
   protect,
-  idempotency(),
+  idempotency({ required: false }),
   [
     txIdValidator,
     body("reason")
@@ -1353,7 +1375,7 @@ router.post(
 router.post(
   "/refund",
   protect,
-  idempotency(),
+  idempotency({ required: false }),
   requireRole(["admin", "superadmin"]),
   [txIdValidator, body("reason").optional().trim().escape()],
   requestValidator,

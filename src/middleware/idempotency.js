@@ -61,17 +61,41 @@ function resolveUserId(req) {
 /**
  * Une clé est-elle exigée ?
  *
- * L'exigence est le DÉFAUT — cohérent avec la règle « refus par défaut » du
- * projet : une création d'argent sans clé d'idempotence est une création qu'on
- * ne saura pas dédoublonner si le réseau la rejoue.
+ * NON PAR DÉFAUT — et ce défaut est un correctif, pas un relâchement.
  *
- * `IDEMPOTENCY_REQUIRED=false` l'assouplit **sans redéploiement**, le temps que
- * le parc mobile installé passe à une version qui envoie la clé. C'est
- * l'échappatoire de déploiement, pas le régime normal : on la retire dès que le
- * parc a basculé.
+ * La première version de ce fichier exigeait la clé par défaut, au nom du
+ * « refus par défaut ». C'était une erreur de raisonnement. Le refus par défaut
+ * protège une FRONTIÈRE DE SÉCURITÉ — authentification, autorisation,
+ * signature — là où l'incertitude doit coûter à l'appelant. Ici il ne s'agit
+ * pas d'une frontière de sécurité mais d'une NÉGOCIATION DE COMPATIBILITÉ avec
+ * un parc installé qu'on ne met pas à jour d'un claquement de doigts. Un défaut
+ * strict n'y protège personne : il coupe.
+ *
+ * Ce qu'il a effectivement coupé : la variable n'étant déclarée dans aucun
+ * `.env`, le mode strict était ACTIF, et `/confirm`, `/cancel` et `/refund`
+ * répondaient 400 à toute application mobile — y compris la plus récente, qui
+ * n'envoie la clé que sur `/initiate`.
+ *
+ * Le régime des grandes plateformes est précisément l'inverse :
+ *   - Stripe : `Idempotency-Key` FACULTATIF sur tous les POST, honoré quand il
+ *     est présent — jamais de 400 pour son absence.
+ *   - PayPal : `PayPal-Request-Id` facultatif, même posture.
+ *   - Wise   : `X-idempotence-uuid` EXIGÉ, mais sur la seule CRÉATION de
+ *     virement — pas sur les transitions d'état qui suivent.
+ *
+ * D'où la règle retenue ici : la clé est honorée partout où elle est envoyée,
+ * et l'exigence s'active par `IDEMPOTENCY_REQUIRED=true` — sans redéploiement —
+ * le jour où le parc mobile l'envoie. Les transitions d'état (`confirm`,
+ * `cancel`, `refund`) restent de toute façon protégées par la machine à états
+ * et ses drapeaux (`fundsCaptured`, `beneficiaryCredited`, `reserveReleased`) ;
+ * c'est `initiate`, qui CRÉE un document et réserve des fonds, qui a réellement
+ * besoin de la clé.
+ *
+ * Chaque route peut forcer sa propre exigence via `idempotency({ required })`,
+ * indépendamment de la variable d'environnement — voir `transactionsRoutes`.
  */
 function idempotencyIsRequired() {
-  return String(process.env.IDEMPOTENCY_REQUIRED || "true").toLowerCase() !== "false";
+  return String(process.env.IDEMPOTENCY_REQUIRED || "false").toLowerCase() === "true";
 }
 
 /**
@@ -86,7 +110,23 @@ function idempotency({ required } = {}) {
     if (!rawKey) {
       const mustHaveKey = required === undefined ? idempotencyIsRequired() : required;
 
-      if (!mustHaveKey) return next();
+      if (!mustHaveKey) {
+        /**
+         * On ne devine pas l'adoption du parc : on la MESURE. Cette trace est
+         * la seule façon de savoir quand `IDEMPOTENCY_REQUIRED=true` devient
+         * sûr — on bascule quand elle ne sort plus depuis plusieurs jours, pas
+         * quand on pense que le parc a suivi.
+         */
+        logger.info?.("[IDEMPOTENCY] requete sans cle (mode souple)", {
+          method: req.method,
+          path: req.baseUrl ? `${req.baseUrl}${req.path}` : req.path,
+          userId: resolveUserId(req),
+          appVersion: String(req.headers["x-app-version"] || "inconnue"),
+          platform: String(req.headers["x-app-platform"] || "inconnue"),
+        });
+
+        return next();
+      }
 
       return res.status(400).json({
         success: false,
