@@ -1,6 +1,10 @@
 "use strict";
 
 const express = require("express");
+const {
+  extractInternalToken,
+  matchesAnyToken,
+} = require("../utils/internalTokens");
 const { body, validationResult } = require("express-validator");
 const {
   settleCagnotteParticipation,
@@ -16,7 +20,15 @@ function verifyInternalToken(req, res, next) {
       ""
   ).trim();
 
-  const got = String(req.headers["x-internal-token"] || "").trim();
+  /**
+   * ⚠️ La comparaison était un `!==` simple : le temps de réponse variait avec
+   * la longueur du préfixe commun, ce qui rend le jeton devinable caractère par
+   * caractère par une mesure statistique. `matchesAnyToken` (utils/internalTokens)
+   * compare en temps constant, et c'est la MÊME implémentation que le reste du
+   * service — le dépôt comptait quatre façons différentes de répondre à « ce
+   * jeton est-il valide ? », ce qui garantissait qu'elles divergeraient.
+   */
+  const got = extractInternalToken(req);
 
   if (!expected) {
     return res.status(500).json({
@@ -25,7 +37,7 @@ function verifyInternalToken(req, res, next) {
     });
   }
 
-  if (!got || got !== expected) {
+  if (!matchesAnyToken(got, [expected])) {
     return res.status(401).json({
       success: false,
       error: "Non autorisé.",

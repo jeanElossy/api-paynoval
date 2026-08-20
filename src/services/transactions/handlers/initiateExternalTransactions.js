@@ -30,6 +30,7 @@ const {
   round2,
   dec2,
   sha256Hex,
+  hashSecurityAnswer,
   MAX_DESC_LENGTH,
 } = require("../shared/helpers");
 
@@ -721,7 +722,7 @@ async function initiateOutboundExternal(req, res, next) {
     });
 
     const reference = sanitize(body.reference) || (await generateTransactionRef());
-    const securityAnswerHash = sha256Hex(aRaw);
+    const securityAnswerHash = hashSecurityAnswer(aRaw);
     const amlSnapshot = req.aml || null;
     const treasurySeed = resolveFeesTreasurySeed();
     const autoCancelFields = buildAutoCancelFields("pending");

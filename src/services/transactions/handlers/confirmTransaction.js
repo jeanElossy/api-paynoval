@@ -829,9 +829,7 @@ const {
   sanitize,
   toFloat,
   round2,
-  sha256Hex,
-  looksLikeSha256Hex,
-  safeEqualHex,
+  verifySecurityAnswerHash,
   MAX_CONFIRM_ATTEMPTS,
   LOCK_MINUTES,
 } = require("../shared/helpers");
@@ -1471,7 +1469,15 @@ function assertConfirmable({ req, tx, now }) {
   }
 }
 
-/** Comparaison à temps constant de la réponse de sécurité. Aucune écriture. */
+/**
+ * Comparaison à temps constant de la réponse de sécurité. Aucune écriture.
+ *
+ * La logique de comparaison vit désormais dans `verifySecurityAnswerHash`
+ * (shared/helpers.js), qui accepte à la fois le HMAC poivré des nouvelles
+ * transactions et le sha256 nu des transactions déjà en attente. Un seul
+ * endroit décide si une réponse est correcte — même principe que
+ * `isValidInternalToken` pour les tokens internes.
+ */
 function securityAnswerMatches(tx, provided) {
   const storedHash =
     String(tx.securityAnswerHash || "") || String(tx.securityCode || "");
@@ -1480,11 +1486,7 @@ function securityAnswerMatches(tx, provided) {
     throw createError(500, "securityAnswerHash manquant sur la transaction");
   }
 
-  const inputHash = sha256Hex(provided);
-
-  return looksLikeSha256Hex(storedHash)
-    ? safeEqualHex(inputHash, storedHash)
-    : safeEqualHex(inputHash, sha256Hex(String(storedHash)));
+  return verifySecurityAnswerHash(provided, storedHash);
 }
 
 /**
@@ -1686,6 +1688,30 @@ async function confirmController(req, res, next) {
 
       if (!tx.fundsReserved) {
         throw createError(409, "Fonds non réservés sur cette transaction");
+      }
+
+      /**
+       * ⚠️ CORRECTIF. `fundsReserved` dit qu'une réserve a été posée un jour, pas
+       * qu'elle est encore là. L'annulation pose `reserveReleased = true` sans
+       * jamais remettre `fundsReserved` à `false` — les deux drapeaux coexistent
+       * donc sur une transaction annulée.
+       *
+       * Or `relaunch` est un statut explicitement confirmable pour un payout
+       * sortant (voir `assertConfirmable`). Une transaction annulée puis relancée
+       * franchissait la garde ci-dessus et appelait `captureSenderReserve`.
+       * `TxWalletBalance.captureReserve` ne vérifie que `reservedAmount >= n` sur
+       * le portefeuille — pas l'origine de cette réserve : la capture consommait
+       * donc la réserve D'UNE AUTRE transaction en attente du même expéditeur,
+       * dès lors qu'elle était suffisante. Le second virement se retrouvait sans
+       * provision, et l'échec ne se manifestait qu'à sa propre confirmation.
+       *
+       * Une réserve libérée doit être reposée, pas re-capturée.
+       */
+      if (tx.reserveReleased) {
+        throw createError(
+          409,
+          "La réserve de cette transaction a déjà été libérée. Elle doit être réinitiée, pas confirmée."
+        );
       }
 
       if (!tx.fundsCaptured) {

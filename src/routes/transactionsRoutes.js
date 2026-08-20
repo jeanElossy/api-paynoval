@@ -738,6 +738,8 @@
  */
 
 const express = require("express");
+const createError = require("http-errors");
+const nodeCrypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const { body, param, query } = require("express-validator");
 const asyncHandler = require("express-async-handler");
@@ -764,6 +766,15 @@ const requestValidator = require("../middleware/requestValidator");
 
 // Même source de vérité que l'authentification interne : voir `sensitiveLimiter`.
 const { isValidInternalToken } = require("../middleware/internalAuth");
+
+/** Garde du chemin webhook hérité — voir le module pour le détail du correctif. */
+const requireInternalWebhookCaller = require("../middleware/requireInternalWebhookCaller");
+
+/**
+ * Politique des rails — version serveur de règles qui n'existaient que dans le
+ * mobile. Report-only tant que `RAIL_POLICY_STRICT` n'est pas activée.
+ */
+const requireAllowedRail = require("../middleware/requireAllowedRail");
 
 /**
  * Idempotence de l'API (motif Stripe) : un rejeu — double appui, délai
@@ -891,7 +902,64 @@ const sensitiveLimiter = rateLimit({
   skip: (req) => isValidInternalToken(req),
 });
 
-router.use(["/initiate", "/confirm", "/cancel"], sensitiveLimiter);
+/**
+ * ⚠️ SECONDE LIMITE, PAR SESSION — §14 : « le rate limiting ne doit pas être
+ * uniquement basé sur l'IP ».
+ *
+ * `sensitiveLimiter` ci-dessus est keyé par IP, ce qui laisse deux angles morts
+ * symétriques : derrière un NAT d'opérateur — la norme en Afrique de l'Ouest,
+ * premier marché de PayNoval — des milliers d'utilisateurs légitimes partagent
+ * une adresse et se coupent mutuellement ; à l'inverse, un attaquant disposant
+ * de plusieurs sorties dilue sa charge.
+ *
+ * On AJOUTE donc une limite keyée par session, sans remplacer la première : les
+ * deux s'appliquent, la plus stricte tranche. Remplacer l'une par l'autre
+ * aurait affaibli la protection au lieu de la compléter.
+ *
+ * La clé est l'empreinte du jeton porteur, pas `req.user` : ce middleware
+ * s'exécute AVANT `protect` (`router.use` passe avant les handlers de route),
+ * `req.user` n'existe donc pas encore. On ne valide pas le jeton — son
+ * empreinte suffit à distinguer deux sessions, et une valeur non vérifiée est
+ * sans danger comme clé de compartiment.
+ *
+ * Le jeton n'est jamais journalisé : seul son SHA-256 tronqué sert de clé.
+ */
+function sessionRateKey(req) {
+  const auth = String(req.headers?.authorization || "");
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (!token) {
+    // Sans jeton, on retombe sur l'IP : la requête sera rejetée par `protect`,
+    // mais elle ne doit pas échapper au comptage pour autant.
+    return `ip:${req.ip || "unknown"}`;
+  }
+
+  return `sess:${nodeCrypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+const sessionSensitiveLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: sessionRateKey,
+  message: {
+    success: false,
+    status: 429,
+    message: "Trop de requêtes, veuillez réessayer plus tard.",
+  },
+  skip: (req) => isValidInternalToken(req),
+});
+
+router.use(
+  ["/initiate", "/confirm", "/cancel"],
+  sensitiveLimiter,
+  sessionSensitiveLimiter
+);
 
 /* -------------------------------------------------------------------------- */
 /* Middlewares de normalisation                                               */
@@ -1274,6 +1342,7 @@ router.post(
   ],
   requestValidator,
   requireTransactionEligibility,
+  requireAllowedRail,
   amlMiddleware,
   asyncHandler(initiateByFlow)
 );
@@ -1283,12 +1352,38 @@ router.post(
 /* -------------------------------------------------------------------------- */
 
 /**
- * Route webhook provider.
- * Ne pas ajouter requireTransactionEligibility ici.
- * La sécurité webhook doit être faite via signature/provider/internal middleware.
+ * Route webhook provider — CHEMIN HÉRITÉ.
+ *
+ * ⚠️ CORRECTIF DE SÉCURITÉ (audit transactionnel).
+ *
+ * Le commentaire qui tenait lieu de garde ici disait que « la sécurité webhook
+ * doit être faite via signature/provider/internal middleware ». Aucun de ces
+ * middlewares n'était monté. La route était donc ouverte, et `/api/v1/transactions`
+ * est monté sans `protect` dans `server.js` : n'importe qui sur Internet
+ * atteignait `externalSettlementController`, c'est-à-dire le moteur de règlement
+ * complet.
+ *
+ * Le seul contrôle du contrôleur est `verified: payload.verified !== false` —
+ * autrement dit la charge utile de l'appelant se déclare elle-même vérifiée. Un
+ * `{ transactionId, status: "success" }` suffisait à faire créditer un
+ * bénéficiaire ou à marquer un payout SUCCESS alors qu'aucun prestataire n'avait
+ * payé.
+ *
+ * La route de production des prestataires est `/webhooks/providers/:rail/:provider`
+ * (voir `routes/providerWebhookRoutes.js`), qui vérifie le HMAC sur `rawBody`,
+ * refuse en l'absence de secret et applique un rate limit dédié. Rien dans le
+ * dépôt n'appelle le chemin ci-dessous — vérifié par recherche sur les cinq
+ * applications.
+ *
+ * On ne le supprime pas (règle : corriger, pas retirer une fonctionnalité), mais
+ * il échoue désormais en FERMETURE : seul un appelant interne porteur d'un token
+ * valide — comparé en timing-safe par la même implémentation que le reste du
+ * service — peut l'emprunter. Un prestataire externe doit passer par la route
+ * signée.
  */
 router.post(
   "/webhooks/:provider",
+  requireInternalWebhookCaller,
   asyncHandler(settleExternalTransactionWebhook)
 );
 
@@ -1313,6 +1408,26 @@ router.post(
   [
     txIdValidator,
 
+    /**
+     * ⚠️ CORRECTIF. Ce validateur portait `.escape()`, et `/initiate` ne
+     * l'applique pas. L'empreinte était donc calculée sur deux chaînes
+     * différentes selon le bout de la chaîne où l'on se trouvait :
+     *
+     *   initiate : sha256(sanitize("l'ecole"))       = sha256("l'ecole")
+     *   confirm  : sha256(sanitize(escape("l'ecole"))) = sha256("l&#x27ecole")
+     *
+     * Toute réponse contenant ' & " < > était donc DÉFINITIVEMENT
+     * inconfirmable : chaque essai consommait une tentative, la transaction se
+     * verrouillait au seuil, puis partait en auto-cancel. En français
+     * l'apostrophe est partout.
+     *
+     * La réponse n'est jamais rendue dans une page — elle est hachée puis
+     * comparée. L'échappement HTML n'y avait aucun rôle défensif, et
+     * `sanitize()` côté handler retire déjà `<>\/{};` des deux côtés, de façon
+     * symétrique. On retire donc `.escape()` plutôt que de l'ajouter à
+     * `/initiate` : l'ajouter aurait cassé les transactions déjà en attente,
+     * dont l'empreinte est stockée non échappée.
+     */
     body("securityAnswer")
       .custom((v, { req }) => {
         const vv = pickFirst(v, req.body?.securityCode, req.body?.validationCode);
@@ -1332,8 +1447,7 @@ router.post(
 
         return req.body.securityAnswer;
       })
-      .trim()
-      .escape(),
+      .trim(),
 
     metadataProviderValidator,
   ],

@@ -27,6 +27,14 @@ const ALLOWED = Object.freeze({
     STATES.PENDING_REVIEW,
     STATES.PROCESSING,
     STATES.FAILED,
+    /**
+     * Relance administrative d'une transaction encore en attente. La transition
+     * s'effectuait déjà en production — `relaunchController` écrivait le statut
+     * en direct, sans passer par `assertTransition`. On la DÉCLARE plutôt que
+     * de la laisser contourner la machine : §5 exige que chaque transition soit
+     * explicitement autorisée, pas qu'elle soit rare.
+     */
+    STATES.RELAUNCH,
   ],
 
   [STATES.PENDING_REVIEW]: [
@@ -59,6 +67,8 @@ const ALLOWED = Object.freeze({
   [STATES.LOCKED]: [
     STATES.PENDING_CONFIRMATION,
     STATES.CANCELLED,
+    /** Déverrouillage administratif — même raison que ci-dessus. */
+    STATES.RELAUNCH,
   ],
 
   [STATES.REFUNDED]: [],

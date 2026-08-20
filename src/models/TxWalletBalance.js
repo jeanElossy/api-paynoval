@@ -476,9 +476,35 @@ module.exports = (conn = mongoose) => {
       throw new Error("Le montant réservé total est invalide");
     }
 
-    if (refundAmount + feeAmount > totalReservedAmount) {
+    /**
+     * ⚠️ CORRECTIF. Cette garde testait `>`, donc elle tolérait
+     * `refund + fee < totalReserved` — et ce cas CASSE l'invariant du
+     * portefeuille.
+     *
+     * Le calcul : avant, `amount = A`, `reserved = R`, `available = A - R`.
+     * L'opération fait `reserved -= total`, `available += refund`,
+     * `amount -= fee`. Pour que `amount = available + reserved` tienne encore,
+     * il faut `total = refund + fee`. Sinon la différence disparaît de la
+     * réserve sans jamais réapparaître ailleurs : le portefeuille détient un
+     * montant qui n'est ni disponible ni réservé.
+     *
+     * Le défaut était sournois — un `.save()` ultérieur sur le document
+     * recalcule `available = amount - reserved` dans le hook `pre("validate")`
+     * et **rend l'écart au solde disponible**. Selon qu'un save intervienne ou
+     * non, le même retrait produisait donc deux soldes différents. Un écart de
+     * réconciliation impossible à expliquer après coup.
+     *
+     * L'égalité est désormais exigée, avec une tolérance d'un centième pour
+     * absorber l'arrondi des devises à décimales.
+     */
+    const reconciliationGap = Math.abs(
+      refundAmount + feeAmount - totalReservedAmount
+    );
+
+    if (reconciliationGap > 0.005) {
       throw new Error(
-        "Le remboursement et les frais dépassent le montant réservé"
+        `Décomposition invalide : remboursement (${refundAmount}) + frais (${feeAmount}) ` +
+          `doivent égaler le montant réservé (${totalReservedAmount})`
       );
     }
 

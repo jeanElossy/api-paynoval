@@ -316,8 +316,32 @@ async function reassignController(req, res, next) {
         throw createError(409, "La réassignation n’est supportée que pour le flow interne.");
       }
 
-      if (!["pending", "confirmed"].includes(tx.status)) {
-        throw createError(400, "Transaction non réassignable");
+      /**
+       * ⚠️ CORRECTIF. `confirmed` figurait dans cette liste. Réassigner une
+       * transaction confirmée réécrivait `tx.receiver` alors que
+       * `creditReceiverFunds` avait DÉJÀ crédité le destinataire d'origine, et
+       * sans produire la moindre écriture comptable en face.
+       *
+       * Résultat : l'argent restait chez l'ancien destinataire, le document
+       * désignait le nouveau, et le grand livre contredisait définitivement la
+       * transaction — une divergence qu'aucune réconciliation ne peut trancher,
+       * puisque les deux sources sont « valides » de leur point de vue.
+       *
+       * Changer de bénéficiaire après règlement, c'est un remboursement suivi
+       * d'un nouveau virement. `refundController` existe pour cela.
+       */
+      if (!["pending", "pending_review"].includes(tx.status)) {
+        throw createError(
+          400,
+          "Seule une transaction en attente est réassignable. Après règlement, utiliser un remboursement puis un nouveau virement."
+        );
+      }
+
+      if (tx.fundsCaptured || tx.beneficiaryCredited) {
+        throw createError(
+          409,
+          "Les fonds ont déjà été crédités au destinataire actuel : réassignation impossible."
+        );
       }
 
       const cleanNewEmail = String(newReceiverEmail || "").trim().toLowerCase();
@@ -400,11 +424,48 @@ async function relaunchController(req, res, next) {
       );
     }
 
+    /**
+     * ⚠️ CORRECTIF. Ce contrôleur écrivait `tx.status = "relaunch"` en direct,
+     * sans jamais interroger la machine à états — alors que `ALLOWED` ne
+     * déclarait `pending → relaunch` ni `locked → relaunch`. Deux transitions
+     * s'effectuaient donc en production que le reste de la chaîne tient pour
+     * impossibles.
+     *
+     * Les transitions manquantes ont été ajoutées explicitement dans
+     * `transactionStateMachine.js` : ce sont des opérations d'administration
+     * délibérées, il faut donc qu'elles soient AUTORISÉES, pas contournées.
+     * `assertTransition` redevient la seule autorité.
+     */
+    assertTransition(tx.status, "relaunch");
+
+    /**
+     * Une transaction dont l'argent a bougé ne se relance pas : elle se
+     * rembourse. Sans cette garde, `relaunch` rouvrait un chemin de
+     * confirmation sur une transaction déjà réglée.
+     */
+    if (tx.fundsCaptured || tx.beneficiaryCredited) {
+      throw createError(
+        409,
+        "Transaction déjà exécutée : elle ne peut pas être relancée, seulement remboursée."
+      );
+    }
+
     tx.status = "relaunch";
     tx.relaunchedAt = new Date();
     tx.relaunchedBy = req.user?.email || req.user?.id || null;
     tx.relaunchCount = (tx.relaunchCount || 0) + 1;
     tx.providerStatus = "RELAUNCH_REQUESTED";
+
+    /**
+     * Relancer une transaction `locked` sans purger le compteur ne la
+     * déverrouillait pas : `attemptCount` restait au plafond, si bien que la
+     * première réponse erronée re-verrouillait aussitôt. Le destinataire
+     * n'avait qu'un seul essai, là où la relance est censée lui en rendre.
+     */
+    tx.attemptCount = 0;
+    tx.lastAttemptAt = null;
+    tx.lockedUntil = null;
+
     await tx.save();
 
     return res.json({
