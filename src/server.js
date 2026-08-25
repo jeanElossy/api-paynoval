@@ -53,6 +53,10 @@ const swaggerUi = require("swagger-ui-express");
 
 // `config` est déjà chargé et validé en tête de fichier.
 const { connectTransactionsDB } = require("./config/db");
+const { protect } = require("./middleware/authMiddleware");
+const errorHandler = require("./middleware/errorHandler");
+const logger = require("./logger");
+
 const { getTxConn, getUsersConn } = require("./config/db");
 const { createReadiness } = require("./services/readiness");
 
@@ -82,9 +86,6 @@ const readiness = createReadiness({
   required: ["tx", "users"],
   logger,
 });
-const { protect } = require("./middleware/authMiddleware");
-const errorHandler = require("./middleware/errorHandler");
-const logger = require("./logger");
 const { requireRole } = require("./middleware/authz");
 
 const tryRequire = (name) => {
