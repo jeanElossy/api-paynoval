@@ -14,14 +14,7 @@ function normCurrency(v) {
   return s;
 }
 
-function decToNumber(v) {
-  if (v == null) return v;
-  try {
-    return parseFloat(v.toString());
-  } catch {
-    return v;
-  }
-}
+const { serializeTransaction } = require("./transactionSerializer");
 
 function normalizeMixedObject(v) {
   return isPlainObject(v) ? v : null;
@@ -806,43 +799,18 @@ transactionSchema.index(
   }
 );
 
+/**
+ * La représentation publique vit dans `models/transactionSerializer.js`.
+ *
+ * Elle en est sortie le 2026-08-25 : `listInternal` lit désormais en `.lean()`,
+ * donc sans `toJSON()`, et c'était `toJSON()` qui retirait `securityAnswerHash`,
+ * `verificationToken` et `securityCode`. Deux chemins doivent produire le même
+ * objet ; ils appellent donc la même fonction, plutôt que d'en tenir deux copies
+ * qui finiraient par diverger.
+ */
 transactionSchema.set("toJSON", {
   transform(_doc, ret) {
-    ret.id = ret._id;
-
-    ret.amount = decToNumber(ret.amount);
-    ret.transactionFees = decToNumber(ret.transactionFees);
-    ret.netAmount = decToNumber(ret.netAmount);
-    ret.exchangeRate = decToNumber(ret.exchangeRate);
-    ret.localAmount = decToNumber(ret.localAmount);
-
-    ret.amountSource = decToNumber(ret.amountSource);
-    ret.amountTarget = decToNumber(ret.amountTarget);
-    ret.feeSource = decToNumber(ret.feeSource);
-    ret.fxRateSourceToTarget = decToNumber(ret.fxRateSourceToTarget);
-
-    if (ret.money && typeof ret.money === "object") {
-      const m = { ...ret.money };
-      if (m.source?.amount != null) m.source.amount = Number(m.source.amount);
-      if (m.feeSource?.amount != null) {
-        m.feeSource.amount = Number(m.feeSource.amount);
-      }
-      if (m.target?.amount != null) m.target.amount = Number(m.target.amount);
-      if (m.fxRateSourceToTarget != null) {
-        m.fxRateSourceToTarget = Number(m.fxRateSourceToTarget);
-      }
-      ret.money = m;
-    }
-
-    delete ret._id;
-    delete ret.securityCode;
-    delete ret.securityAnswerHash;
-    delete ret.verificationToken;
-    delete ret.attemptCount;
-    delete ret.lastAttemptAt;
-    delete ret.lockedUntil;
-
-    return ret;
+    return serializeTransaction(ret);
   },
 });
 
