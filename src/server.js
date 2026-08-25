@@ -53,6 +53,35 @@ const swaggerUi = require("swagger-ui-express");
 
 // `config` est déjà chargé et validé en tête de fichier.
 const { connectTransactionsDB } = require("./config/db");
+const { getTxConn, getUsersConn } = require("./config/db");
+const { createReadiness } = require("./services/readiness");
+
+/**
+ * Sondes de disponibilité — voir `src/services/readiness.js`.
+ *
+ * Les deux connexions sont critiques : `tx` porte le grand livre, `users` sert
+ * à résoudre les comptes. L'une sans l'autre ne permet pas de traiter une
+ * transaction.
+ */
+const readiness = createReadiness({
+  readConnections: () => {
+    const states = ["disconnected", "connected", "connecting", "disconnecting"];
+    const label = (rs) => states[rs] || "unknown";
+
+    const read = (getter) => {
+      try {
+        const c = getter?.();
+        return c ? label(c.readyState) : "not_initialized";
+      } catch {
+        return "unknown";
+      }
+    };
+
+    return { tx: read(getTxConn), users: read(getUsersConn) };
+  },
+  required: ["tx", "users"],
+  logger,
+});
 const { protect } = require("./middleware/authMiddleware");
 const errorHandler = require("./middleware/errorHandler");
 const logger = require("./logger");
@@ -328,12 +357,45 @@ app.use(cookieParser());
 // ─────────────────────────────────────────────────────────────
 // Health / Root
 // ─────────────────────────────────────────────────────────────
+/**
+ * VIVACITÉ. Toujours 200 tant que la boucle d'événements répond — elle ne doit
+ * dépendre d'aucune dépendance externe, sinon l'orchestrateur redémarre
+ * l'instance en boucle pendant une panne Mongo. Voir `src/services/readiness.js`.
+ */
 app.get("/health", (_req, res) =>
   res.json({
     status: "UP",
     timestamp: new Date().toISOString(),
   })
 );
+
+app.get("/healthz", (_req, res) =>
+  res.json({
+    status: "UP",
+    timestamp: new Date().toISOString(),
+  })
+);
+
+/**
+ * DISPONIBILITÉ. 503 quand une connexion critique manque.
+ *
+ * ⚠️ C'est CETTE route que le répartiteur doit interroger. Sur ce service en
+ * particulier, une instance qui ne peut pas atteindre la base des transactions
+ * ne doit recevoir AUCUNE requête : elle échouerait au milieu d'un mouvement
+ * d'argent plutôt qu'avant.
+ */
+app.get("/readyz", (_req, res) => {
+  const state = readiness.snapshot();
+
+  res.set("Cache-Control", "no-store");
+
+  return res.status(state.httpStatus).json({
+    ready: state.ready,
+    status: state.status,
+    checks: state.checks,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 app.get("/", (_req, res) =>
   res.send("🚀 API PayNoval Transactions Service is running")
@@ -750,6 +812,7 @@ function startAutoCancelWorker() {
 async function bootstrap() {
   try {
     await connectTransactionsDB();
+    readiness.markStarted();
 
     const providerWebhookRoutes = require("./routes/providerWebhookRoutes");
     const transactionRoutes = require("./routes/transactionsRoutes");
@@ -866,6 +929,21 @@ process.on("uncaughtException", (err) => {
 });
 
 const graceful = async (signal) => {
+  /**
+   * VIDAGE AVANT FERMETURE.
+   *
+   * `/readyz` bascule en 503 d'abord : le répartiteur retire l'instance de la
+   * rotation pendant que les requêtes en cours se terminent. Sur ce service,
+   * couper une requête en vol veut dire interrompre un mouvement d'argent au
+   * milieu — le pire moment possible.
+   */
+  try {
+    readiness.beginDraining();
+    await new Promise((r) => setTimeout(r, Number(process.env.DRAIN_DELAY_MS || 5000)));
+  } catch (err) {
+    logger.warn("Erreur pendant le vidage", { message: err?.message || err });
+  }
+
   try {
     logger.info(`[${signal}] Arrêt en cours…`);
 
