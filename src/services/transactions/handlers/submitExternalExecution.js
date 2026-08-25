@@ -116,11 +116,16 @@ const {
 } = require("../../../utils/sandboxProviderGuard");
 
 const {
-  Transaction,
   startTxSession,
   maybeSessionOpts,
   runInTransaction,
 } = runtime;
+
+/**
+ * `Transaction` est lié PARESSEUSEMENT : le déstructurer ici résolvait la
+ * connexion Mongo au chargement du fichier. Les sites d'appel sont inchangés.
+ */
+const { Transaction } = runtime.lazyModels(["Transaction"]);
 
 function canUseSession() {
   if (typeof runtime.canUseSharedSession === "function") {

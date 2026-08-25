@@ -1,11 +1,34 @@
 "use strict";
 
-if (process.env.NODE_ENV !== "production") {
-  try {
-    require("dotenv-safe").config({ allowEmptyValues: true });
-  } catch (e) {
-    console.warn("[dotenv-safe] skipped:", e.message);
-  }
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * VALIDATION DE LA CONFIGURATION — ICI, ET NULLE PART AILLEURS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * C'est le point d'entrée du service : c'est donc lui qui décide si
+ * l'environnement est acceptable. Auparavant, `src/config.js` levait au premier
+ * `require`, ce qui rendait tout module en dépendant impossible à charger dans
+ * un test — et a façonné l'architecture du dépôt par accident plutôt que par
+ * choix (voir l'en-tête de `src/config.js`).
+ *
+ * Le contrôle est **plus strict qu'avant**, pas moins : il s'applique désormais
+ * en développement comme en production, alors que le bloc précédent avalait
+ * l'erreur hors production (`console.warn("[dotenv-safe] skipped")`). Un
+ * démarrage avec une variable manquante s'arrête net et dit laquelle.
+ *
+ * `CONFIG_STRICT=false` est une échappatoire d'outillage — jamais pour un
+ * service qui sert du trafic.
+ */
+const config = require("./config");
+
+const CONFIG_STRICT =
+  String(process.env.CONFIG_STRICT ?? "true").toLowerCase() !== "false";
+
+try {
+  config.load({ strict: CONFIG_STRICT });
+} catch (err) {
+  console.error(`❌ ${err.message}`);
+  process.exit(1);
 }
 
 if (!process.env.LOG_LEVEL) process.env.LOG_LEVEL = "info";
@@ -28,8 +51,37 @@ const cors = require("cors");
 const yaml = require("js-yaml");
 const swaggerUi = require("swagger-ui-express");
 
-const config = require("./config");
+// `config` est déjà chargé et validé en tête de fichier.
 const { connectTransactionsDB } = require("./config/db");
+const { getTxConn, getUsersConn } = require("./config/db");
+const { createReadiness } = require("./services/readiness");
+
+/**
+ * Sondes de disponibilité — voir `src/services/readiness.js`.
+ *
+ * Les deux connexions sont critiques : `tx` porte le grand livre, `users` sert
+ * à résoudre les comptes. L'une sans l'autre ne permet pas de traiter une
+ * transaction.
+ */
+const readiness = createReadiness({
+  readConnections: () => {
+    const states = ["disconnected", "connected", "connecting", "disconnecting"];
+    const label = (rs) => states[rs] || "unknown";
+
+    const read = (getter) => {
+      try {
+        const c = getter?.();
+        return c ? label(c.readyState) : "not_initialized";
+      } catch {
+        return "unknown";
+      }
+    };
+
+    return { tx: read(getTxConn), users: read(getUsersConn) };
+  },
+  required: ["tx", "users"],
+  logger,
+});
 const { protect } = require("./middleware/authMiddleware");
 const errorHandler = require("./middleware/errorHandler");
 const logger = require("./logger");
@@ -305,12 +357,45 @@ app.use(cookieParser());
 // ─────────────────────────────────────────────────────────────
 // Health / Root
 // ─────────────────────────────────────────────────────────────
+/**
+ * VIVACITÉ. Toujours 200 tant que la boucle d'événements répond — elle ne doit
+ * dépendre d'aucune dépendance externe, sinon l'orchestrateur redémarre
+ * l'instance en boucle pendant une panne Mongo. Voir `src/services/readiness.js`.
+ */
 app.get("/health", (_req, res) =>
   res.json({
     status: "UP",
     timestamp: new Date().toISOString(),
   })
 );
+
+app.get("/healthz", (_req, res) =>
+  res.json({
+    status: "UP",
+    timestamp: new Date().toISOString(),
+  })
+);
+
+/**
+ * DISPONIBILITÉ. 503 quand une connexion critique manque.
+ *
+ * ⚠️ C'est CETTE route que le répartiteur doit interroger. Sur ce service en
+ * particulier, une instance qui ne peut pas atteindre la base des transactions
+ * ne doit recevoir AUCUNE requête : elle échouerait au milieu d'un mouvement
+ * d'argent plutôt qu'avant.
+ */
+app.get("/readyz", (_req, res) => {
+  const state = readiness.snapshot();
+
+  res.set("Cache-Control", "no-store");
+
+  return res.status(state.httpStatus).json({
+    ready: state.ready,
+    status: state.status,
+    checks: state.checks,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 app.get("/", (_req, res) =>
   res.send("🚀 API PayNoval Transactions Service is running")
@@ -513,16 +598,68 @@ const baseRateLimitConfig = {
 };
 
 if (process.env.REDIS_URL && RedisStore && Redis) {
-  redisClient = new Redis(process.env.REDIS_URL, { tls: {} });
+  const redisUrl = String(process.env.REDIS_URL).trim();
+
+  /**
+   * ═══ TROIS RÉGLAGES, TROIS RAISONS ══════════════════════════════════════
+   *
+   * • TLS UNIQUEMENT SUR `rediss://`. Le `{ tls: {} }` inconditionnel d'avant
+   *   forçait une poignée de main TLS même sur une URL `redis://` : elle
+   *   échouait, le client ne se connectait jamais, et le service tournait avec
+   *   un magasin inutilisable — sans repli, puisque `RedisStore` était bel et
+   *   bien construit. La limitation de débit ne comptait donc plus rien.
+   *
+   * • `enableOfflineQueue: false`. Sans cela, une coupure Redis met les
+   *   commandes EN ATTENTE : chaque requête HTTP se bloquerait jusqu'au délai
+   *   de connexion au lieu d'échouer vite.
+   *
+   * • `passOnStoreError: true`. Une panne du compteur ne doit pas arrêter les
+   *   transactions : on laisse passer et on journalise. C'est le choix de
+   *   Stripe — la limitation protège d'un abus, ce n'est pas une règle métier.
+   *
+   * Le préfixe est explicite : ce service n'a qu'un limiteur global
+   * aujourd'hui, mais il partagera le même Redis que la passerelle et le
+   * backend. Sans préfixe, leurs compteurs fusionneraient.
+   */
+  redisClient = new Redis(redisUrl, {
+    enableOfflineQueue: false,
+    maxRetriesPerRequest: 2,
+    connectTimeout: 5000,
+    keepAlive: 30000,
+    ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
+  });
+
+  redisClient.on("error", (err) => {
+    logger.warn(
+      `[rate-limit] Redis indisponible — les requêtes passent sans limitation : ${
+        err?.message || err
+      }`
+    );
+  });
+
+  /**
+   * ⚠️ `passOnStoreError` N'EXISTE PAS EN express-rate-limit v6 (version de ce
+   * service). Une erreur du magasin y remonte en 500 : brancher Redis tel quel
+   * ferait échouer TOUTES les requêtes de transaction pendant une coupure du
+   * cache. Le repli est donc fourni explicitement — voir
+   * `src/services/resilientStore.js`.
+   */
+  const { createResilientStore } = require("./services/resilientStore");
+  const { MemoryStore } = require("express-rate-limit");
 
   globalRateLimiter = rateLimit({
     ...baseRateLimitConfig,
-    store: new RedisStore({
-      sendCommand: (...args) => redisClient.call(...args),
+    store: createResilientStore({
+      primary: new RedisStore({
+        prefix: "rl:tx-core-global:",
+        sendCommand: (...args) => redisClient.call(...args),
+      }),
+      fallback: new MemoryStore(),
+      logger,
     }),
   });
 
-  logger.info("[rate-limit] Redis store activé");
+  logger.info("[rate-limit] magasin Redis partagé actif (rl:tx-core-global:)");
 } else {
   globalRateLimiter = rateLimit(baseRateLimitConfig);
 
@@ -675,6 +812,7 @@ function startAutoCancelWorker() {
 async function bootstrap() {
   try {
     await connectTransactionsDB();
+    readiness.markStarted();
 
     const providerWebhookRoutes = require("./routes/providerWebhookRoutes");
     const transactionRoutes = require("./routes/transactionsRoutes");
@@ -791,6 +929,21 @@ process.on("uncaughtException", (err) => {
 });
 
 const graceful = async (signal) => {
+  /**
+   * VIDAGE AVANT FERMETURE.
+   *
+   * `/readyz` bascule en 503 d'abord : le répartiteur retire l'instance de la
+   * rotation pendant que les requêtes en cours se terminent. Sur ce service,
+   * couper une requête en vol veut dire interrompre un mouvement d'argent au
+   * milieu — le pire moment possible.
+   */
+  try {
+    readiness.beginDraining();
+    await new Promise((r) => setTimeout(r, Number(process.env.DRAIN_DELAY_MS || 5000)));
+  } catch (err) {
+    logger.warn("Erreur pendant le vidage", { message: err?.message || err });
+  }
+
   try {
     logger.info(`[${signal}] Arrêt en cours…`);
 

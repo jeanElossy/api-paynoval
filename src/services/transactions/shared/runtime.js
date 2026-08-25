@@ -453,6 +453,128 @@ function getRuntime() {
   };
 }
 
+
+/**
+ * LIAISON PARESSEUSE DES MODÈLES
+ * ---------------------------------------------------------------------------
+ * `runtime.Transaction`, `runtime.User`… sont des getters : ils résolvent la
+ * connexion Mongo au premier accès. Mais huit fichiers les déstructuraient au
+ * niveau module —
+ *
+ *     const { User, Transaction } = require("../shared/runtime");
+ *
+ * — ce qui déclenchait la résolution AU CHARGEMENT du fichier, annulant
+ * exactement la paresse que ces getters existent pour offrir. Conséquence : ni
+ * ces handlers ni les contrôleurs qui les importent ne pouvaient être chargés
+ * hors d'un serveur démarré, et toute logique qu'on voulait tester devait être
+ * extraite ailleurs. Le dépôt en porte les traces
+ * (`utils/txMoneyFields.js`, `utils/commitWithRetry.js`).
+ *
+ * `lazyModels()` rend des proxys : chaque accès de propriété — `.findById`,
+ * `.find`, `.updateOne` — va chercher le vrai modèle à ce moment-là. Les sites
+ * d'appel restent identiques au caractère près, et plus rien ne se résout à
+ * l'import.
+ *
+ * @param {string[]} names Noms de getters de ce runtime.
+ * @returns {Record<string, object>}
+ */
+/**
+ * COUTURE D'INJECTION — LE PAS SUIVANT VERS LA VRAIE DI
+ * ---------------------------------------------------------------------------
+ * La liaison paresseuse corrige l'explosion à l'import, mais elle laisse un
+ * singleton global : un test peut charger un contrôleur, il ne peut toujours
+ * pas lui SUBSTITUER un modèle. Or c'est cette substitution qui fait la
+ * différence entre « ça se charge » et « c'est testable ».
+ *
+ * Ce registre est la couture qui le permet, sans convertir les 45 000 lignes du
+ * service à l'injection en un seul passage. Un test pose des faux modèles,
+ * exerce le contrôleur, puis restaure. La migration vers une injection
+ * explicite — signature par signature — peut ensuite se faire fichier par
+ * fichier, sans big bang.
+ *
+ *     const runtime = require("…/runtime");
+ *     runtime.overrideModels({ Transaction: fakeTransactionModel });
+ *     try { await handler(req, res, next); } finally { runtime.restoreModels(); }
+ *
+ * ⚠️ Réservé aux tests. Un appel en production ferait mentir tout le service sur
+ * l'état réel de la base.
+ */
+const _overrides = new Map();
+
+function overrideModels(models = {}) {
+  for (const [name, value] of Object.entries(models)) {
+    _overrides.set(name, value);
+  }
+}
+
+function restoreModels(names = null) {
+  if (!names) {
+    _overrides.clear();
+    return;
+  }
+
+  for (const name of [].concat(names)) {
+    _overrides.delete(name);
+  }
+}
+
+/**
+ * Enveloppe un getter de modèle pour qu'il honore une substitution.
+ *
+ * C'est ce qui rend la couture universelle : `runtime.Transaction`,
+ * `lazyModels(["Transaction"])` et une déstructuration passent tous par ici, et
+ * voient donc le même modèle. Une couture que seule une voie d'accès
+ * respecterait ne servirait à rien — les tests passeraient là où le code réel
+ * échouerait.
+ */
+function modelGetter(name, resolver) {
+  return () => (_overrides.has(name) ? _overrides.get(name) : resolver());
+}
+
+/** Rend le modèle substitué s'il en existe un, sinon le vrai. */
+function resolveModel(name) {
+  return runtime[name];
+}
+
+function lazyModels(names) {
+  const out = {};
+
+  for (const name of names) {
+    out[name] = new Proxy(
+      {},
+      {
+        get(_t, prop) {
+          const model = resolveModel(name);
+
+          if (prop === Symbol.toPrimitive || prop === "toString") {
+            return () => `[LazyModel ${name}]`;
+          }
+
+          const value = model?.[prop];
+
+          // Les méthodes de modèle Mongoose dépendent de `this` : on les lie.
+          return typeof value === "function" ? value.bind(model) : value;
+        },
+
+        has(_t, prop) {
+          return prop in (resolveModel(name) || {});
+        },
+
+        construct(_t, args) {
+          const Model = resolveModel(name);
+          return new Model(...args);
+        },
+
+        apply(_t, thisArg, args) {
+          return resolveModel(name).apply(thisArg, args);
+        },
+      }
+    );
+  }
+
+  return out;
+}
+
 const runtime = {};
 
 Object.defineProperties(runtime, {
@@ -539,13 +661,13 @@ Object.defineProperties(runtime, {
   },
 
   User: {
-    get: () => getUserModel(),
+    get: modelGetter("User", getUserModel),
   },
   Device: {
-    get: () => getDeviceModel(),
+    get: modelGetter("Device", getDeviceModel),
   },
   Notification: {
-    get: () => getNotificationModel(),
+    get: modelGetter("Notification", getNotificationModel),
   },
   /**
    * `Outbox` lève : voir l'explication au-dessus de `getOutboxModel`. Le getter
@@ -553,28 +675,28 @@ Object.defineProperties(runtime, {
    * planterait plus loin, sur un appel de méthode, loin de la cause.
    */
   Outbox: {
-    get: () => getOutboxModel(),
+    get: modelGetter("Outbox", getOutboxModel),
   },
   NotificationOutbox: {
-    get: () => getNotificationOutboxModel(),
+    get: modelGetter("NotificationOutbox", getNotificationOutboxModel),
   },
   ReferralOutbox: {
-    get: () => getReferralOutboxModel(),
+    get: modelGetter("ReferralOutbox", getReferralOutboxModel),
   },
   Transaction: {
-    get: () => getTransactionModel(),
+    get: modelGetter("Transaction", getTransactionModel),
   },
   Balance: {
-    get: () => getBalanceModel(),
+    get: modelGetter("Balance", getBalanceModel),
   },
   UserWalletBalance: {
-    get: () => getUserWalletBalanceModel(),
+    get: modelGetter("UserWalletBalance", getUserWalletBalanceModel),
   },
   SystemBalance: {
-    get: () => getSystemBalanceModel(),
+    get: modelGetter("SystemBalance", getSystemBalanceModel),
   },
   LedgerEntry: {
-    get: () => getLedgerEntryModel(),
+    get: modelGetter("LedgerEntry", getLedgerEntryModel),
   },
 
   getUsersConnectionSafe: {
@@ -642,6 +764,16 @@ Object.defineProperties(runtime, {
 
   getRuntime: {
     get: () => getRuntime,
+  },
+
+  lazyModels: {
+    get: () => lazyModels,
+  },
+  overrideModels: {
+    get: () => overrideModels,
+  },
+  restoreModels: {
+    get: () => restoreModels,
   },
 });
 

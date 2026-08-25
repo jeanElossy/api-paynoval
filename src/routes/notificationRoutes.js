@@ -6,7 +6,24 @@ const { protect }  = require('../middleware/authMiddleware');
 
 // ALWAYS inject connection if you are in a multi-DB architecture
 const { getUsersConn } = require('../config/db');
-const Notification = require('../models/Notification')(getUsersConn());
+
+/**
+ * Résolution PARESSEUSE du modèle.
+ *
+ * `getUsersConn()` lève tant que la base n'est pas connectée : résoudre le
+ * modèle au premier niveau rendait ce fichier — et tout ce qui le monte —
+ * impossible à charger dans un test. Même correction que dans `src/config.js`
+ * et `services/validationService.js` : on résout au premier usage.
+ */
+let _Notification = null;
+
+function getNotificationModel() {
+  if (!_Notification) {
+    _Notification = require('../models/Notification')(getUsersConn());
+  }
+
+  return _Notification;
+}
 
 const router = express.Router();
 
@@ -18,7 +35,7 @@ router.get(
   '/',
   protect,
   asyncHandler(async (req, res) => {
-    const notifs = await Notification
+    const notifs = await getNotificationModel()
       .find({ recipient: req.user.id })
       .sort({ createdAt: -1 })
       .lean();
@@ -35,7 +52,7 @@ router.patch(
   '/:id/read',
   protect,
   asyncHandler(async (req, res) => {
-    const notif = await Notification.findOneAndUpdate(
+    const notif = await getNotificationModel().findOneAndUpdate(
       { _id: req.params.id, recipient: req.user.id },
       { read: true },
       { new: true }
@@ -57,7 +74,7 @@ router.delete(
   '/:id',
   protect,
   asyncHandler(async (req, res) => {
-    const notif = await Notification.findOneAndDelete(
+    const notif = await getNotificationModel().findOneAndDelete(
       { _id: req.params.id, recipient: req.user.id }
     ).lean();
 
@@ -77,7 +94,7 @@ router.get(
   '/count',
   protect,
   asyncHandler(async (req, res) => {
-    const count = await Notification.countDocuments({
+    const count = await getNotificationModel().countDocuments({
       recipient: req.user.id,
       read: false
     });

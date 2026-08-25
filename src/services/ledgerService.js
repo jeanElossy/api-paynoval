@@ -18,16 +18,60 @@ const {
 } = require("./pricingSnapshotNormalizer");
 
 const { getTxConn } = require("../config/db");
-const txConn = getTxConn();
 
-const LedgerEntry = require("../models/LedgerEntry")(txConn);
-const UserWalletBalance = require("../models/TxWalletBalance")(txConn);
+/**
+ * RÉSOLUTION PARESSEUSE DES MODÈLES
+ * ---------------------------------------------------------------------------
+ * Ce fichier appelait `getTxConn()` au premier niveau, puis résolvait ses trois
+ * modèles dans la foulée. `getTxConn()` lève tant que `connectTransactionsDB()`
+ * n'a pas tourné : charger ce service — et donc tout contrôleur de transaction —
+ * était impossible hors d'un processus serveur démarré.
+ *
+ * C'est le même défaut que celui corrigé dans `src/config.js` : une dépendance
+ * d'entrée/sortie résolue à l'import. On résout au premier usage, et une seule
+ * fois.
+ */
+let _txConn = null;
+let _LedgerEntry = null;
+let _UserWalletBalance = null;
+let _SystemWalletBalance = null;
+let _systemLookupDone = false;
 
-let SystemWalletBalance = null;
-try {
-  SystemWalletBalance = require("../models/TxSystemBalance")(txConn);
-} catch {
-  SystemWalletBalance = null;
+function txConnection() {
+  if (!_txConn) _txConn = getTxConn();
+  return _txConn;
+}
+
+function ledgerEntryModel() {
+  if (!_LedgerEntry) {
+    _LedgerEntry = require("../models/LedgerEntry")(txConnection());
+  }
+  return _LedgerEntry;
+}
+
+function userWalletModel() {
+  if (!_UserWalletBalance) {
+    _UserWalletBalance = require("../models/TxWalletBalance")(txConnection());
+  }
+  return _UserWalletBalance;
+}
+
+/**
+ * `TxSystemBalance` peut légitimement ne pas exister : le repli sur
+ * `TxWalletBalance` est prévu. On mémorise donc l'échec pour ne pas retenter à
+ * chaque appel.
+ */
+function systemWalletModel() {
+  if (_systemLookupDone) return _SystemWalletBalance;
+  _systemLookupDone = true;
+
+  try {
+    _SystemWalletBalance = require("../models/TxSystemBalance")(txConnection());
+  } catch {
+    _SystemWalletBalance = null;
+  }
+
+  return _SystemWalletBalance;
 }
 
 const TREASURY_SYSTEM_TYPES = new Set([
@@ -128,6 +172,8 @@ function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
 }
 
 function assertUserWalletModel() {
+  const UserWalletBalance = userWalletModel();
+
   if (!UserWalletBalance) {
     throw new Error("TxWalletBalance indisponible");
   }
@@ -165,10 +211,7 @@ function resolveTreasuryContext({
 }
 
 function getSystemWalletModel() {
-  if (!SystemWalletBalance) {
-    return null;
-  }
-  return SystemWalletBalance;
+  return systemWalletModel();
 }
 
 function buildSystemBalanceQuery({ treasuryUserId, treasurySystemType }) {
@@ -295,7 +338,7 @@ async function creditSystemWallet({
     );
   }
 
-  await UserWalletBalance.credit(
+  await userWalletModel().credit(
     treasuryUserId,
     cur,
     amt,
@@ -364,7 +407,7 @@ async function debitSystemWallet({
     );
   }
 
-  await UserWalletBalance.debit(
+  await userWalletModel().debit(
     treasuryUserId,
     cur,
     amt,
@@ -410,7 +453,7 @@ async function createLedgerEntry({
     "FEE_REVENUE",
     "FX_REVENUE",
     "ADJUSTMENT",
-    // Doit rester aligné sur `ENTRY_TYPES` de models/LedgerEntry.js : les deux
+    // Doit rester aligné sur `ENTRY_TYPES` de models/ledgerEntryModel().js : les deux
     // listes sont séparées, un ajout ici sans l'autre passe la validation du
     // service puis échoue à l'écriture.
     "REFERRAL_PAYOUT",
@@ -428,7 +471,7 @@ async function createLedgerEntry({
     throw new Error(`entryType ledger invalide: ${entryType}`);
   }
 
-  const [doc] = await LedgerEntry.create(
+  const [doc] = await ledgerEntryModel().create(
     [
       {
         transactionId,
@@ -461,7 +504,7 @@ async function reserveSenderFunds({ transaction, senderId, amount, currency, ses
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await UserWalletBalance.reserve(
+  const wallet = await userWalletModel().reserve(
     sender,
     cur,
     amt,
@@ -493,7 +536,7 @@ async function captureSenderReserve({ transaction, senderId, amount, currency, s
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await UserWalletBalance.captureReserve(
+  const wallet = await userWalletModel().captureReserve(
     sender,
     cur,
     amt,
@@ -525,7 +568,7 @@ async function releaseSenderReserve({ transaction, senderId, amount, currency, s
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await UserWalletBalance.releaseReserve(
+  const wallet = await userWalletModel().releaseReserve(
     sender,
     cur,
     amt,
@@ -557,7 +600,7 @@ async function creditReceiverFunds({ transaction, receiverId, amount, currency, 
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await UserWalletBalance.credit(
+  const wallet = await userWalletModel().credit(
     receiver,
     cur,
     amt,
@@ -589,7 +632,7 @@ async function debitReceiverFunds({ transaction, receiverId, amount, currency, s
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await UserWalletBalance.debit(
+  const wallet = await userWalletModel().debit(
     receiver,
     cur,
     amt,
@@ -621,7 +664,7 @@ async function refundSenderFunds({ transaction, senderId, amount, currency, sess
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const wallet = await UserWalletBalance.credit(
+  const wallet = await userWalletModel().credit(
     sender,
     cur,
     amt,
@@ -835,7 +878,7 @@ async function chargeCancellationFee({
   };
 
   if (out.feeSourceAmount > 0) {
-    await UserWalletBalance.debit(
+    await userWalletModel().debit(
       sender,
       out.feeSourceCurrency,
       out.feeSourceAmount,

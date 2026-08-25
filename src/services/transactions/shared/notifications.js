@@ -2,15 +2,20 @@
 
 const crypto = require("crypto");
 
-const {
-  User,
-  Notification,
-  NotificationOutbox: Outbox,
-  notifyTransactionViaGateway,
-  logger,
-  PRINCIPAL_URL,
-  maybeSessionOpts,
-} = require("./runtime");
+const runtime = require("./runtime");
+const { notifyTransactionViaGateway, logger, PRINCIPAL_URL, maybeSessionOpts } = runtime;
+
+/**
+ * Modèles liés PARESSEUSEMENT : chaque accès de propriété va chercher le
+ * modèle au moment de l'usage. Les déstructurer directement résolvait la
+ * connexion Mongo au chargement du fichier, ce qui rendait ce module
+ * impossible à charger hors d'un serveur démarré.
+ */
+const { User, Notification, NotificationOutbox: Outbox } = runtime.lazyModels([
+  "User",
+  "Notification",
+  "NotificationOutbox",
+]);
 
 /**
  * `Notification` et `NotificationOutbox` viennent de `runtime`, et pointent

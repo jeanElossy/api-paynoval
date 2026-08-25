@@ -2,12 +2,15 @@
 
 const crypto = require("crypto");
 
-const {
-  User,
-  logger,
-  maybeSessionOpts,
-  getUsersConnectionSafe,
-} = require("./shared/runtime");
+const runtime = require("./shared/runtime");
+
+/**
+ * `logger`, `maybeSessionOpts` et `getUsersConnectionSafe` sont des fonctions :
+ * les déstructurer ne déclenche aucune connexion. `User`, en revanche, est un
+ * getter paresseux qui résout la base au premier accès — il est donc lu DANS
+ * les fonctions, jamais ici.
+ */
+const { logger, maybeSessionOpts, getUsersConnectionSafe } = runtime;
 
 /**
  * Lecture des montants : logique pure, isolée dans `utils/txMoneyFields.js`
@@ -22,8 +25,31 @@ const {
   buildSenderTotal,
 } = require("../../utils/txMoneyFields");
 
-const Notification = require("../../models/Notification")(getUsersConnectionSafe());
-const Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
+/**
+ * Modèles résolus au premier usage.
+ *
+ * Ils l'étaient au chargement du fichier, ce qui rendait ce service — et tout
+ * handler de transaction qui l'importe — impossible à charger sans base
+ * connectée. C'est la raison pour laquelle `utils/txMoneyFields.js` a dû être
+ * extrait « pour être testable sans connexion Mongo » : le contournement
+ * n'était rendu nécessaire que par ce défaut-ci.
+ */
+let _Notification = null;
+let _Outbox = null;
+
+function notificationModel() {
+  if (!_Notification) {
+    _Notification = require("../../models/Notification")(getUsersConnectionSafe());
+  }
+  return _Notification;
+}
+
+function outboxModel() {
+  if (!_Outbox) {
+    _Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
+  }
+  return _Outbox;
+}
 
 function toFloat(v, fallback = 0) {
   const n = Number(v);
@@ -306,7 +332,7 @@ async function enqueueUserNotification({
   const txId = tx?._id?.toString?.() || "";
 
   // Forme tableau : c'est la seule que `create()` accepte avec des options.
-  await Notification.create(
+  await notificationModel().create(
     [
       {
         recipient,
@@ -355,7 +381,7 @@ async function enqueueUserNotification({
   }));
 
   if (outboxDocs.length) {
-    await Outbox.insertMany(outboxDocs, { ordered: false, ...sessOpts });
+    await outboxModel().insertMany(outboxDocs, { ordered: false, ...sessOpts });
   }
 }
 
@@ -364,12 +390,12 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
     const sessOpts = maybeSessionOpts(session);
 
     const [sender, receiver] = await Promise.all([
-      User.findById(tx.sender)
+      runtime.User.findById(tx.sender)
         .select("_id email fullName wantsEmail notificationPreferences preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),
 
-      User.findById(tx.receiver)
+      runtime.User.findById(tx.receiver)
         .select("_id email fullName wantsEmail notificationPreferences preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),

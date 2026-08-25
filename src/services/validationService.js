@@ -4,7 +4,28 @@
 const mongoose = require('mongoose');
 const createError = require('http-errors');
 const { getTxConn } = require('../config/db');
-const Transaction = require('../models/Transaction')(getTxConn());
+
+/**
+ * Résolution PARESSEUSE du modèle.
+ *
+ * Ce fichier faisait `require('../models/Transaction')(getTxConn())` au premier
+ * niveau. `getTxConn()` lève tant que `connectTransactionsDB()` n'a pas tourné :
+ * charger ce module dans un test était donc impossible, et par ricochet tout
+ * contrôleur qui en dépend.
+ *
+ * C'est le même défaut que celui corrigé dans `src/config.js`, une couche plus
+ * bas : une dépendance d'entrée/sortie résolue à l'import. La règle est la même
+ * — on résout au premier usage, dans le handler, jamais au chargement.
+ */
+let _Transaction = null;
+
+function getTransactionModel() {
+  if (!_Transaction) {
+    _Transaction = require('../models/Transaction')(getTxConn());
+  }
+
+  return _Transaction;
+}
 
 function isEmailLike(v) {
   const s = String(v || '').trim().toLowerCase();
@@ -108,7 +129,7 @@ async function detectBasicFraud({
     throw createError(400, 'receiver ou receiverEmail requis pour anti-fraude');
   }
 
-  const tx = await Transaction.findOne(query).sort({ createdAt: -1 }).lean();
+  const tx = await getTransactionModel().findOne(query).sort({ createdAt: -1 }).lean();
   if (tx) {
     throw createError(429, 'Transaction similaire détectée récemment (possible doublon/fraude)');
   }
