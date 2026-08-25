@@ -1,11 +1,34 @@
 "use strict";
 
-if (process.env.NODE_ENV !== "production") {
-  try {
-    require("dotenv-safe").config({ allowEmptyValues: true });
-  } catch (e) {
-    console.warn("[dotenv-safe] skipped:", e.message);
-  }
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * VALIDATION DE LA CONFIGURATION — ICI, ET NULLE PART AILLEURS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * C'est le point d'entrée du service : c'est donc lui qui décide si
+ * l'environnement est acceptable. Auparavant, `src/config.js` levait au premier
+ * `require`, ce qui rendait tout module en dépendant impossible à charger dans
+ * un test — et a façonné l'architecture du dépôt par accident plutôt que par
+ * choix (voir l'en-tête de `src/config.js`).
+ *
+ * Le contrôle est **plus strict qu'avant**, pas moins : il s'applique désormais
+ * en développement comme en production, alors que le bloc précédent avalait
+ * l'erreur hors production (`console.warn("[dotenv-safe] skipped")`). Un
+ * démarrage avec une variable manquante s'arrête net et dit laquelle.
+ *
+ * `CONFIG_STRICT=false` est une échappatoire d'outillage — jamais pour un
+ * service qui sert du trafic.
+ */
+const config = require("./config");
+
+const CONFIG_STRICT =
+  String(process.env.CONFIG_STRICT ?? "true").toLowerCase() !== "false";
+
+try {
+  config.load({ strict: CONFIG_STRICT });
+} catch (err) {
+  console.error(`❌ ${err.message}`);
+  process.exit(1);
 }
 
 if (!process.env.LOG_LEVEL) process.env.LOG_LEVEL = "info";
@@ -28,7 +51,7 @@ const cors = require("cors");
 const yaml = require("js-yaml");
 const swaggerUi = require("swagger-ui-express");
 
-const config = require("./config");
+// `config` est déjà chargé et validé en tête de fichier.
 const { connectTransactionsDB } = require("./config/db");
 const { protect } = require("./middleware/authMiddleware");
 const errorHandler = require("./middleware/errorHandler");

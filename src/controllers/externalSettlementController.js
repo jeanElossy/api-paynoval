@@ -17,20 +17,16 @@
 
 const createError = require("http-errors");
 
-const {
-  Transaction,
-  captureSenderReserve,
-  releaseSenderReserve,
-  refundSenderFunds,
-  creditReceiverFunds,
-  creditTreasuryRevenue,
-  resolveTreasuryFromSystemType,
-  normalizeTreasurySystemType,
-  startTxSession,
-  maybeSessionOpts,
-  canUseSharedSession,
-  runInTransaction,
-} = require("../services/transactions/shared/runtime");
+const runtime = require("../services/transactions/shared/runtime");
+const { captureSenderReserve, releaseSenderReserve, refundSenderFunds, creditReceiverFunds, creditTreasuryRevenue, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, canUseSharedSession, runInTransaction } = runtime;
+
+/**
+ * Modèles liés PARESSEUSEMENT : chaque accès de propriété va chercher le
+ * modèle au moment de l'usage. Les déstructurer directement résolvait la
+ * connexion Mongo au chargement du fichier, ce qui rendait ce module
+ * impossible à charger hors d'un serveur démarré.
+ */
+const { Transaction } = runtime.lazyModels(["Transaction"]);
 
 const {
   notifyParties,

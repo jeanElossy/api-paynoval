@@ -29,7 +29,17 @@ node scripts/seedAppleReviewerWallet.js  # wallet du compte sandbox Apple Review
 
 **Une suite de tests existe depuis le 2026-08-18** (elle n'existait pas avant, plusieurs sections de ce fichier le disaient) : runner natif `node:test`, aucune dépendance ajoutée, logique pure uniquement — aucun test ne démarre le service ni n'ouvre de connexion Mongo. **68 tests au 2026-08-19** (28 initiaux + 40 ajoutés : idempotence du parrainage, signature des webhooks, tokens internes, rejeu du commit, exécution transactionnelle, clés d'idempotence de l'API). Le glob est indispensable : `node --test test/` résout `test/` comme un module CommonJS et échoue en `MODULE_NOT_FOUND` sur Node 22.
 
-Contrainte pratique à connaître : `require` d'un contrôleur charge `src/config.js`, donc `dotenv-safe`, qui **échoue sans `.env` complet**. Une logique qu'on veut tester doit donc vivre dans un module sans dépendance de configuration (cf. [src/utils/userScopeQuery.js](src/utils/userScopeQuery.js), extrait du contrôleur exactement pour cette raison). Le reste se vérifie par démarrage du service et appels HTTP (`/health`, `/api/v1/health`).
+**Cette contrainte n'existe plus depuis le 2026-08-25.** Elle disait : « `require` d'un contrôleur charge `src/config.js`, donc `dotenv-safe`, qui échoue sans `.env` complet ; une logique qu'on veut tester doit donc vivre dans un module sans dépendance de configuration ». C'était un contournement, pas un choix d'architecture — et il a façonné le découpage du dépôt (`utils/commitWithRetry.js`, `utils/txMoneyFields.js`, `utils/userScopeQuery.js` n'existent séparément que pour cela).
+
+Deux verrous ont été levés :
+
+1. **La configuration ne valide plus au `require`.** [src/config.js](src/config.js) expose `buildConfig(env)` — fonction **pure**, à qui on passe l'environnement — et un proxy paresseux qui charge au premier accès. La validation est un **acte explicite du point d'entrée** : `server.js` appelle `config.load({ strict: true })` et refuse de démarrer en nommant les variables absentes. Le contrôle est plus strict qu'avant (il s'applique désormais aussi en développement, où l'erreur était avalée).
+
+2. **Les modèles Mongo ne se résolvent plus à l'import.** `runtime.lazyModels([...])` rend des proxys qui vont chercher le modèle au moment de l'usage. Les huit fichiers qui déstructuraient `const { Transaction } = require(".../runtime")` au premier niveau annulaient la paresse des getters ; ils passent désormais par `lazyModels`.
+
+**Conséquence pratique : un contrôleur se teste directement.** `runtime.overrideModels({ Transaction: faux })` substitue un modèle, `runtime.restoreModels()` restaure. La substitution est honorée par toutes les voies d'accès (`runtime.X`, `lazyModels`, déstructuration) — voir [test/handlerTestability.test.js](test/handlerTestability.test.js), qui exerce le vrai `listInternal` sans base ni serveur.
+
+Extraire un module pur reste une **bonne pratique** (*functional core, imperative shell*, comme chez Stripe et Adyen) — mais c'est désormais un choix de conception, plus une obligation technique. La couture `overrideModels` est le point d'appui pour migrer progressivement vers une injection de dépendances explicite, fichier par fichier.
 
 Surfaces utiles au runtime : `/docs` (Swagger, protégé par JWT + rôle admin/developer/superadmin en production), `/openapi.yaml`, `/openapi.json`.
 

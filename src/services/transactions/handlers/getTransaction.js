@@ -1,10 +1,21 @@
 "use strict";
 
-const { mongoose, Transaction } = require("../shared/runtime");
+const runtime = require("../shared/runtime");
+const { mongoose } = runtime;
+
+/**
+ * `Transaction` est lu DANS le handler, jamais au niveau module.
+ *
+ * `runtime.Transaction` est un getter paresseux qui résout la connexion à la
+ * base au premier accès. Le déstructurer à l'import déclenchait cette résolution
+ * au chargement du fichier — ce qui annulait la paresse et rendait ce module
+ * impossible à charger hors d'un serveur démarré.
+ */
 const { pickAuthedUserId } = require("../shared/helpers");
 
 async function getTransactionController(req, res, next) {
   try {
+    const Transaction = runtime.Transaction;
     const { id } = req.params;
     const userId = pickAuthedUserId(req);
 
