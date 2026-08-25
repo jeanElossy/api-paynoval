@@ -3,66 +3,70 @@
 const runtime = require("../shared/runtime");
 const { pickAuthedUserId } = require("../shared/helpers");
 const { toPublicTransaction } = require("../../../models/transactionSerializer");
-const {
-  buildOwnershipQuery,
-  modelHasPath,
-  OWNERSHIP_FIELDS,
-} = require("../shared/ownershipQuery");
+const { buildOwnershipQuery } = require("../shared/ownershipQuery");
 
 /**
  * HISTORIQUE DES TRANSACTIONS
  * ============================================================================
  *
- * C'est le chemin de lecture le plus fréquenté de l'application. Jusqu'au
- * 2026-08-25, il balayait la collection `transactions` **entière**, deux fois,
- * à chaque page.
+ * ═══ POURQUOI CE FICHIER EST ÉCRIT EN INJECTION ═══════════════════════════
  *
- * ═══ POURQUOI LE BALAYAGE COMPLET ═════════════════════════════════════════
+ * C'est le motif de référence du dépôt, et il remplace ici la « couture »
+ * (`runtime.overrideModels`). Les deux rendent le code testable ; ils ne se
+ * valent pas.
  *
- * Le filtre portait un `$or` à six branches :
+ *   • La couture écrase un **singleton global**. Un `restoreModels()` oublié
+ *     fuit dans les tests suivants, deux tests ne peuvent pas s'exécuter en
+ *     parallèle, et la signature de la fonction ne dit rien de ce dont elle
+ *     dépend : il faut lire le corps.
  *
- *     sender · receiver · receiverUserId · createdBy · ownerUserId · userId
- *                          └──────────── ces trois-là ────────────┘
+ *   • L'injection **reçoit** ses dépendances. `createListInternal({ Transaction })`
+ *     énonce son besoin. Un test lui passe un double sans toucher à quoi que ce
+ *     soit de global. Changer d'implémentation ne touche qu'un endroit : le
+ *     point de composition, en bas de ce fichier.
  *
- * Ces trois champs **n'existent pas dans le schéma `Transaction`**. Vérifié
- * plutôt que supposé : `git log -S"receiverUserId" -- models/Transaction.js`
- * ne rend rien, ils n'y ont jamais figuré. Ils sont bien écrits quelque part
- * (`initiateInternal.js:649`, `flowHelpers.js:388`) mais dans le sous-objet
- * **`meta`** — donc en `meta.ownerUserId`, jamais à la racine, qui est ce que
- * la requête interrogeait.
+ * La couture reste utile comme outil de **transition** — on ne convertit pas
+ * 45 000 lignes en un passage. La règle : injection pour le code neuf et pour
+ * les modules qu'on touche, couture pour couvrir le reste en attendant.
  *
- * Or MongoDB n'utilise une union d'index pour un `$or` que si **toutes** les
- * branches sont indexées. Une seule branche non couverte — et aucun index ne
- * pouvait couvrir un champ absent du schéma — fait basculer le planificateur en
- * COLLSCAN. Les deux requêtes du `Promise.all` portaient le même filtre : le
- * balayage était donc payé deux fois par page affichée.
+ * ═══ CE QUE CE HANDLER A CORRIGÉ ═════════════════════════════════════════
  *
- * Rien n'était perdu pour autant : toute transaction que ces branches
- * désigneraient est déjà couverte, la création posant `userId`, `sender` et
- * `receiver` à la racine — pour le flux interne comme pour les flux externes.
- * Les branches ne servaient à rien ; elles coûtaient tout.
+ * Le filtre portait un `$or` à six branches, dont trois — `receiverUserId`,
+ * `createdBy`, `ownerUserId` — **absentes du schéma `Transaction`** (vérifié :
+ * `git log -S` sur le modèle ne rend rien ; elles sont écrites dans le
+ * sous-objet `meta`, jamais à la racine). MongoDB n'utilise une union d'index
+ * pour un `$or` que si TOUTES les branches sont indexées : une seule non
+ * couverte faisait basculer le planificateur en balayage complet de collection,
+ * payé DEUX fois par page (`find` et `countDocuments` portent le même filtre).
  *
- * ═══ LA GARDE, PLUTÔT QUE LA SUPPRESSION SÈCHE ════════════════════════════
+ * La sélection des branches vit dans `shared/ownershipQuery.js`, module pur.
  *
- * On ne se contente pas de retirer les trois lignes : on n'ajoute une branche
- * que si le schéma porte réellement le champ. Le motif n'est pas de nous, il
- * vient du dépôt — `sandboxTransaction.service.js:165` le fait déjà avec
- * `modelHasPath`. Sa vertu est d'être auto-corrigeant : le jour où quelqu'un
- * ajoute `ownerUserId` au schéma, la branche revient d'elle-même, indexable, au
- * lieu de réintroduire un balayage complet en silence.
+ * ═══ LE PIÈGE DU `.lean()`, ET POURQUOI LE SÉRIALISEUR EST OBLIGATOIRE ════
+ *
+ * C'était le `toJSON()` de Mongoose qui retirait `securityAnswerHash`,
+ * `verificationToken` et `securityCode`. `.lean()` rend des objets simples,
+ * sans `toJSON()` : posé sans précaution, il aurait renvoyé les secrets avec un
+ * code 200, sans rien casser d'observable, sur le chemin le plus fréquenté de
+ * l'application.
+ *
+ * Deux barrières indépendantes, et c'est délibéré :
+ *   1. la **projection** écarte les secrets dès la requête — ils ne quittent
+ *      jamais MongoDB ;
+ *   2. le **sérialiseur** les retire à nouveau à la sortie.
+ *
+ * Une seule aurait suffi en théorie. Deux garantissent qu'un oubli dans l'une
+ * ne devient pas une fuite. `assertNoSecrets` (ci-dessous) refuse d'ailleurs de
+ * construire le handler si la projection cesse de couvrir un secret.
  */
 
+/** Plafond de pagination. Au-delà, la réponse devient trop lourde pour le mobile. */
+const DEFAULT_MAX_LIMIT = 100;
+const DEFAULT_LIMIT = 25;
+
 /**
- * Projection : ce que l'historique a besoin de lire.
- *
- * On exclut plutôt qu'on énumère. Une liste blanche serait plus économe, mais
- * le schéma porte plus de 400 champs et l'application en affiche beaucoup :
- * en oublier un casserait l'écran d'historique de façon difficile à voir.
- * L'exclusion, elle, ne peut que laisser passer un champ de trop — jamais en
- * manquer un.
- *
- * Les secrets sont **aussi** retirés par le sérialiseur. Les écarter dès la
- * requête évite simplement de les faire voyager depuis Mongo.
+ * Champs jamais transmis. Doit rester aligné sur `SECRET_FIELDS` du
+ * sérialiseur — `assertNoSecrets()` le vérifie au démarrage plutôt qu'en
+ * production.
  */
 const LIST_PROJECTION = Object.freeze({
   securityAnswerHash: 0,
@@ -74,85 +78,150 @@ const LIST_PROJECTION = Object.freeze({
   __v: 0,
 });
 
-async function listInternal(req, res, next) {
-  try {
-    const userId = pickAuthedUserId(req);
-    if (!userId) {
-      return res.status(401).json({ success: false, message: "Non autorisé" });
-    }
+/**
+ * Vérifie que la projection couvre bien tous les secrets connus du sérialiseur.
+ *
+ * Cette assertion s'exécute à la CONSTRUCTION du handler, donc au démarrage du
+ * service : ajouter un secret au sérialiseur sans l'ajouter ici fait échouer le
+ * boot, bruyamment, plutôt que de laisser fuir un champ en production.
+ */
+function assertNoSecrets(projection, secretFields) {
+  const missing = secretFields.filter(
+    (f) => !Object.prototype.hasOwnProperty.call(projection, f)
+  );
 
-    const Transaction = runtime.Transaction;
-    if (!Transaction) {
-      return res.status(500).json({
-        success: false,
-        message: "Transaction model indisponible",
-      });
-    }
-
-    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
-
-    const query = buildOwnershipQuery(Transaction, userId);
-
-    /**
-     * `limit + 1` : on demande un document de plus que ce qu'on rendra. Sa
-     * présence dit s'il reste quelque chose après cette page, sans compter quoi
-     * que ce soit. C'est le `has_more` de Stripe et de Wise, et c'est ce qui
-     * permettra au client de paginer sans jamais dépendre d'un total.
-     */
-    /**
-     * Les deux requêtes sont indépendantes : elles partent ensemble. La page
-     * coûte donc un aller-retour, pas deux — c'est ce que faisait déjà la
-     * version précédente, et il n'y a aucune raison de le perdre.
-     *
-     * `total` est conservé : la passerelle relaie le corps tel quel et des
-     * clients déjà installés peuvent le lire. Il est désormais peu coûteux —
-     * la requête étant indexable, le compte se fait sur l'index, sans toucher
-     * aux documents. Il reste toutefois proportionnel au nombre de transactions
-     * de l'utilisateur : c'est `hasMore` qui est la bonne primitive, et c'est
-     * vers elle que les clients doivent migrer. `total` disparaîtra quand plus
-     * personne ne le lira.
-     */
-    const [docs, total] = await Promise.all([
-      Transaction.find(query, LIST_PROJECTION)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit + 1)
-        /**
-         * `.lean()` : Mongo rend des objets simples au lieu de documents
-         * hydratés. Sur une page de cent transactions d'un schéma de plus de
-         * 400 champs, l'hydratation était le poste de CPU dominant, après le
-         * balayage lui-même.
-         *
-         * ⚠️ Conséquence : plus de `toJSON()`, donc plus de retrait automatique
-         * des secrets. C'est `toPublicTransaction` qui s'en charge — la même
-         * fonction que celle branchée sur le `toJSON` du schéma.
-         */
-        .lean(),
-      Transaction.countDocuments(query),
-    ]);
-
-    const hasMore = docs.length > limit;
-    const page = hasMore ? docs.slice(0, limit) : docs;
-
-    return res.json({
-      success: true,
-      count: page.length,
-      total,
-      hasMore,
-      data: page.map(toPublicTransaction),
-      skip,
-      limit,
-    });
-  } catch (err) {
-    next(err);
+  if (missing.length) {
+    throw new Error(
+      `listInternal : la projection ne couvre pas ${missing.join(", ")}. ` +
+        `Tout champ de SECRET_FIELDS doit y figurer.`
+    );
   }
+}
+
+/**
+ * Construit le handler à partir de ses dépendances.
+ *
+ * @param {object}   deps
+ * @param {object}   deps.Transaction  Modèle Mongoose (ou un double de test).
+ * @param {Function} [deps.toPublic]   Sérialiseur de sortie.
+ * @param {string[]} [deps.secretFields] Secrets à vérifier dans la projection.
+ * @param {object}   [deps.projection]
+ * @param {number}   [deps.maxLimit]
+ * @returns {Function} Middleware Express `(req, res, next)`.
+ */
+function createListInternal({
+  Transaction,
+  toPublic = toPublicTransaction,
+  secretFields = require("../../../models/transactionSerializer").SECRET_FIELDS,
+  projection = LIST_PROJECTION,
+  maxLimit = DEFAULT_MAX_LIMIT,
+} = {}) {
+  if (!Transaction) {
+    throw new Error("listInternal : dépendance `Transaction` manquante");
+  }
+
+  if (typeof toPublic !== "function") {
+    throw new Error("listInternal : `toPublic` doit être une fonction");
+  }
+
+  assertNoSecrets(projection, secretFields);
+
+  return async function listInternal(req, res, next) {
+    try {
+      const userId = pickAuthedUserId(req);
+
+      if (!userId) {
+        return res.status(401).json({ success: false, message: "Non autorisé" });
+      }
+
+      const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+      const limit = Math.min(
+        Math.max(parseInt(req.query.limit, 10) || DEFAULT_LIMIT, 1),
+        maxLimit
+      );
+
+      const query = buildOwnershipQuery(Transaction, userId);
+
+      /**
+       * Les deux requêtes sont indépendantes : elles partent ensemble, la page
+       * coûte donc un aller-retour et non deux.
+       *
+       * `limit + 1` demande un document de plus que ce qu'on rendra : sa
+       * présence dit s'il reste quelque chose après cette page, sans rien
+       * compter. C'est le `has_more` de Stripe et de Wise.
+       *
+       * `total` est conservé par compatibilité — la passerelle relaie le corps
+       * tel quel et des clients installés peuvent le lire. Il est désormais peu
+       * coûteux, la requête étant indexable. C'est `hasMore` qui est la bonne
+       * primitive ; `total` disparaîtra quand plus personne ne le lira.
+       */
+      const [docs, total] = await Promise.all([
+        Transaction.find(query, projection)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit + 1)
+          .lean(),
+        Transaction.countDocuments(query),
+      ]);
+
+      const list = Array.isArray(docs) ? docs : [];
+      const hasMore = list.length > limit;
+      const page = hasMore ? list.slice(0, limit) : list;
+
+      return res.json({
+        success: true,
+        count: page.length,
+        total,
+        hasMore,
+        data: page.map(toPublic),
+        skip,
+        limit,
+      });
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Point de composition                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Seul endroit qui connaît les implémentations réelles.
+ *
+ * La composition est **paresseuse et mémoïsée** : `runtime.Transaction` résout
+ * la connexion Mongo au premier accès, et il ne faut donc pas y toucher au
+ * chargement du module — c'est précisément le défaut corrigé ailleurs dans ce
+ * dépôt. Une fois construit, le handler est réutilisé : on ne reconstruit rien
+ * par requête.
+ */
+let _composed = null;
+
+function getHandler() {
+  if (!_composed) {
+    _composed = createListInternal({ Transaction: runtime.Transaction });
+  }
+
+  return _composed;
+}
+
+/** Middleware exposé aux routes. La signature ne change pas. */
+function listInternal(req, res, next) {
+  return getHandler()(req, res, next);
+}
+
+/** Réservé aux tests : force une recomposition. */
+function resetComposition() {
+  _composed = null;
 }
 
 module.exports = {
   listInternal,
-  buildOwnershipQuery,
-  modelHasPath,
-  OWNERSHIP_FIELDS,
+  createListInternal,
+  resetComposition,
+  assertNoSecrets,
   LIST_PROJECTION,
+  DEFAULT_MAX_LIMIT,
+  DEFAULT_LIMIT,
 };

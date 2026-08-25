@@ -24,6 +24,9 @@ const assert = require("node:assert/strict");
  */
 
 const runtime = require("../src/services/transactions/shared/runtime");
+const {
+  createListInternal,
+} = require("../src/services/transactions/handlers/listInternal");
 
 test("la configuration se charge sans .env complet, et n'explose plus au require", () => {
   const config = require("../src/config");
@@ -64,75 +67,239 @@ test("le contrôleur de transactions se charge sans base ni serveur", () => {
   assert.equal(typeof controller.confirmController, "function");
 });
 
-test("les modèles sont substituables — la couture d'injection", async () => {
-  const called = [];
+/* -------------------------------------------------------------------------- */
+/* Injection de dépendances — le motif de référence                           */
+/* -------------------------------------------------------------------------- */
 
-  const fakeTransaction = {
-    find(query) {
-      called.push({ op: "find", query });
+/**
+ * Ces tests n'écrasent AUCUN état global.
+ *
+ * `createListInternal({ Transaction })` reçoit sa dépendance : il n'y a rien à
+ * restaurer, rien qui puisse fuir dans le test suivant, et deux de ces tests
+ * peuvent s'exécuter en parallèle. C'est la différence concrète avec la couture
+ * `overrideModels`, testée plus bas — laquelle reste utile comme outil de
+ * transition pour le code pas encore converti.
+ */
+function fakeTransactionModel({ docs = [], total = 0, calls = [] } = {}) {
+  return {
+    find(query, projection) {
+      calls.push({ op: "find", query, projection });
 
       const chain = {
         sort: () => chain,
         skip: () => chain,
-        limit: () => chain,
-        lean: async () => [
-          { _id: "tx_1", reference: "PN-1", amount: { toString: () => "100" } },
-        ],
+        limit: (n) => {
+          calls.push({ op: "limit", n });
+          return chain;
+        },
+        lean: async () => docs,
       };
 
       return chain;
     },
 
     countDocuments: async (query) => {
-      called.push({ op: "count", query });
-      return 1;
+      calls.push({ op: "count", query });
+      return total;
     },
 
     schema: {
-      path: (name) => (["sender", "receiver", "userId"].includes(name) ? {} : undefined),
+      path: (name) =>
+        ["sender", "receiver", "userId"].includes(name) ? {} : undefined,
+    },
+  };
+}
+
+function fakeRes() {
+  const out = { statusCode: 200, body: null };
+
+  const res = {
+    status(code) {
+      out.statusCode = code;
+      return res;
+    },
+    json(body) {
+      out.body = body;
+      return res;
     },
   };
 
-  runtime.overrideModels({ Transaction: fakeTransaction });
+  return { res, out };
+}
 
-  try {
-    const { listInternal } = require("../src/services/transactions/handlers/listInternal");
-
-    const req = { user: { id: "u1", _id: "u1" }, query: { limit: "10" } };
-
-    let payload = null;
-    const res = {
-      status() {
-        return res;
+test("le handler injecté rend une page, sans aucun état global", async () => {
+  const calls = [];
+  const Transaction = fakeTransactionModel({
+    docs: [
+      {
+        _id: "tx_1",
+        reference: "PN-1",
+        amount: { toString: () => "100" },
+        securityAnswerHash: "SECRET",
+        verificationToken: "SECRET",
       },
-      json(body) {
-        payload = body;
-        return res;
-      },
-    };
+    ],
+    total: 1,
+    calls,
+  });
 
-    await listInternal(req, res, (err) => {
-      throw err;
-    });
+  const handler = createListInternal({ Transaction });
+  const { res, out } = fakeRes();
 
-    assert.equal(payload.success, true);
-    assert.equal(payload.count, 1);
-    assert.equal(payload.total, 1);
-    assert.equal(payload.hasMore, false);
+  await handler({ user: { id: "u1" }, query: { limit: "10" } }, res, (e) => {
+    throw e;
+  });
 
-    // Le secret n'est pas dans la sortie, et l'objet est bien sérialisé.
-    assert.equal(payload.data[0].id, "tx_1");
-    assert.equal(payload.data[0].amount, 100);
-
-    // La requête ne porte que des champs indexés.
-    const findCall = called.find((c) => c.op === "find");
-    assert.deepEqual(findCall.query, {
-      $or: [{ sender: "u1" }, { receiver: "u1" }, { userId: "u1" }],
-    });
-  } finally {
-    runtime.restoreModels();
-  }
+  assert.equal(out.body.success, true);
+  assert.equal(out.body.count, 1);
+  assert.equal(out.body.total, 1);
+  assert.equal(out.body.hasMore, false);
+  assert.equal(out.body.data[0].id, "tx_1");
+  assert.equal(out.body.data[0].amount, 100);
 });
+
+test("aucun secret ne sort, même si la projection était contournée", async () => {
+  // Le faux modèle ignore volontairement la projection et rend les secrets :
+  // c'est le sérialiseur, seconde barrière, qui doit les retirer.
+  const Transaction = fakeTransactionModel({
+    docs: [
+      {
+        _id: "tx_1",
+        securityAnswerHash: "SECRET",
+        verificationToken: "SECRET",
+        securityCode: "123456",
+        attemptCount: 3,
+      },
+    ],
+    total: 1,
+  });
+
+  const handler = createListInternal({ Transaction });
+  const { res, out } = fakeRes();
+
+  await handler({ user: { id: "u1" }, query: {} }, res, (e) => {
+    throw e;
+  });
+
+  const serialized = JSON.stringify(out.body);
+
+  for (const secret of ["securityAnswerHash", "verificationToken", "securityCode"]) {
+    assert.ok(!serialized.includes(secret), `${secret} ne doit jamais sortir`);
+  }
+
+  assert.ok(!serialized.includes("SECRET"));
+});
+
+test("la requête ne porte que des champs indexés", async () => {
+  const calls = [];
+  const Transaction = fakeTransactionModel({ calls });
+
+  await createListInternal({ Transaction })(
+    { user: { id: "u1" }, query: {} },
+    fakeRes().res,
+    (e) => {
+      throw e;
+    }
+  );
+
+  const find = calls.find((c) => c.op === "find");
+
+  assert.deepEqual(find.query, {
+    $or: [{ sender: "u1" }, { receiver: "u1" }, { userId: "u1" }],
+  });
+});
+
+test("hasMore est calculé par limit + 1, sans compter", async () => {
+  const calls = [];
+  const docs = Array.from({ length: 11 }, (_, i) => ({ _id: `tx_${i}` }));
+  const Transaction = fakeTransactionModel({ docs, total: 999, calls });
+
+  const { res, out } = fakeRes();
+
+  await createListInternal({ Transaction })(
+    { user: { id: "u1" }, query: { limit: "10" } },
+    res,
+    (e) => {
+      throw e;
+    }
+  );
+
+  assert.equal(calls.find((c) => c.op === "limit").n, 11);
+  assert.equal(out.body.hasMore, true);
+  assert.equal(out.body.count, 10, "le document sentinelle n'est pas rendu");
+});
+
+test("le plafond de pagination ne peut pas être dépassé", async () => {
+  const Transaction = fakeTransactionModel();
+  const { res, out } = fakeRes();
+
+  await createListInternal({ Transaction })(
+    { user: { id: "u1" }, query: { limit: "100000" } },
+    res,
+    (e) => {
+      throw e;
+    }
+  );
+
+  assert.equal(out.body.limit, 100);
+});
+
+test("un appelant non authentifié reçoit 401", async () => {
+  const Transaction = fakeTransactionModel();
+  const { res, out } = fakeRes();
+
+  await createListInternal({ Transaction })({ query: {} }, res, (e) => {
+    throw e;
+  });
+
+  assert.equal(out.statusCode, 401);
+});
+
+test("une erreur de base part dans next(), jamais dans la réponse", async () => {
+  const Transaction = fakeTransactionModel();
+  Transaction.countDocuments = async () => {
+    throw new Error("cluster indisponible");
+  };
+
+  let caught = null;
+
+  await createListInternal({ Transaction })(
+    { user: { id: "u1" }, query: {} },
+    fakeRes().res,
+    (e) => {
+      caught = e;
+    }
+  );
+
+  assert.equal(caught?.message, "cluster indisponible");
+});
+
+test("les dépendances manquantes sont refusées à la CONSTRUCTION", () => {
+  // Au démarrage du service, pas à la première requête d'un utilisateur.
+  assert.throws(() => createListInternal({}), /Transaction/);
+  assert.throws(
+    () => createListInternal({ Transaction: {}, toPublic: "pas une fonction" }),
+    /toPublic/
+  );
+});
+
+test("une projection qui cesse de couvrir un secret fait échouer le démarrage", () => {
+  // C'est la garantie qui compte : l'oubli se voit au boot, bruyamment, et non
+  // en production sous la forme d'une fuite silencieuse.
+  assert.throws(
+    () =>
+      createListInternal({
+        Transaction: {},
+        projection: { __v: 0 },
+        secretFields: ["securityAnswerHash"],
+      }),
+    /securityAnswerHash/
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/* Couture — outil de transition pour le code pas encore converti             */
+/* -------------------------------------------------------------------------- */
 
 test("restoreModels rend bien la main au modèle réel", () => {
   runtime.overrideModels({ Transaction: { marqueur: "faux" } });
