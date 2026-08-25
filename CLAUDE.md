@@ -163,6 +163,14 @@ Un chemin parallèle complet existe pour le compte de revue Apple : `utils/sandb
 
 [src/services/transactionAutoCancelService.js](src/services/transactionAutoCancelService.js) démarre dans `bootstrap()` après la connexion DB. Il annule les transactions non confirmées passé `TX_AUTO_CANCEL_AFTER_DAYS`, avec verrou distribué (`autoCancelLockAt` + `autoCancelWorkerId` + TTL) pour supporter plusieurs instances. Désactivable via `TX_AUTO_CANCEL_WORKER=false` ; par défaut un échec de démarrage du worker fait échouer le boot (`TX_AUTO_CANCEL_REQUIRED`). Il est arrêté proprement dans le handler `SIGTERM`/`SIGINT`.
 
+### Redis — limitation de débit (2026-08-25)
+
+Architecture complète : [`../.claude/context/redis.md`](../.claude/context/redis.md).
+
+- **Ce service est en `express-rate-limit@6`**, où `passOnStoreError` n'existe pas : une erreur du magasin remonte en **500**. Brancher Redis tel quel aurait fait échouer toutes les requêtes de transaction pendant une coupure du cache. `src/services/resilientStore.js` fournit le repli explicitement (bascule mémoire, période de repos, journalisation étranglée) et ne lève jamais.
+- **TLS uniquement sur `rediss://`.** Le `{ tls: {} }` inconditionnel d'avant forçait la poignée de main même sur `redis://` : elle échouait, le client ne se connectait jamais, et le service tournait avec un magasin inutilisable — sans repli, puisque `RedisStore` était bel et bien construit. La limitation ne comptait donc plus rien.
+- Monter en `express-rate-limit@7` rendrait `resilientStore` inutile. C'est une décision à prendre séparément : c'est le service qui bouge l'argent.
+
 ## Conventions et pièges du dépôt
 
 - **Blocs hérités commentés** : une dizaine de fichiers commencent par une ancienne version intégralement commentée, la version vivante étant plus bas (`server.js` : ~650 lignes ; `routes/transactionsRoutes.js` : le code réel commence ligne ~740 ; aussi `handlers/initiateByFlow.js`, `handlers/cancelTransaction.js`, `handlers/submitExternalExecution.js`, `providers/providerExecutorRegistry.js`, `models/User.js`, `models/LedgerEntry.js`, `controllers/providerWebhook*`, `controllers/cagnotte*`). **Toujours vérifier qu'on édite le bloc actif**, et ne pas supprimer ces blocs sans demande explicite.
