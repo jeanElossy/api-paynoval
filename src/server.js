@@ -536,16 +536,68 @@ const baseRateLimitConfig = {
 };
 
 if (process.env.REDIS_URL && RedisStore && Redis) {
-  redisClient = new Redis(process.env.REDIS_URL, { tls: {} });
+  const redisUrl = String(process.env.REDIS_URL).trim();
+
+  /**
+   * ═══ TROIS RÉGLAGES, TROIS RAISONS ══════════════════════════════════════
+   *
+   * • TLS UNIQUEMENT SUR `rediss://`. Le `{ tls: {} }` inconditionnel d'avant
+   *   forçait une poignée de main TLS même sur une URL `redis://` : elle
+   *   échouait, le client ne se connectait jamais, et le service tournait avec
+   *   un magasin inutilisable — sans repli, puisque `RedisStore` était bel et
+   *   bien construit. La limitation de débit ne comptait donc plus rien.
+   *
+   * • `enableOfflineQueue: false`. Sans cela, une coupure Redis met les
+   *   commandes EN ATTENTE : chaque requête HTTP se bloquerait jusqu'au délai
+   *   de connexion au lieu d'échouer vite.
+   *
+   * • `passOnStoreError: true`. Une panne du compteur ne doit pas arrêter les
+   *   transactions : on laisse passer et on journalise. C'est le choix de
+   *   Stripe — la limitation protège d'un abus, ce n'est pas une règle métier.
+   *
+   * Le préfixe est explicite : ce service n'a qu'un limiteur global
+   * aujourd'hui, mais il partagera le même Redis que la passerelle et le
+   * backend. Sans préfixe, leurs compteurs fusionneraient.
+   */
+  redisClient = new Redis(redisUrl, {
+    enableOfflineQueue: false,
+    maxRetriesPerRequest: 2,
+    connectTimeout: 5000,
+    keepAlive: 30000,
+    ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
+  });
+
+  redisClient.on("error", (err) => {
+    logger.warn(
+      `[rate-limit] Redis indisponible — les requêtes passent sans limitation : ${
+        err?.message || err
+      }`
+    );
+  });
+
+  /**
+   * ⚠️ `passOnStoreError` N'EXISTE PAS EN express-rate-limit v6 (version de ce
+   * service). Une erreur du magasin y remonte en 500 : brancher Redis tel quel
+   * ferait échouer TOUTES les requêtes de transaction pendant une coupure du
+   * cache. Le repli est donc fourni explicitement — voir
+   * `src/services/resilientStore.js`.
+   */
+  const { createResilientStore } = require("./services/resilientStore");
+  const { MemoryStore } = require("express-rate-limit");
 
   globalRateLimiter = rateLimit({
     ...baseRateLimitConfig,
-    store: new RedisStore({
-      sendCommand: (...args) => redisClient.call(...args),
+    store: createResilientStore({
+      primary: new RedisStore({
+        prefix: "rl:tx-core-global:",
+        sendCommand: (...args) => redisClient.call(...args),
+      }),
+      fallback: new MemoryStore(),
+      logger,
     }),
   });
 
-  logger.info("[rate-limit] Redis store activé");
+  logger.info("[rate-limit] magasin Redis partagé actif (rl:tx-core-global:)");
 } else {
   globalRateLimiter = rateLimit(baseRateLimitConfig);
 
