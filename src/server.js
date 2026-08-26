@@ -57,6 +57,20 @@ const {
   resolveRedisConnection,
   diagnoseRedisError,
 } = require("./services/redisUrl");
+
+/**
+ * ⚠️ AU NIVEAU DU MODULE, PAS DANS LE BLOC `if (redisUrl)`.
+ *
+ * `closeOfflineQueueWhenReady` sert à DEUX endroits distincts : le client de
+ * limitation de débit (dans ce bloc) et le client d'abonnement du moteur de
+ * risque (dans `bootstrap()`). Un `const` déclaré dans le premier n'est pas
+ * visible depuis le second — l'erreur ne serait apparue qu'à l'exécution, au
+ * démarrage, en production.
+ */
+const {
+  closeOfflineQueueWhenReady,
+  neutralizeScriptLoadRejections,
+} = require("./services/redisStoreSafety");
 const { createMetrics } = require("./services/metrics");
 const {
   createTxMetrics,
@@ -720,11 +734,6 @@ if (redisConn.url && RedisStore && Redis) {
    * aujourd'hui, mais il partagera le même Redis que la passerelle et le
    * backend. Sans préfixe, leurs compteurs fusionneraient.
    */
-  const {
-    closeOfflineQueueWhenReady,
-    neutralizeScriptLoadRejections,
-  } = require("./services/redisStoreSafety");
-
   redisClient = new Redis(redisUrl, {
     /**
      * ⚠️ `true` AU DÉMARRAGE, `false` DÈS LA CONNEXION ÉTABLIE.
@@ -988,7 +997,40 @@ async function bootstrap() {
 
       if (redisClient && Redis) {
         try {
-          riskSubscriber = redisClient.duplicate();
+          /**
+           * ⚠️ `enableOfflineQueue: true` EST INDISPENSABLE ICI, ET LE DÉFAUT
+           * NE L'AURAIT PAS DONNÉ.
+           *
+           * `duplicate()` recopie `this.options` — y compris la valeur COURANTE
+           * de `enableOfflineQueue`, que `closeOfflineQueueWhenReady` a déjà
+           * remise à `false` sur le client principal une fois connecté. Le
+           * client dupliqué héritait donc d'une file FERMÉE alors que sa propre
+           * poignée de main TLS n'avait pas encore eu lieu — un client dupliqué
+           * ouvre sa PROPRE connexion, mesurée à ~1,2 s sur cette
+           * infrastructure.
+           *
+           * Résultat observé en production le 2026-08-26 :
+           *
+           *     [AML] abonnement à l'invalidation impossible
+           *     (Stream isn't writeable and enableOfflineQueue options is false)
+           *     — la liste noire se rafraîchira par TTL seul.
+           *
+           * La conséquence n'est pas cosmétique : ajouter quelqu'un à la liste
+           * noire ne se propageait plus aux autres instances qu'à l'expiration
+           * du TTL. Une décision de conformité prise à l'instant T ne prenait
+           * effet qu'à T + TTL, sur des instances qui continuaient d'accepter
+           * ses virements.
+           *
+           * On rouvre donc la file pour la durée de la connexion, puis on la
+           * referme — exactement le traitement du client principal.
+           */
+          riskSubscriber = redisClient.duplicate({ enableOfflineQueue: true });
+
+          closeOfflineQueueWhenReady(riskSubscriber, {
+            logger,
+            label: "risk",
+          });
+
           riskSubscriber.on("error", (err) => {
             logger.warn(
               `[risk] abonnement liste noire indisponible : ${err?.message || err}`

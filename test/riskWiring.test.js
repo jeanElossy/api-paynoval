@@ -146,8 +146,18 @@ test("le moteur de risque est amorcé au démarrage, avec un abonné DÉDIÉ", (
   const server = lire("../src/server");
 
   assert.match(server, /initRiskEngine\(/);
-  assert.match(server, /redisClient\.duplicate\(\)/);
   assert.match(server, /redisSubscriber: riskSubscriber/);
+
+  /**
+   * L'ancre a changé le 2026-08-26 : `duplicate()` recopie les options
+   * COURANTES du client principal, dont un `enableOfflineQueue` déjà remis à
+   * `false`. L'abonné héritait donc d'une file fermée avant d'avoir ouvert sa
+   * propre connexion, et l'abonnement échouait à chaque démarrage.
+   *
+   * La propriété testée ici — un client DÉDIÉ, jamais celui de la limitation —
+   * est inchangée. Voir `test/riskSubscriberWiring.test.js`.
+   */
+  assert.match(server, /redisClient\.duplicate\(\{\s*enableOfflineQueue:\s*true\s*\}\)/);
 });
 
 test("un amorçage raté ne bloque PAS le démarrage", () => {
