@@ -74,7 +74,11 @@ const RAILS = Object.freeze([
   { rail: "mobilemoney", provider: "wave",         envPrefix: "WAVE" },
   { rail: "card",        provider: "stripe",       envPrefix: "STRIPE" },
   { rail: "card",        provider: "visa_direct",  envPrefix: "VISA_DIRECT" },
-  { rail: "bank",        provider: "bank_generic", envPrefix: "BANK_GENERIC" },
+  // ⚠️ PAS DE RAIL BANCAIRE. Retiré le 2026-08-26 : le §1 de l'architecture
+  // cible dit qu'il n'y en a aucun et qu'il ne faut en créer un que si cela
+  // devient explicitement nécessaire. PayNoval démarre sur trois rails —
+  // interne, mobile money, cartes — et ce registre ne doit annoncer que ce
+  // qui existe : c'est lui qui décide du journal de démarrage et des 503.
 ]);
 
 /**

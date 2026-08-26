@@ -111,11 +111,6 @@ const {
 } = require("./mobilemoneyExecutor");
 
 const {
-  executeBankPayout,
-  startBankCollection,
-} = require("./bankExecutor");
-
-const {
   executeCardPayout,
   startCardTopup,
 } = require("./cardExecutor");
@@ -158,10 +153,6 @@ function normalizeProvider(provider) {
 
   if (["moov_money", "flooz"].includes(p)) {
     return "moov";
-  }
-
-  if (["banque", "bank_account", "bank_transfer"].includes(p)) {
-    return "bank";
   }
 
   if (["visa", "visa_direct", "visadirect"].includes(p)) {
@@ -223,25 +214,17 @@ function resolveMobileMoneyExecutor(flow, provider) {
   };
 }
 
-function resolveBankExecutor(flow, provider) {
-  if (
-    flow !== FLOWS.PAYNOVAL_TO_BANK_PAYOUT &&
-    flow !== FLOWS.BANK_TRANSFER_TO_PAYNOVAL
-  ) {
-    return null;
-  }
-
-  const resolvedProvider = normalizeProvider(provider) || "bank_generic";
-
-  return {
-    execute:
-      flow === FLOWS.PAYNOVAL_TO_BANK_PAYOUT
-        ? executeBankPayout
-        : startBankCollection,
-    rail: "bank",
-    provider: resolvedProvider,
-  };
-}
+/**
+ * ⚠️ IL N'Y A PLUS DE `resolveBankExecutor`. Rail retiré le 2026-08-26 (§1).
+ *
+ * Les flux `PAYNOVAL_TO_BANK_PAYOUT` et `BANK_TRANSFER_TO_PAYNOVAL` ne
+ * trouvent donc PLUS d'exécuteur : `resolveExecutor` rend `null`, et l'appelant
+ * traite ce `null` comme « aucun rail ne sert ce flux » — un refus, pas une
+ * exécution silencieuse par un autre rail.
+ *
+ * C'est le comportement voulu : mieux vaut une transaction refusée qu'une
+ * transaction exécutée par un chemin que personne n'a choisi.
+ */
 
 function resolveCardExecutor(flow, provider) {
   if (
@@ -281,7 +264,6 @@ function resolveExecutor({ flow, provider } = {}) {
 
   return (
     resolveMobileMoneyExecutor(f, p) ||
-    resolveBankExecutor(f, p) ||
     resolveCardExecutor(f, p) ||
     null
   );

@@ -5,7 +5,22 @@ const orangeAdapter = require("./mobilemoney/orangeAdapter");
 const mtnAdapter = require("./mobilemoney/mtnAdapter");
 const moovAdapter = require("./mobilemoney/moovAdapter");
 
-const bankGenericAdapter = require("./bank/bankGenericAdapter");
+/**
+ * ⚠️ AUCUN ADAPTER BANCAIRE. Le rail « bank » a été RETIRÉ le 2026-08-26.
+ *
+ * Le §1 de l'architecture cible est explicite : il n'y a aucun rail bancaire
+ * direct, et il ne faut en créer un que si cela devient explicitement
+ * nécessaire. Du code bancaire existait pourtant — un adapter générique, un
+ * exécuteur, et un routage. Il contredisait la cible et donnait l'illusion
+ * d'un rail disponible.
+ *
+ * PayNoval démarre sur trois rails, et trois seulement : transferts internes,
+ * mobile money, cartes.
+ *
+ * Ne pas « remettre au cas où » : un rail présent dans le code finit par être
+ * proposé, et un rail proposé sans contrat accepte des ordres que personne
+ * n'exécute — le défaut n°1 de l'audit d'architecture.
+ */
 
 const stripeAdapter = require("./card/stripeAdapter");
 const visaDirectAdapter = require("./card/visaDirectAdapter");
@@ -28,20 +43,6 @@ function getMobileMoneyAdapter(provider) {
       return moovAdapter;
     default:
       throw new Error(`Unsupported mobile money provider: ${provider}`);
-  }
-}
-
-function getBankAdapter(provider) {
-  switch (norm(provider)) {
-    case "bank":
-    case "generic":
-    case "bank_generic":
-    case "bankgeneric":
-    case "bank-transfer":
-    case "bank_transfer":
-      return bankGenericAdapter;
-    default:
-      return bankGenericAdapter;
   }
 }
 
@@ -92,8 +93,18 @@ function getProviderAdapter({ rail, provider }) {
     case "bank":
     case "bank_transfer":
     case "bank-transfer":
-      adapter = getBankAdapter(provider);
-      break;
+      /**
+       * REFUS EXPLICITE, et non un repli silencieux.
+       *
+       * Une transaction héritée peut encore porter ce rail. Elle doit lever
+       * ici, bruyamment, plutôt que d'être routée vers un adapter de
+       * remplacement : router un ordre bancaire vers un autre rail déplacerait
+       * de l'argent par un chemin que personne n'a choisi.
+       */
+      throw new Error(
+        "Le rail bancaire a été retiré de PayNoval (§1) — aucun adapter ne le sert. " +
+          "PayNoval opère sur trois rails : interne, mobile money, cartes."
+      );
 
     case "card":
       adapter = getCardAdapter(provider);
@@ -115,6 +126,6 @@ function getProviderAdapter({ rail, provider }) {
 module.exports = {
   getProviderAdapter,
   getMobileMoneyAdapter,
-  getBankAdapter,
+  // Pas de `getBankAdapter` : le rail bancaire a été retiré le 2026-08-26 (§1).
   getCardAdapter,
 };

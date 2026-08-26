@@ -35,6 +35,23 @@ const FLOWS = [
 const RAILS = [
   "paynoval",
   "stripe",
+  /**
+   * ⚠️ « bank » EST CONSERVÉ ICI, ET SEULEMENT ICI.
+   *
+   * Le rail bancaire a été retiré le 2026-08-26 (§1) : plus d'adapter, plus
+   * d'exécuteur, plus de routage, et `providerSelector` LÈVE si on le demande.
+   * Aucune nouvelle transaction ne peut donc porter ce rail.
+   *
+   * Mais cette liste n'est pas un catalogue d'offre : c'est une VALIDATION.
+   * Retirer la valeur rendrait insauvegardable toute transaction héritée qui
+   * la porte — un document lu, modifié, puis rejeté en validation. Les actions
+   * admin, les remboursements et la réconciliation échoueraient dessus, et
+   * §26 interdit de faire disparaître une écriture financière en silence.
+   *
+   * À retirer UNIQUEMENT après avoir vérifié en production que le compte est
+   * nul, avec `db.transactions.countDocuments({ rail: "bank" })`. Même
+   * vérification pour les flux `*_BANK_*` ci-dessus.
+   */
   "bank",
   "mobilemoney",
   "visa_direct",
