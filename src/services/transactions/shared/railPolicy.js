@@ -67,12 +67,14 @@ const DEFAULT_RESTRICTED_COUNTRIES = [
 const DEFAULT_RESTRICTED_CURRENCIES = ["XOF", "XAF"];
 
 /** Rails refusés à un compte de la zone ci-dessus, en débit comme en réception. */
-const DEFAULT_RESTRICTED_RAILS = ["stripe", "bank"];
+// « bank » retiré le 2026-08-26 : le rail bancaire n'existe plus (§1), il n'y
+// a donc plus rien à restreindre de ce côté.
+const DEFAULT_RESTRICTED_RAILS = ["stripe"];
 
 /**
  * Rails non encore ouverts, quel que soit le pays — le pendant serveur du
  * badge « bientôt disponible ». Vide par défaut : c'est une décision produit,
- * et l'activer sans le dire couperait le rail bancaire pour tout le monde.
+ * et l'activer sans le dire couperait un rail pour tout le monde.
  */
 const DEFAULT_UNAVAILABLE_RAILS = [];
 

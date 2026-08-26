@@ -270,7 +270,6 @@ function normalizeMethodForPricing(body = {}, provider = "") {
   const methodType = String(body.methodType || "").trim().toLowerCase();
 
   if (methodType === "internal") return "INTERNAL";
-  if (methodType === "bank") return "BANK";
   if (methodType === "visa" || methodType === "card") return "VISA";
 
   if (
@@ -330,26 +329,6 @@ function buildRecipientExternalMeta(flow, body = {}) {
     };
   }
 
-  if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT) {
-    return {
-      iban: body.iban || body.beneficiary?.iban || null,
-      swift: body.swift || body.beneficiary?.swift || null,
-      bankName: body.bankName || body.beneficiary?.bankName || null,
-      accountHolder:
-        body.accountHolder ||
-        body.recipientName ||
-        body.beneficiary?.accountHolder ||
-        body.beneficiary?.name ||
-        null,
-      accountNumberLast4: body.accountNumber
-        ? String(body.accountNumber).slice(-4)
-        : body.bankAccountNumber
-        ? String(body.bankAccountNumber).slice(-4)
-        : body.beneficiary?.accountNumber
-        ? String(body.beneficiary.accountNumber).slice(-4)
-        : null,
-    };
-  }
 
     if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
     return {
@@ -382,26 +361,6 @@ function buildRecipientExternalMeta(flow, body = {}) {
     };
   }
 
-  if (flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL) {
-    return {
-      iban: body.iban || body.beneficiary?.iban || null,
-      swift: body.swift || body.beneficiary?.swift || null,
-      bankName: body.bankName || body.beneficiary?.bankName || null,
-      accountHolder:
-        body.accountHolder ||
-        body.senderName ||
-        body.beneficiary?.accountHolder ||
-        body.beneficiary?.name ||
-        null,
-      accountNumberLast4: body.accountNumber
-        ? String(body.accountNumber).slice(-4)
-        : body.bankAccountNumber
-        ? String(body.bankAccountNumber).slice(-4)
-        : body.beneficiary?.accountNumber
-        ? String(body.beneficiary.accountNumber).slice(-4)
-        : null,
-    };
-  }
 
   if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
     return {
@@ -773,8 +732,6 @@ async function initiateOutboundExternal(req, res, next) {
     const destinationValue =
       flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT
         ? "mobilemoney"
-        : flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT
-        ? "bank"
         : "visa_direct";
 
     /**
@@ -1274,8 +1231,6 @@ async function initiateInboundExternal(req, res, next) {
     const fundsValue =
       flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
         ? "mobilemoney"
-        : flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
-        ? "bank"
         : provider === "visa_direct"
         ? "visa_direct"
         : "stripe";

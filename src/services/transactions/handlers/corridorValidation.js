@@ -769,106 +769,17 @@ function validateMobileMoneyRail({
   };
 }
 
-function validateBankRail({
-  body = {},
-  selectedCountry,
-  currency,
-  direction = "target",
-  flow,
-}) {
-  const iban = pickFirst(
-    body.iban,
-    body.recipientInfo?.iban,
-    body.beneficiary?.iban
-  );
+/**
+ * ⚠️ `validateBankRail` A ÉTÉ RETIRÉE le 2026-08-26 avec le rail bancaire (§1).
+ *
+ * Elle validait l'IBAN et le pays du compte bancaire pour les flux
+ * `PAYNOVAL_TO_BANK_PAYOUT` et `BANK_TRANSFER_TO_PAYNOVAL`. Ces flux n'existent
+ * plus : plus aucune demande ne les produit (`flowResolver` côté passerelle),
+ * plus aucun adapter ne les sert, et le modèle ne les accepte plus.
+ *
+ * Les validations de mobile money et de carte restent, évidemment.
+ */
 
-  const bankCountry = pickFirst(
-    direction === "source" ? body.sourceBankCountry : body.bankCountry,
-    body.bankCountry,
-    body.recipientInfo?.bankCountry,
-    body.beneficiary?.bankCountry,
-    body.country
-  );
-
-  const detectedCountry = detectCountryFromIban(iban) || bankCountry;
-
-  if (!detectedCountry) {
-    fail(
-      422,
-      direction === "source"
-        ? "SOURCE_BANK_COUNTRY_UNVERIFIED"
-        : "BANK_COUNTRY_UNVERIFIED",
-      direction === "source"
-        ? "Impossible de vérifier le pays du compte bancaire source."
-        : "Impossible de vérifier le pays du compte bancaire destinataire.",
-      {
-        hasIban: !!iban,
-        bankCountry: bankCountry || null,
-      }
-    );
-  }
-
-  const detectedCountryKey = assertSupportedCountry(detectedCountry, {
-    code: direction === "source"
-      ? "SOURCE_BANK_COUNTRY_NOT_SUPPORTED"
-      : "BANK_COUNTRY_NOT_SUPPORTED",
-  });
-
-  const effectiveCountry = selectedCountry || detectedCountryKey;
-
-  assertSameCountry({
-    selectedCountry: effectiveCountry,
-    detectedCountry: detectedCountryKey,
-    code:
-      direction === "source"
-        ? "SOURCE_BANK_COUNTRY_MISMATCH"
-        : "BANK_COUNTRY_MISMATCH",
-    message:
-      direction === "source"
-        ? "Le compte bancaire source ne correspond pas au pays source sélectionné."
-        : "Le compte bancaire destinataire ne correspond pas au pays sélectionné.",
-  });
-
-  const lockedCurrency = assertCurrencyForCountry({
-    country: detectedCountryKey,
-    currency,
-    code:
-      direction === "source"
-        ? "SOURCE_BANK_CURRENCY_MISMATCH"
-        : "BANK_CURRENCY_MISMATCH",
-  });
-
-  return {
-    country: detectedCountryKey,
-    currency: lockedCurrency || normalizeCurrency(currency),
-    snapshot: buildCorridorSnapshot({
-      flow,
-      rail: direction === "source" ? "bank_source" : "bank",
-      lockedBy: iban ? "iban_country" : "bank_country",
-      sourceCountry:
-        direction === "source"
-          ? detectedCountryKey
-          : body.fromCountry || body.sourceCountry || body.country,
-      targetCountry:
-        direction === "source"
-          ? body.toCountry || body.targetCountry || body.destinationCountry || body.country
-          : detectedCountryKey,
-      sourceCurrency:
-        direction === "source"
-          ? lockedCurrency || currency
-          : body.currencySource || body.senderCurrencyCode,
-      targetCurrency:
-        direction === "source"
-          ? body.currencyTarget || body.localCurrencyCode
-          : lockedCurrency || currency,
-      extra: {
-        bankCountry: detectedCountryKey,
-        hasIban: !!iban,
-        direction,
-      },
-    }),
-  };
-}
 
 function validateCardRail({
   body = {},
@@ -1044,14 +955,6 @@ function validateOutboundExternalCorridor({
       direction: "target",
       flow,
     });
-  } else if (flow === "PAYNOVAL_TO_BANK_PAYOUT" || destination === "bank") {
-    target = validateBankRail({
-      body,
-      selectedCountry: toCountry,
-      currency: currencyTarget,
-      direction: "target",
-      flow,
-    });
   } else if (flow === "PAYNOVAL_TO_CARD_PAYOUT" || destination === "card") {
     target = validateCardRail({
       body,
@@ -1115,14 +1018,6 @@ function validateInboundExternalCorridor({
 
   if (flow === "MOBILEMONEY_COLLECTION_TO_PAYNOVAL") {
     source = validateMobileMoneyRail({
-      body,
-      selectedCountry: fromCountry,
-      currency: currencySource,
-      direction: "source",
-      flow,
-    });
-  } else if (flow === "BANK_TRANSFER_TO_PAYNOVAL") {
-    source = validateBankRail({
       body,
       selectedCountry: fromCountry,
       currency: currencySource,

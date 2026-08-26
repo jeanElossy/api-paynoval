@@ -278,10 +278,8 @@ async function checkProviderVerdicts({ sinceHours, limit, delays, now }) {
 
 const EXTERNAL_FLOWS = Object.freeze([
   "PAYNOVAL_TO_MOBILEMONEY_PAYOUT",
-  "PAYNOVAL_TO_BANK_PAYOUT",
   "PAYNOVAL_TO_CARD_PAYOUT",
   "MOBILEMONEY_COLLECTION_TO_PAYNOVAL",
-  "BANK_TRANSFER_TO_PAYNOVAL",
   "CARD_TOPUP_TO_PAYNOVAL",
 ]);
 

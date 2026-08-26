@@ -22,8 +22,6 @@ const VALID_FLOWS = new Set([
   "PAYNOVAL_INTERNAL_TRANSFER",
   "MOBILEMONEY_COLLECTION_TO_PAYNOVAL",
   "PAYNOVAL_TO_MOBILEMONEY_PAYOUT",
-  "BANK_TRANSFER_TO_PAYNOVAL",
-  "PAYNOVAL_TO_BANK_PAYOUT",
   "CARD_TOPUP_TO_PAYNOVAL",
   "PAYNOVAL_TO_CARD_PAYOUT",
   "UNKNOWN_FLOW",
@@ -32,7 +30,6 @@ const VALID_FLOWS = new Set([
 const VALID_RAILS = new Set([
   "paynoval",
   "stripe",
-  "bank",
   "mobilemoney",
   "visa_direct",
   "stripe2momo",
@@ -62,7 +59,6 @@ function normalizeRail(value, fallback = "paynoval") {
   if (mapped === "card") return fallback === "visa_direct" ? "visa_direct" : "stripe";
   if (mapped === "visa" || mapped === "visadirect") return "visa_direct";
   if (mapped === "momo" || mapped === "mobile_money") return "mobilemoney";
-  if (mapped === "bank_transfer" || mapped === "banque") return "bank";
   if (mapped === "sandbox") return fallback;
 
   return VALID_RAILS.has(mapped) ? mapped : fallback;
@@ -428,7 +424,6 @@ function resolveDestinationRail(body = {}, flowInfo) {
 
     if (destination === "card") return "visa_direct";
     if (destination === "mobilemoney" || destination === "mobile_money") return "mobilemoney";
-    if (destination === "bank" || destination === "bank_transfer") return "bank";
 
     return normalizeRail(destination, "mobilemoney");
   }

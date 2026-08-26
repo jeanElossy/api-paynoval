@@ -88,21 +88,32 @@ test("aucun flux bancaire ne trouve d'exécuteur", () => {
   }
 });
 
-test("« bank » RESTE dans l'énumération du modèle — et c'est délibéré", () => {
+test("aucune trace du rail bancaire dans le modèle Transaction", () => {
   /**
-   * Cette liste n'est pas un catalogue d'offre, c'est une VALIDATION. Retirer
-   * la valeur rendrait insauvegardable toute transaction héritée qui la porte :
-   * document lu, modifié, puis rejeté en validation. Les actions admin, les
-   * remboursements et la réconciliation échoueraient dessus — et le §26
-   * interdit de faire disparaître une écriture financière en silence.
+   * L'énumération avait d'abord été CONSERVÉE, par précaution : retirer une
+   * valeur d'une liste de validation rend insauvegardable tout document
+   * hérité qui la porte, et le §26 interdit de faire disparaître une écriture
+   * financière en silence.
    *
-   * Ce test existe pour que la conservation soit un CHOIX visible, et non un
-   * oubli que quelqu'un « nettoiera » sans mesurer la conséquence.
+   * L'utilisateur a confirmé le 2026-08-26 qu'aucune transaction bancaire
+   * n'existe en base. La précaution n'avait donc plus d'objet et la valeur a
+   * été retirée.
    *
-   * À retirer seulement après avoir vérifié en production que
-   * `db.transactions.countDocuments({ rail: "bank" })` rend 0.
+   * Si une transaction bancaire héritée réapparaissait un jour, le symptôme
+   * serait une erreur de validation Mongoose à la sauvegarde — bruyante, donc
+   * diagnosticable. C'est le bon mode de défaillance.
    */
   const src = fs.readFileSync(path.join(SRC, "models", "Transaction.js"), "utf8");
-  assert.ok(src.includes('"bank"'), "la valeur héritée doit rester valide");
-  assert.match(src, /countDocuments\(\{ rail: "bank" \}\)/, "la condition de retrait doit être écrite");
+  assert.ok(!/"bank"/.test(src), "aucun rail `bank`");
+  assert.ok(!/BANK_TRANSFER_TO_PAYNOVAL/.test(src), "aucun flux entrant bancaire");
+  assert.ok(!/PAYNOVAL_TO_BANK_PAYOUT/.test(src), "aucun flux sortant bancaire");
+});
+
+test("les rails offerts restent intacts", () => {
+  // Une garde qui emporterait les rails réels serait pire que le défaut
+  // qu'elle corrige.
+  const src = fs.readFileSync(path.join(SRC, "models", "Transaction.js"), "utf8");
+  for (const rail of ["paynoval", "mobilemoney", "visa_direct", "stripe"]) {
+    assert.ok(src.includes(`"${rail}"`), `le rail ${rail} doit rester`);
+  }
 });

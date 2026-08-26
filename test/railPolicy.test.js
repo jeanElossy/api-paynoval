@@ -46,10 +46,13 @@ test("un compte ivoirien ne peut pas débiter par stripe", () => {
 test("la devise suffit, même sans pays renseigné", () => {
   // Un compte dont la devise est XOF opère dans la zone même si le pays est
   // absent ou mal saisi — c'est la règle du mobile, et elle est la bonne.
+  // « stripe » et non « bank » : le rail bancaire a été retiré le 2026-08-26,
+  // il n'est donc plus restreint — il n'existe plus. La propriété testée est
+  // inchangée : la DEVISE suffit à situer le compte dans la zone.
   const verdict = evaluateRailPolicy({
     currency: "XOF",
     funds: "paynoval",
-    destination: "bank",
+    destination: "stripe",
     env: ENV,
   });
 
@@ -172,14 +175,14 @@ test("la liste de pays se pilote par variable d'environnement", () => {
 });
 
 test("les rails indisponibles sont vides par défaut", () => {
-  // Activer le blocage « bientôt disponible » couperait le rail bancaire pour
-  // tout le monde : c'est une décision produit, pas un défaut.
+  // Activer le blocage « bientôt disponible » couperait un rail pour tout le
+  // monde : c'est une décision produit, pas un défaut.
   assert.deepEqual(loadPolicy(ENV).unavailableRails, []);
 
-  const env = { RAIL_POLICY_UNAVAILABLE_RAILS: "bank" };
+  const env = { RAIL_POLICY_UNAVAILABLE_RAILS: "mobilemoney" };
   const verdict = evaluateRailPolicy({
     country: "France",
-    destination: "bank",
+    destination: "mobilemoney",
     env,
   });
 
