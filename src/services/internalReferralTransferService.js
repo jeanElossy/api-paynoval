@@ -203,6 +203,31 @@ async function writeReferralLedgerEntries({
      échouer le démarrage dès que ce service est chargé avant
      `connectTransactionsDB()`. On le requiert donc ici, à l'usage — c'est le
      piège documenté dans le CLAUDE.md du dépôt. */
+  /**
+   * ⚠️ CE SERVICE RESTE EN PARTIE SIMPLE, ET C'EST UNE DÉCISION, PAS UN OUBLI.
+   *
+   * Le reste du grand livre est passé en partie double le 2026-08-26
+   * (`services/ledger/doubleEntry.js`). Ce service en est délibérément exclu
+   * pour une raison précise : ses deux jambes sont écrites **conditionnellement
+   * et indépendamment** — chacune n'est posée que si aucune entrée de même
+   * `reference` et même `accountId` n'existe déjà (voir les `already.has(...)`
+   * plus bas). C'est sa garde de rejeu, et elle fonctionne.
+   *
+   * `postDoubleEntry` écrit un LOT équilibré ou rien. L'y brancher tel quel
+   * casserait le rejeu partiel : un versement dont seule la jambe trésorerie
+   * aurait été écrite ne pourrait plus être complété. Or il s'agit de bonus de
+   * parrainage DÉJÀ VERSÉS — le registre `ReferralPayout` n'expire jamais,
+   * précisément parce qu'il protège de l'argent réel.
+   *
+   * S'y ajoute que les deux jambes sont dans des devises potentiellement
+   * DIFFÉRENTES (bonus converti) : elles ne s'équilibrent pas entre elles, et il
+   * faudrait passer par la compensation comme le fait `creditRevenueLineToTreasury`.
+   *
+   * Conséquence assumée : ces écritures ne portent PAS `metadata.ledgerVersion`,
+   * donc `computeTrialBalance()` les ignore. La balance de vérification ne
+   * couvre pas encore le parrainage — c'est un chantier à part, à mener avec sa
+   * propre recette parce qu'il touche à un mécanisme de rejeu éprouvé.
+   */
   const { createLedgerEntry } = require("./ledgerService");
 
   const LedgerEntry = LedgerEntryModel(getTxConn());

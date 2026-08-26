@@ -887,7 +887,33 @@ async function initiateOutboundExternal(req, res, next) {
             metadata: txMetadata,
             meta: txMeta,
 
-            status: "pending",
+            /**
+             * ⚠️ ÉTAT INITIAL DÉCIDÉ PAR LE SCORE DE RISQUE.
+             *
+             * `amlMiddleware` s'exécute AVANT que la transaction existe : il ne
+             * peut pas poser d'état, il pose son verdict sur `req.riskVerdict`.
+             * C'est ici qu'il s'applique.
+             *
+             * `pending_review` n'est PAS un refus. Les fonds sont réservés
+             * exactement comme pour un `pending` — indispensable : laisser le
+             * solde disponible pendant la revue permettrait de le dépenser
+             * ailleurs, et la transaction deviendrait impayable au moment de sa
+             * validation. Seule la CONFIRMATION attend un opérateur.
+             *
+             * Sur un rail EXTERNE, la conséquence est plus forte encore :
+             * aucune exécution prestataire ne part tant que l'état n'est pas
+             * confirmé. La revue arrête donc l'argent AVANT qu'il ne quitte la
+             * plateforme, ce qu'un contrôle après coup ne peut plus faire.
+             */
+            status:
+              req?.riskVerdict?.band === "review" ? "pending_review" : "pending",
+            riskScore:
+              typeof req?.riskVerdict?.score === "number"
+                ? req.riskVerdict.score
+                : null,
+            riskReasons: Array.isArray(req?.riskVerdict?.reasons)
+              ? req.riskVerdict.reasons
+              : null,
             providerReference: pickExternalRef(body),
             providerStatus: "PENDING_USER_CONFIRMATION",
 

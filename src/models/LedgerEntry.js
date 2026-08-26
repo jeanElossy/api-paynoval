@@ -106,6 +106,21 @@ const ledgerEntrySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: null,
     },
+
+    /**
+     * Clé de déduplication — voir `services/ledger/doubleEntry.js`.
+     *
+     * `default: undefined` est ESSENTIEL : avec `default: null`, Mongoose
+     * écrirait le champ sur toutes les écritures qui n'en ont pas, et l'index
+     * partiel ci-dessous — comme tout index unique — traiterait ces `null`
+     * comme une valeur. La première écriture sans portée passerait, la seconde
+     * serait refusée. Le champ doit être ABSENT, pas vide.
+     */
+    dedupKey: {
+      type: String,
+      default: undefined,
+      trim: true,
+    },
   },
   {
     timestamps: true,
@@ -124,10 +139,95 @@ ledgerEntrySchema.index(
   { unique: false }
 );
 
+/**
+ * ============================================================================
+ * L'INDEX UNIQUE DE DÉDUPLICATION N'EST PAS DÉCLARÉ ICI — C'EST VOULU
+ * ============================================================================
+ *
+ * Il vit dans `scripts/ensure-ledger-indexes.js`, sous le nom
+ * `dedupKey_unique_partial`, et se crée à la main.
+ *
+ * `autoIndex` n'est pas désactivé sur cette connexion : déclarer l'index au
+ * schéma le ferait construire au prochain démarrage, sur la première instance
+ * qui démarre, sans qu'on choisisse ni le moment ni la machine. C'est la
+ * politique déjà retenue pour les quatre autres index de `ledgerentries`, et
+ * elle vaut doublement pour un index UNIQUE : si sa construction échoue, elle
+ * échoue en silence sur un événement de connexion que personne ne lit — et le
+ * schéma affiche alors une garantie que la base ne porte pas.
+ *
+ * ⚠️ ORDRE DE MISE EN SERVICE. Créer l'index AVANT (ou avec) le déploiement qui
+ * commence à écrire `dedupKey`. Dans l'autre sens, un doublon écrit entre les
+ * deux ferait échouer la construction — et la protection resterait absente
+ * précisément parce qu'elle a déjà été prise en défaut.
+ */
+
 ledgerEntrySchema.pre("validate", function (next) {
   this.currency = normCurrency(this.currency);
   next();
 });
+
+/**
+ * ============================================================================
+ * IMMUABILITÉ — UNE ÉCRITURE PASSÉE NE SE MODIFIE PAS
+ * ============================================================================
+ *
+ * Rien n'empêchait un `findOneAndUpdate` sur une écriture déjà enregistrée. Le
+ * grand livre est pourtant la SOURCE DE VÉRITÉ financière : une ligne modifiée
+ * après coup rend tout l'historique invérifiable, et la modification ne laisse
+ * aucune trace.
+ *
+ * La règle comptable est universelle et ne souffre pas d'exception : pour
+ * corriger, on écrit une CONTRE-ÉCRITURE (`REVERSAL`, `ADJUSTMENT`,
+ * `REFUND`) — jamais on ne réécrit l'originale. Les primitives correspondantes
+ * existent déjà dans `ledgerService.js`.
+ *
+ * ⚠️ CES GARDES NE COUVRENT PAS `updateOne`/`updateMany` APPELÉS SUR LE MODÈLE
+ * avec un filtre ne portant pas sur un document chargé — Mongoose ne peut pas
+ * les intercepter de façon fiable. Elles ferment le chemin ORDINAIRE (charger,
+ * muter, sauvegarder), qui est celui par lequel la faute arrive réellement.
+ * Un contournement délibéré reste possible ; c'est le propre d'une garde
+ * applicative, et c'est pourquoi elle est doublée par la balance de
+ * vérification (`services/ledger/doubleEntry.js`).
+ */
+function refuseMutation(next) {
+  const err = new Error(
+    "Une écriture du grand livre est IMMUABLE. Pour corriger, écrire une " +
+      "contre-écriture (REVERSAL / ADJUSTMENT / REFUND) — jamais modifier " +
+      "l'originale."
+  );
+  err.code = "LEDGER_ENTRY_IMMUTABLE";
+  err.status = 500;
+  return next(err);
+}
+
+ledgerEntrySchema.pre("save", function (next) {
+  // `isNew` distingue la création — seule écriture autorisée — de la mutation.
+  if (this.isNew) return next();
+  return refuseMutation(next);
+});
+
+for (const op of ["updateOne", "findOneAndUpdate", "replaceOne"]) {
+  ledgerEntrySchema.pre(op, function (next) {
+    return refuseMutation(next);
+  });
+}
+
+/**
+ * La SUPPRESSION est refusée pour la même raison, et elle est pire : une
+ * modification laisse au moins une trace dans `updatedAt`, une suppression ne
+ * laisse rien du tout.
+ */
+for (const op of ["deleteOne", "deleteMany", "findOneAndDelete"]) {
+  ledgerEntrySchema.pre(op, function (next) {
+    const err = new Error(
+      "Une écriture du grand livre ne se SUPPRIME pas. Utiliser une " +
+        "contre-écriture."
+    );
+    err.code = "LEDGER_ENTRY_IMMUTABLE";
+    err.status = 500;
+    return next(err);
+  });
+}
 
 ledgerEntrySchema.set("toJSON", {
   transform(_doc, ret) {

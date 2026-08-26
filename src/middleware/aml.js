@@ -7,7 +7,6 @@ const {
   logTransaction,
   getUserTransactionsStats,
   getPEPOrSanctionedStatus,
-  getMLScore,
   getBusinessKYBStatus,
 } = require("../services/aml");
 
@@ -22,6 +21,12 @@ const {
   getDailyLimit,
   getSingleTxLimit,
 } = require("../tools/amlLimits");
+
+/**
+ * Moteur de risque : liste noire dynamique, vélocité Redis, score déterministe.
+ * Voir `services/risk/index.js` — tout y est paresseux et rien n'y lève.
+ */
+const riskEngine = require("../services/risk");
 
 const RISKY_COUNTRIES_ISO = new Set([
   "IR",
@@ -112,6 +117,22 @@ function makeSet(list, normalizer) {
   return new Set(toArrayOfStrings(list).map(normalizer).filter(Boolean));
 }
 
+/**
+ * ============================================================================
+ * ⚠️ `BLACKLIST` N'EST PLUS LA SOURCE DE VÉRITÉ — VOIR `services/risk/`
+ * ============================================================================
+ *
+ * Ces ensembles étaient construits UNE FOIS, au chargement du module, depuis
+ * `aml/blacklist.json`. Inscrire un compte frauduleux exigeait donc un commit
+ * et un déploiement ; `require` mettait le fichier en cache, si bien que le
+ * réécrire sur le disque ne changeait rien ; et à plusieurs instances chacune
+ * gardait sa copie figée à l'instant de son démarrage.
+ *
+ * Ils sont CONSERVÉS comme repli : `riskEngine.blacklist()` rend un magasin
+ * inerte tant que `initRiskEngine()` n'a pas tourné (tests, scripts, démarrage
+ * partiel). Dans ce cas la liste statique continue de s'appliquer — jamais
+ * moins de protection qu'avant ce chantier.
+ */
 const blacklistRaw = loadBlacklist();
 
 const BLACKLIST = {
@@ -570,6 +591,20 @@ function buildEffectiveAmlUser(req) {
   };
 }
 
+/**
+ * Âge du compte en jours, ou `null` si la date de création est absente.
+ *
+ * `null` et non `0` : « je ne sais pas » et « créé aujourd'hui » sont deux
+ * choses différentes, et le score les traite différemment — le second est un
+ * signal de risque, le premier une incertitude.
+ */
+function accountAgeInDays(user) {
+  const created = user?.createdAt ? new Date(user.createdAt).getTime() : null;
+  if (!created || Number.isNaN(created)) return null;
+
+  return Math.max(0, Math.floor((Date.now() - created) / 86400000));
+}
+
 function findBlacklistHit({
   user,
   toEmail,
@@ -584,30 +619,40 @@ function findBlacklistHit({
   const phone = normalizePhone(phoneNumber);
   const country = String(destinationCountryISO || "").trim().toUpperCase();
 
-  if (userId && BLACKLIST.userIds.has(userId)) {
+  /**
+   * Deux sources, réunies par un OU : le magasin dynamique (base + pub/sub) et
+   * les ensembles statiques hérités. Jamais une intersection — une entrée
+   * présente d'un seul côté doit bloquer, sinon la migration d'un système vers
+   * l'autre ouvrirait une fenêtre pendant laquelle les deux se neutralisent.
+   */
+  const store = riskEngine.blacklist();
+  const listed = (type, value, set, normalized) =>
+    Boolean(value) && (store.has(type, value) || set.has(normalized));
+
+  if (listed("userId", userId, BLACKLIST.userIds, userId)) {
     return { blocked: true, code: "BLACKLISTED_USER", field: "userId" };
   }
 
-  if (email && BLACKLIST.emails.has(email)) {
+  if (listed("email", email, BLACKLIST.emails, email)) {
     return { blocked: true, code: "BLACKLISTED_EMAIL", field: "email" };
   }
 
-  if (normIban && BLACKLIST.ibans.has(normIban)) {
+  if (listed("iban", normIban, BLACKLIST.ibans, normIban)) {
     return { blocked: true, code: "BLACKLISTED_IBAN", field: "iban" };
   }
 
-  if (phone && BLACKLIST.phones.has(phone)) {
+  if (listed("phone", phone, BLACKLIST.phones, phone)) {
     return { blocked: true, code: "BLACKLISTED_PHONE", field: "phone" };
   }
 
-  if (country && BLACKLIST.countries.has(country)) {
+  if (listed("country", country, BLACKLIST.countries, country)) {
     return { blocked: true, code: "BLACKLISTED_COUNTRY", field: "country" };
   }
 
   for (const name of names || []) {
     const normalizedName = normalizeName(name);
 
-    if (normalizedName && BLACKLIST.names.has(normalizedName)) {
+    if (listed("name", normalizedName, BLACKLIST.names, normalizedName)) {
       return { blocked: true, code: "BLACKLISTED_NAME", field: "name" };
     }
   }
@@ -615,7 +660,7 @@ function findBlacklistHit({
   const senderEmail = normalizeEmail(user?.email);
   const senderPhone = normalizePhone(user?.phone || user?.phoneNumber);
 
-  if (senderEmail && BLACKLIST.emails.has(senderEmail)) {
+  if (listed("email", senderEmail, BLACKLIST.emails, senderEmail)) {
     return {
       blocked: true,
       code: "BLACKLISTED_SENDER_EMAIL",
@@ -623,7 +668,7 @@ function findBlacklistHit({
     };
   }
 
-  if (senderPhone && BLACKLIST.phones.has(senderPhone)) {
+  if (listed("phone", senderPhone, BLACKLIST.phones, senderPhone)) {
     return {
       blocked: true,
       code: "BLACKLISTED_SENDER_PHONE",
@@ -1223,46 +1268,132 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    if (typeof getMLScore === "function") {
-      const score = await getMLScore(body, user);
+    /* ========================================================================
+     * SCORE DE RISQUE — DÉTERMINISTE, ET UNE ISSUE QUI N'EXISTAIT PAS
+     * ========================================================================
+     *
+     * Ce bloc appelait `getMLScore`, qui renvoyait `Math.random() * 0.4`, et
+     * bloquait en 403 au-delà de 0.9. Deux défauts imbriqués :
+     *
+     *   - le tirage plafonnait à 0.4 : la branche « aléatoire » ne bloquait
+     *     JAMAIS. Le seul signal réel était « montant au-dessus de la limite »,
+     *     qui renvoyait 0.92 en dur ;
+     *   - il n'y avait que DEUX issues : passer, ou refuser sèchement. Un 403
+     *     dit « non » à un client légitime sans recours, sans explication, et
+     *     sans laisser de dossier qu'un opérateur puisse reprendre.
+     *
+     * Désormais trois bandes, et chaque point de score NOMME son motif :
+     *
+     *   allow  → on continue ;
+     *   review → la transaction est CRÉÉE, en `pending_review`. C'est le
+     *            handler qui applique l'état : ce middleware s'exécute avant
+     *            que la transaction existe, il pose donc son verdict sur `req` ;
+     *   block  → refus, réservé aux signaux DURS (liste noire, sanction).
+     */
+    const velocityCounters = await riskEngine
+      .velocity()
+      .read({ userId, destination: toEmail || phoneNumber || iban || null });
 
-      if (score && score >= 0.9) {
-        logger.warn("[AML] ML scoring élevé", {
-          user: user.email,
-          score,
-        });
+    const riskVerdict = riskEngine.computeRiskScore({
+      amount,
+      singleTxLimit: getSingleTxLimit(provider, currencyCode),
+      velocity: velocityCounters,
+      stats: stats || null,
+      accountAgeDays: accountAgeInDays(user),
+      isNewBeneficiary: false,
+      kycLevel: user?.kycLevel,
+      // Les signaux durs ont déjà rendu la main plus haut : s'ils sont encore
+      // là, c'est qu'ils sont négatifs.
+      sanctioned: false,
+      blacklistHit: null,
+    });
 
-        await logTransaction({
-          userId,
-          type: "initiate",
-          provider,
-          amount,
-          currency: currencyCode,
-          toEmail,
-          details: maskSensitive(body),
-          flagged: true,
-          flagReason: "Scoring ML élevé",
-          ip: req.ip,
-        });
+    const riskExplanation = riskEngine.explainRisk(riskVerdict);
 
-        await safeSendFraudAlert({
-          user,
-          type: "ml_suspect",
-          provider,
-          score,
-        });
+    /**
+     * Le verdict voyage sur `req` : le handler `/initiate` en a besoin pour
+     * décider de l'état initial, et le dossier de revue pour être lisible.
+     */
+    req.riskVerdict = riskVerdict;
 
-        return res.status(403).json({
-          success: false,
-          error:
-            "Transaction bloquée pour vérification supplémentaire (sécurité renforcée).",
-          code: "AML_ML_BLOCK",
-          details: {
-            score,
-          },
-        });
-      }
+    if (riskVerdict.band === "block") {
+      logger.warn("[AML] risque BLOQUANT", {
+        user: user.email,
+        score: riskVerdict.score,
+        motifs: riskExplanation,
+      });
+
+      await logTransaction({
+        userId,
+        type: "initiate",
+        provider,
+        amount,
+        currency: currencyCode,
+        toEmail,
+        details: maskSensitive(body),
+        flagged: true,
+        flagReason: `Risque bloquant : ${riskExplanation}`,
+        ip: req.ip,
+      });
+
+      await safeSendFraudAlert({
+        user,
+        type: "risk_block",
+        provider,
+        score: riskVerdict.score,
+      });
+
+      return res.status(403).json({
+        success: false,
+        error:
+          "Transaction bloquée pour vérification supplémentaire (sécurité renforcée).",
+        code: "AML_RISK_BLOCK",
+        details: { score: riskVerdict.score },
+      });
     }
+
+    if (riskVerdict.band === "review") {
+      /**
+       * ⚠️ ON NE REFUSE PAS. La transaction sera créée en `pending_review` par
+       * le handler. Le client voit un virement « en cours de vérification »
+       * plutôt qu'un refus sec, et un opérateur dispose d'un dossier motivé.
+       *
+       * Le journal AML est écrit ICI, marqué `flagged`, pour que la file de
+       * revue existe même si la création échoue plus loin.
+       */
+      logger.warn("[AML] risque -> REVUE MANUELLE", {
+        user: user.email,
+        score: riskVerdict.score,
+        motifs: riskExplanation,
+      });
+
+      await logTransaction({
+        userId,
+        type: "initiate",
+        provider,
+        amount,
+        currency: currencyCode,
+        toEmail,
+        details: maskSensitive(body),
+        flagged: true,
+        flagReason: `Revue manuelle : ${riskExplanation}`,
+        ip: req.ip,
+      });
+    }
+
+    /**
+     * Enregistrement de la vélocité — APRÈS les contrôles, et sans attendre son
+     * résultat : perdre un compteur dégrade un signal futur, faire échouer ce
+     * virement-ci serait bien pire.
+     */
+    riskEngine
+      .velocity()
+      .record({
+        userId,
+        amount,
+        destination: toEmail || phoneNumber || iban || null,
+      })
+      .catch(() => {});
 
     await logTransaction({
       userId,

@@ -10,6 +10,8 @@ const bankGenericAdapter = require("./bank/bankGenericAdapter");
 const stripeAdapter = require("./card/stripeAdapter");
 const visaDirectAdapter = require("./card/visaDirectAdapter");
 
+const { getTxMetrics } = require("../services/txMetrics");
+
 function norm(v) {
   return String(v || "").trim().toLowerCase();
 }
@@ -56,24 +58,58 @@ function getCardAdapter(provider) {
   }
 }
 
+/**
+ * Résout l'adapter d'un couple {rail, prestataire}.
+ *
+ * ═══ POINT UNIQUE D'INSTRUMENTATION ══════════════════════════════════════
+ *
+ * Tout appel prestataire réel passe par ici. C'est ce qui permet de mesurer la
+ * latence et le taux d'erreur des prestataires en enveloppant **un seul**
+ * endroit, plutôt que sept adapters atteints par cinq exécuteurs et plusieurs
+ * chemins (confirmation, webhook, relance administrative).
+ *
+ * Instrumenter les sites d'appel garantirait d'en oublier un — et un chemin non
+ * mesuré est pire qu'aucune mesure : il fausse les moyennes sans se signaler.
+ *
+ * ⚠️ L'enveloppe mesure et relaie, elle ne change rien : la valeur de retour est
+ * rendue telle quelle, une exception est comptée puis relancée. Tant que
+ * `server.js` n'a pas posé l'instance de métriques, `instrumentAdapter` est
+ * l'identité — les appels fonctionnent exactement comme avant, simplement non
+ * mesurés. Voir `services/txMetrics.js`.
+ */
 function getProviderAdapter({ rail, provider }) {
-  switch (norm(rail)) {
+  const normalizedRail = norm(rail);
+
+  let adapter;
+
+  switch (normalizedRail) {
     case "mobilemoney":
     case "mobile_money":
     case "mobile-money":
-      return getMobileMoneyAdapter(provider);
+      adapter = getMobileMoneyAdapter(provider);
+      break;
 
     case "bank":
     case "bank_transfer":
     case "bank-transfer":
-      return getBankAdapter(provider);
+      adapter = getBankAdapter(provider);
+      break;
 
     case "card":
-      return getCardAdapter(provider);
+      adapter = getCardAdapter(provider);
+      break;
 
     default:
       throw new Error(`Unsupported rail: ${rail}`);
   }
+
+  return getTxMetrics().instrumentAdapter(adapter, {
+    rail: normalizedRail,
+    // `adapter.provider` est le nom CANONIQUE ("visa_direct"), là où l'argument
+    // peut être un alias ("visa-direct"). Étiqueter avec l'alias créerait deux
+    // séries pour un même prestataire.
+    provider: adapter?.provider || provider,
+  });
 }
 
 module.exports = {

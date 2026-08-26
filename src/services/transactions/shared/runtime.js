@@ -23,6 +23,9 @@ const { normCur } = require("../../../utils/currency");
 const generateTransactionRef = require("../../../utils/generateRef");
 const { commitWithRetry } = require("../../../utils/commitWithRetry");
 const {
+  canUseSharedSession: sharedCanUseSession,
+} = require("../../../utils/sharedSession");
+const {
   runWithTransaction,
   isTransactionLevelError,
 } = require("../../../utils/transactionRunner");
@@ -255,23 +258,16 @@ function getLedgerEntryModel() {
   return _LedgerEntry;
 }
 
-function sameMongoClient(connA, connB) {
-  try {
-    const a = connA?.getClient?.();
-    const b = connB?.getClient?.();
-
-    return !!a && !!b && a === b;
-  } catch {
-    return false;
-  }
-}
-
+/**
+ * Le prédicat vit dans `utils/sharedSession.js`, en un seul exemplaire.
+ *
+ * Il en existait une seconde définition dans `services/ledgerService.js`, plus
+ * permissive — elle acceptait une session sans transaction —, ce qui faisait
+ * partir les écritures du grand livre dans un régime différent de celui de la
+ * transaction elle-même. Voir l'en-tête de ce module.
+ */
 function canUseSharedSession() {
-  try {
-    return sameMongoClient(getUsersConnectionSafe(), getTxConnectionSafe());
-  } catch {
-    return false;
-  }
+  return sharedCanUseSession(getUsersConnectionSafe, getTxConnectionSafe);
 }
 
 async function startTxSession() {

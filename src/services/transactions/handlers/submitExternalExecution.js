@@ -226,8 +226,19 @@ async function markSandboxExecutionSkipped({ tx, sessOpts }) {
   tx.providerStatus = "sandbox_completed";
   tx.providerReference = buildSandboxProviderReference(tx);
 
+  /**
+   * ⚠️ CORRECTIF — même défaut que dans `confirmTransaction.js`.
+   *
+   * `"completed"` n'appartient pas à `STATUSES` (`models/Transaction.js:47-58`) :
+   * le `tx.save()` plus bas levait une erreur de validation Mongoose, et la
+   * barrière sandbox de la revue App Store échouait en 500.
+   *
+   * Le statut de succès déclaré est `"confirmed"`. Voir le commentaire détaillé
+   * dans `confirmTransaction.js` (`applySandboxConfirm`) pour la raison de ne
+   * PAS élargir l'énumération à la place.
+   */
   if (!tx.status || ["pending", "processing", "initiated"].includes(String(tx.status))) {
-    tx.status = "completed";
+    tx.status = "confirmed";
   }
 
   tx.isSandbox = true;

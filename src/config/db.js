@@ -56,6 +56,30 @@ function registerTransactionModels(conn) {
   require("../models/ReferralPayout")(conn);
   require("../models/IdempotencyRecord")(conn);
 
+  /**
+   * ⚠️ ENREGISTRÉS ICI PARCE QUE L'ENREGISTREMENT PARESSEUX EST UNE BOMBE À
+   * RETARDEMENT D'ORDRE DE DÉMARRAGE.
+   *
+   * `ProviderWebhookEvent` n'était résolu que par `webhookEventStore`, au
+   * PREMIER rappel prestataire reçu. Tant qu'aucun n'était arrivé, le modèle
+   * n'existait pas sur la connexion — et la réconciliation, qui le cherche par
+   * `conn.models`, échouait sur « Modèle non enregistré ».
+   *
+   * Le défaut ne se voyait pas en développement (on reçoit un webhook avant de
+   * réconcilier) et se serait manifesté en production sur une instance
+   * fraîchement redémarrée : le balayage nocturne aurait planté, et — le worker
+   * enregistrant les échecs — on l'aurait su. Mais sur une instance qui reçoit
+   * les webhooks, il serait passé : donc un contrôle qui marche ou pas selon
+   * l'instance qui gagne le verrou. C'est exactement le genre de dépendance
+   * implicite qui rend un système imprévisible.
+   *
+   * Les modèles de la base transactions se déclarent au même endroit. Pas
+   * d'exception.
+   */
+  require("../models/ProviderWebhookEvent")(conn);
+  require("../models/ReconciliationRun")(conn);
+  require("../models/CronLock")(conn);
+
   try {
     require("../models/TxSystemBalance")(conn);
   } catch {}

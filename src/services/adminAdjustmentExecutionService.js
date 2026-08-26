@@ -480,40 +480,49 @@ async function executeAdminAdjustment(payload = {}) {
         stage: "admin_adjustment",
       };
 
-      // Les deux jambes sont toujours écrites, en sens opposés : c'est ce qui
-      // rend le grand livre équilibré et vérifiable poste par poste.
-      await ledger.createLedgerEntry({
+      /**
+       * Les deux jambes sont écrites en sens opposés — ce service le faisait
+       * DÉJÀ correctement, et c'est ce qui rend l'ajustement vérifiable poste
+       * par poste.
+       *
+       * Le passage par `postDoubleEntry` n'y change rien sur le fond ; il ajoute
+       * deux choses : l'ASSERTION d'équilibre avant écriture (un futur
+       * refactoring ne peut plus casser la symétrie en silence) et le marquage
+       * `ledgerVersion`, sans lequel ces écritures resteraient hors de la
+       * balance de vérification alors qu'elles y ont toute leur place.
+       *
+       * Un ajustement est toujours MONODEVISE : les deux jambes portent la même
+       * `currency`, l'équilibre par devise est donc trivialement satisfait.
+       */
+      await ledger.postDoubleEntry({
         transactionId: transaction._id,
         reference,
-        userId,
-        accountType: "USER_WALLET",
-        accountId: `user_wallet:${userId}:${currency}`,
-        direction: isCredit ? "CREDIT" : "DEBIT",
         entryType: "ADJUSTMENT",
-        amount,
-        currency,
-        metadata: {
-          ...ledgerMetadata,
-          counterpartyUserId: String(treasuryUserId),
-          counterpartySystemType: TREASURY_SYSTEM_TYPE,
-        },
-        session,
-      });
-
-      await ledger.createLedgerEntry({
-        transactionId: transaction._id,
-        reference,
-        userId: treasuryUserId,
-        accountType: "TREASURY",
-        accountId: `treasury:${TREASURY_SYSTEM_TYPE}:${treasuryUserId}:${currency}`,
-        direction: isCredit ? "DEBIT" : "CREDIT",
-        entryType: "ADJUSTMENT",
-        amount,
-        currency,
-        metadata: {
-          ...ledgerMetadata,
-          counterpartyUserId: String(userId),
-        },
+        context: "adminAdjustment",
+        legs: [
+          {
+            accountType: "USER_WALLET",
+            accountId: `user_wallet:${userId}:${currency}`,
+            userId,
+            direction: isCredit ? "CREDIT" : "DEBIT",
+            amount,
+            currency,
+            metadata: {
+              counterpartyUserId: String(treasuryUserId),
+              counterpartySystemType: TREASURY_SYSTEM_TYPE,
+            },
+          },
+          {
+            accountType: "TREASURY",
+            accountId: `treasury:${TREASURY_SYSTEM_TYPE}:${treasuryUserId}:${currency}`,
+            userId: treasuryUserId,
+            direction: isCredit ? "DEBIT" : "CREDIT",
+            amount,
+            currency,
+            metadata: { counterpartyUserId: String(userId) },
+          },
+        ],
+        metadata: ledgerMetadata,
         session,
       });
 

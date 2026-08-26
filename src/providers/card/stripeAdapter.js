@@ -3,6 +3,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
+const { resolveProviderMode } = require("../providerMode");
 
 const PROVIDER = "stripe";
 
@@ -52,7 +53,11 @@ function getConfig() {
     baseURL: process.env.STRIPE_BASE_URL || "",
     secretKey: process.env.STRIPE_SECRET_KEY || "",
     timeout: Number(process.env.STRIPE_TIMEOUT_MS || 20000),
-    mock: String(process.env.STRIPE_MOCK || "true").toLowerCase() === "true",
+    ...resolveProviderMode({
+      provider: PROVIDER,
+      envPrefix: "STRIPE",
+      baseURL: process.env.STRIPE_BASE_URL || "",
+    }),
   };
 }
 
@@ -99,7 +104,7 @@ function failResult({
 async function payout(input = {}) {
   const cfg = getConfig();
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("STRIPE_PAYOUT"),
       externalStatus: "PENDING",
@@ -163,7 +168,7 @@ async function collect(input = {}) {
     description: input.description || "PayNoval card topup",
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("STRIPE_COLLECT"),
       externalStatus: "REQUIRES_ACTION",

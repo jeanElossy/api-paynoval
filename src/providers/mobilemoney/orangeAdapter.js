@@ -3,6 +3,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
+const { resolveProviderMode } = require("../providerMode");
 
 const PROVIDER = "orange";
 
@@ -52,7 +53,11 @@ function getConfig() {
     baseURL: process.env.ORANGE_BASE_URL || "",
     apiKey: process.env.ORANGE_API_KEY || "",
     timeout: Number(process.env.ORANGE_TIMEOUT_MS || 15000),
-    mock: String(process.env.ORANGE_MOCK || "true").toLowerCase() === "true",
+    ...resolveProviderMode({
+      provider: PROVIDER,
+      envPrefix: "ORANGE",
+      baseURL: process.env.ORANGE_BASE_URL || "",
+    }),
   };
 }
 
@@ -112,7 +117,7 @@ async function payout(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("ORANGE_PAYOUT"),
       externalStatus: "PENDING",
@@ -162,7 +167,7 @@ async function collect(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("ORANGE_COLLECT"),
       externalStatus: "PENDING",

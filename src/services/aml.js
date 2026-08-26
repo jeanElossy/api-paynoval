@@ -492,32 +492,32 @@ async function getPEPOrSanctionedStatus(user, { toEmail }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* ML score placeholder                                                       */
+/* `getMLScore` A ÉTÉ RETIRÉ — C'ÉTAIT UN GÉNÉRATEUR ALÉATOIRE                */
 /* -------------------------------------------------------------------------- */
 
-async function getMLScore(payload, user) {
-  const provider = String(
-    payload?.provider || payload?.destination || payload?.funds || "paynoval"
-  )
-    .trim()
-    .toLowerCase();
-
-  const currencyISO =
-    normalizeIso(payload?.currencySource) ||
-    normalizeIso(payload?.currencyCode) ||
-    normalizeIso(payload?.senderCurrencyCode) ||
-    normalizeIso(payload?.currency) ||
-    normalizeIso(payload?.senderCurrencySymbol) ||
-    "USD";
-
-  const amt = safeNumber(payload?.amountSource ?? payload?.amount);
-
-  const singleLimit = getSingleTxLimit(provider, currencyISO);
-
-  if (amt > singleLimit) return 0.92;
-
-  return Math.random() * 0.4;
-}
+/**
+ * Cette fonction renvoyait `Math.random() * 0.4`, ou `0.92` si le montant
+ * dépassait la limite unitaire. Ce n'était pas une approximation en attendant
+ * mieux : c'était un tirage au sort portant un nom qui laissait croire à un
+ * modèle. Trois conséquences, et la troisième est la pire :
+ *
+ *   1. la même transaction notée deux fois donnait deux scores différents,
+ *      donc rien n'était testable ;
+ *   2. le seuil de blocage valait 0.9 et le tirage plafonnait à 0.4 : la
+ *      branche « aléatoire » ne bloquait JAMAIS. Le seul signal réel était le
+ *      dépassement de limite, codé en dur ;
+ *   3. lors d'un litige ou d'un contrôle, **le score d'une transaction passée
+ *      était irreproductible**. Ni explicable au client, ni justifiable devant
+ *      un régulateur, ni compréhensible après coup.
+ *
+ * Le remplacement est `services/risk/riskScore.js` : déterministe, sans
+ * horloge ni hasard, et chaque point de score nomme son motif. Il est appelé
+ * par `middleware/aml.js`.
+ *
+ * ⚠️ NE PAS LE RÉINTRODUIRE, sous quelque nom que ce soit. Un score de risque
+ * non reproductible est pire que pas de score du tout : il donne l'apparence
+ * d'un contrôle.
+ */
 
 async function getBusinessKYBStatus() {
   return "validé";
@@ -527,7 +527,6 @@ module.exports = {
   logTransaction,
   getUserTransactionsStats,
   getPEPOrSanctionedStatus,
-  getMLScore,
   getBusinessKYBStatus,
 
   normalizeIso,

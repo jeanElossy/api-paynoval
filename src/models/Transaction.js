@@ -508,6 +508,37 @@ const transactionSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * ========================================================================
+     * DOSSIER DE RISQUE — CE QUE L'OPÉRATEUR LIRA EN REVUE
+     * ========================================================================
+     *
+     * ⚠️ CES DEUX CHAMPS DOIVENT ÊTRE DÉCLARÉS. Mongoose est en mode strict :
+     * un champ non déclaré est jeté SILENCIEUSEMENT à l'écriture. Le handler
+     * les poserait, la base ne les garderait pas, et la file de revue
+     * n'afficherait que des transactions sans motif — sans qu'aucune erreur
+     * n'apparaisse nulle part.
+     *
+     * `riskScore` est indexé : la file de revue se trie par risque décroissant,
+     * et c'est la première chose qu'un opérateur demande.
+     */
+    riskScore: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+
+    /**
+     * Les motifs, tels que `services/risk/riskScore.js` les a produits :
+     * `[{ code, weight, detail }]`. C'est ce qui rend une décision
+     * CONTESTABLE — un score seul ne s'explique ni au client, ni à un contrôle,
+     * et six mois plus tard personne ne saura pourquoi ce virement a été retenu.
+     */
+    riskReasons: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+
     referralSnapshot: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -674,6 +705,42 @@ const transactionSchema = new mongoose.Schema(
     },
 
     reserveReleasedAt: {
+      type: Date,
+      default: null,
+    },
+
+    /**
+     * ⚠️ LE DRAPEAU QUI MANQUAIT AU PRÉLÈVEMENT DES FRAIS D'ANNULATION.
+     *
+     * Les quatre autres étapes monétaires en ont un (`fundsReserved`,
+     * `fundsCaptured`, `beneficiaryCredited`, `reserveReleased`) et leurs
+     * appelants testent systématiquement `if (!tx.<drapeau>)`. Les frais
+     * d'annulation, eux, n'étaient gardés que par
+     * `if (cancellationFee > 0 && treasuryMeta?.treasuryUserId)` — une
+     * condition sur le MONTANT, pas sur ce qui a déjà été fait.
+     *
+     * Or la machine à états autorise le cycle `cancelled → relaunch →
+     * cancelled`, et DEUX chemins d'annulation coexistent (`/cancel` côté
+     * utilisateur, `services/cancellation.service.js` côté support). Une
+     * seconde annulation reprélevait donc les frais :
+     *
+     *   - avec transaction Mongo : le grand livre refusait la seconde écriture
+     *     (index de déduplication), la transaction annulait tout, et
+     *     l'annulation LÉGITIME échouait sur une erreur opaque ;
+     *   - en mode dégradé : le débit du portefeuille et le crédit de trésorerie
+     *     étaient déjà validés et non annulables — frais prélevés DEUX FOIS,
+     *     grand livre n'en enregistrant qu'un seul.
+     *
+     * `index: true` comme les autres : c'est ce qui permet de retrouver les
+     * transactions concernées lors d'une réconciliation.
+     */
+    cancellationFeeCharged: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    cancellationFeeChargedAt: {
       type: Date,
       default: null,
     },
@@ -938,3 +1005,14 @@ transactionSchema.virtual("hasPricingSnapshot").get(function () {
 
 module.exports = (conn = mongoose) =>
   conn.models.Transaction || conn.model("Transaction", transactionSchema);
+
+/**
+ * Exposé pour que la liste des statuts valides soit VÉRIFIABLE depuis l'extérieur
+ * — même motif que `RETENTION_SECONDS` sur `IdempotencyRecord`.
+ *
+ * Sans cet export, la seule façon de connaître les statuts autorisés était
+ * d'ouvrir ce fichier. C'est ainsi que `tx.status = "completed"` a pu vivre dans
+ * deux gestionnaires : rien ne pouvait le contredire automatiquement.
+ * `test/transactionStatusInvariant.test.js` s'en sert désormais.
+ */
+module.exports.STATUSES = Object.freeze([...STATUSES]);

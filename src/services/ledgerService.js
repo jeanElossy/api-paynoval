@@ -17,7 +17,20 @@ const {
   buildTreasuryRevenueBreakdown,
 } = require("./pricingSnapshotNormalizer");
 
-const { getTxConn } = require("../config/db");
+const { getTxConn, getUsersConn } = require("../config/db");
+const {
+  canUseSharedSession,
+  hasRealTransaction,
+} = require("../utils/sharedSession");
+
+const {
+  LEDGER_VERSION,
+  assertBalanced,
+  transferLegs,
+  systemReserveAccountId,
+  systemClearingAccountId,
+  buildDedupKey,
+} = require("./ledger/doubleEntry");
 
 /**
  * RÉSOLUTION PARESSEUSE DES MODÈLES
@@ -90,8 +103,25 @@ const TREASURY_ENV_BY_SYSTEM_TYPE = Object.freeze({
   FX_MARGIN_TREASURY: String(process.env.FX_MARGIN_TREASURY_USER_ID || "").trim(),
 });
 
+/**
+ * ⚠️ `canUseSharedSession()` N'EST PAS FACULTATIF ICI.
+ *
+ * Cette fonction testait `session` seul. En mode dégradé, `startTxSession()`
+ * rend une session malgré tout — inutile, puisqu'aucune transaction n'est
+ * ouverte — et les écritures du grand livre partaient donc avec une session
+ * pendant que `tx.save()` n'en portait pas, via la version de `runtime.js` qui,
+ * elle, posait bien la garde. Deux régimes pour un même mouvement.
+ *
+ * Le prédicat vit maintenant dans `utils/sharedSession.js`, en un seul
+ * exemplaire. Il n'est PAS importé depuis `runtime.js` : `runtime` importe déjà
+ * ce fichier.
+ */
+function sharedSessionAvailable() {
+  return canUseSharedSession(getUsersConn, getTxConn);
+}
+
 function maybeSessionOpts(session) {
-  return session ? { session } : {};
+  return sharedSessionAvailable() && session ? { session } : {};
 }
 
 function normalizeCurrency(currency) {
@@ -496,6 +526,185 @@ async function createLedgerEntry({
   return doc;
 }
 
+/**
+ * ============================================================================
+ * ÉCRITURE EN PARTIE DOUBLE
+ * ============================================================================
+ *
+ * Écrit un jeu de jambes ÉQUILIBRÉ, ou n'écrit rien.
+ *
+ * ⚠️ L'ÉQUILIBRE EST VÉRIFIÉ AVANT TOUTE ÉCRITURE, PAS APRÈS.
+ * Détecter un déséquilibre après coup ne servirait à rien : les lignes seraient
+ * déjà en base, et le grand livre est immuable — on ne les retirerait pas. La
+ * seule protection utile est le refus en amont.
+ *
+ * ⚠️ `insertMany({ ordered: true })`, ET SURTOUT PAS `create(tableau)`.
+ *
+ * RECTIFICATIF — ce commentaire affirmait auparavant que `Model.create(tableau)`
+ * partait « en une commande `insertMany`, atomique au niveau du lot ». C'est
+ * FAUX sous Mongoose 7 : sans l'option `ordered`, `create` prend la branche
+ * `Promise.all(args.map(doc => doc.$save()))` (`lib/model.js`), soit N
+ * insertions INDÉPENDANTES et PARALLÈLES. Vérifié sur mongoose 7.8.12.
+ *
+ * Deux conséquences, toutes deux contraires à l'intention du module :
+ *   - hors transaction, une panne entre les deux jambes laissait une écriture
+ *     orpheline — le déséquilibre que ce code existe pour empêcher ;
+ *   - sur un lot déjà partiellement écrit, la jambe en collision et la jambe
+ *     manquante partaient EN MÊME TEMPS : la relecture de rattrapage courait
+ *     contre une insertion en vol, et `LEDGER_PARTIAL_POSTING` se levait de
+ *     façon non déterministe sur un lot en train de se compléter correctement.
+ *
+ * `insertMany` avec `ordered: true` envoie une SEULE commande, séquentielle et
+ * au niveau du lot pour un même lot ordonné.
+ *
+ * `metadata.ledgerVersion` marque ces écritures : la balance de vérification ne
+ * porte que sur elles, l'historique en partie simple étant laissé intact.
+ */
+async function postDoubleEntry({
+  transactionId,
+  reference = null,
+  entryType,
+  legs,
+  metadata = null,
+  session = null,
+  context = "",
+  dedupScope = null,
+}) {
+  assertBalanced(legs, context || entryType || "");
+
+  const normalizedType = String(entryType || "").toUpperCase();
+
+  const docs = legs.map((leg, legIndex) => {
+    const cur = normalizeCurrency(leg.currency);
+
+    const dedupKey = buildDedupKey({
+      transactionId,
+      scope: dedupScope,
+      legIndex,
+    });
+
+    return {
+      // Absent — et non `null` — quand aucune portée n'est fournie : l'index
+      // unique partiel ne doit pas voir ce document. Voir `models/LedgerEntry`.
+      ...(dedupKey ? { dedupKey } : {}),
+      transactionId,
+      reference: reference || null,
+      userId: leg.userId || null,
+      accountType: String(leg.accountType).toUpperCase(),
+      accountId: String(leg.accountId).trim(),
+      direction: String(leg.direction).toUpperCase(),
+      entryType: String(leg.entryType || normalizedType).toUpperCase(),
+      amount: dec(normalizePositiveAmount(leg.amount, cur), cur),
+      currency: cur,
+      status: "POSTED",
+      metadata: {
+        ...(metadata && typeof metadata === "object" && !Array.isArray(metadata)
+          ? metadata
+          : {}),
+        ...(leg.metadata && typeof leg.metadata === "object" ? leg.metadata : {}),
+        ledgerVersion: LEDGER_VERSION,
+      },
+    };
+  });
+
+  const model = ledgerEntryModel();
+
+  try {
+    // Une seule commande, séquentielle : la première jambe qui échoue arrête
+    // le lot. `create(docs)` aurait lancé les jambes en parallèle.
+    return await model.insertMany(docs, {
+      ordered: true,
+      ...maybeSessionOpts(session),
+    });
+  } catch (err) {
+    /**
+     * ========================================================================
+     * L'INDEX A REFUSÉ UNE ÉCRITURE — CE N'EST PAS FORCÉMENT UNE ERREUR
+     * ========================================================================
+     *
+     * Une collision sur `dedupKey` signifie une seule chose : CE MOUVEMENT A
+     * DÉJÀ ÉTÉ ENREGISTRÉ. Le rejeu doit donc réussir en silence — c'est tout
+     * l'intérêt de l'idempotence. Relancer l'erreur ferait échouer une
+     * transaction pourtant correctement comptabilisée, et un appelant qui
+     * réessaie encore tournerait en boucle sur un mouvement déjà passé.
+     *
+     * ⚠️ MAIS ON NE LE CROIT PAS SUR PAROLE. On relit les clés du lot : si
+     * elles ne sont pas TOUTES présentes, la première tentative s'est
+     * interrompue au milieu et le grand livre porte un lot INCOMPLET — donc
+     * déséquilibré. C'est précisément le cas qu'il ne faut pas absorber : on
+     * lève une erreur nommée, qui dit quoi chercher.
+     *
+     * Le rattrapage ne s'applique QUE hors session. Avec une session, la
+     * transaction MongoDB annule déjà tout le lot et rejoue proprement ; lire
+     * dans une session en cours d'annulation n'aurait aucun sens.
+     */
+    const keys = docs.map((d) => d.dedupKey).filter(Boolean);
+
+    /**
+     * ⚠️ `hasRealTransaction`, ET SURTOUT PAS `session` SEUL.
+     *
+     * Le test portait sur la véracité de `session`. En mode dégradé,
+     * `startTxSession()` rend pourtant une session — sans transaction derrière.
+     * Le rattrapage se désactivait donc EXACTEMENT dans le régime pour lequel
+     * il avait été écrit, et le seul chemin qui l'atteignait était celui des
+     * tests, qui passent `session: null`.
+     *
+     * Avec une vraie transaction, relancer est le bon geste : MongoDB annule
+     * tout le lot et l'appelant rejoue proprement. Sans transaction, relancer
+     * laisse un mouvement de portefeuille déjà validé et non annulable en face
+     * d'un grand livre qui refuse l'écriture.
+     */
+    if (
+      !isDuplicateKeyError(err) ||
+      !keys.length ||
+      hasRealTransaction(session, getUsersConn, getTxConn)
+    ) {
+      throw err;
+    }
+
+    const found = await model.find({ dedupKey: { $in: keys } });
+
+    /**
+     * Remis dans l'ordre des jambes. `find` rend l'ordre de l'index, pas celui
+     * de `keys` : un appelant qui prend `[0]` — c'est le cas de
+     * `creditRevenueLineToTreasury` — recevrait sinon une jambe arbitraire.
+     */
+    const byKey = new Map(found.map((doc) => [doc.dedupKey, doc]));
+    const existing = keys.map((k) => byKey.get(k)).filter(Boolean);
+
+    if (existing.length === docs.length) return existing;
+
+    const partial = new Error(
+      `Grand livre INCOMPLET pour ${context || normalizedType || "?"} : ` +
+        `${existing.length} jambe(s) enregistrée(s) sur ${docs.length}. ` +
+        "Le lot précédent s'est interrompu en cours d'écriture — la " +
+        "contre-écriture manquante doit être posée à la main."
+    );
+    partial.code = "LEDGER_PARTIAL_POSTING";
+    partial.status = 500;
+    partial.details = { transactionId: String(transactionId), keys };
+    throw partial;
+  }
+}
+
+/**
+ * Une violation d'index unique MongoDB, quelle que soit la couche qui la
+ * remonte : le pilote pose `code: 11000`, `insertMany` l'enveloppe parfois dans
+ * un `writeErrors[]`, et Mongoose peut la retyper en `MongoBulkWriteError`.
+ * Tester le seul `err.code` laisserait passer la forme groupée.
+ */
+function isDuplicateKeyError(err) {
+  if (!err) return false;
+  if (err.code === 11000 || err.code === 11001) return true;
+
+  const writeErrors = err.writeErrors || err?.result?.writeErrors;
+  if (Array.isArray(writeErrors)) {
+    return writeErrors.some((e) => (e?.code ?? e?.err?.code) === 11000);
+  }
+
+  return false;
+}
+
 async function reserveSenderFunds({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
@@ -511,16 +720,34 @@ async function reserveSenderFunds({ transaction, senderId, amount, currency, ses
     maybeSessionOpts(session)
   );
 
-  await createLedgerEntry({
+  /**
+   * PARTIE DOUBLE. Une réservation déplace des fonds du solde DISPONIBLE vers un
+   * compte de fonds GELÉS — ce n'est pas une sortie d'argent, c'est un
+   * changement de disponibilité. Les deux jambes le disent ; une jambe unique
+   * laissait croire à une sortie.
+   */
+  await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: sender,
-    accountType: "USER_WALLET",
-    accountId: userWalletAccountId(sender, cur),
-    direction: "DEBIT",
     entryType: "RESERVE",
-    amount: amt,
-    currency: cur,
+    context: "reserveSenderFunds",
+    dedupScope: "reserveSenderFunds",
+    legs: transferLegs({
+      from: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(sender, cur),
+        userId: sender,
+      },
+      to: {
+        accountType: "SYSTEM_RESERVE",
+        // L'identifiant porte l'utilisateur : sans lui, impossible de répondre
+        // à « de qui sont ces fonds gelés ? » quand une réserve reste bloquée.
+        accountId: systemReserveAccountId(sender, cur),
+        userId: sender,
+      },
+      amount: amt,
+      currency: cur,
+    }),
     metadata: { stage: "initiate", flow: transaction.flow || null },
     session,
   });
@@ -543,16 +770,33 @@ async function captureSenderReserve({ transaction, senderId, amount, currency, s
     maybeSessionOpts(session)
   );
 
-  await createLedgerEntry({
+  /**
+   * PARTIE DOUBLE. La capture sort les fonds de la réserve vers la
+   * COMPENSATION : ils ont quitté l'expéditeur mais ne sont pas encore chez le
+   * bénéficiaire. C'est cet état intermédiaire qui n'existait nulle part, et
+   * c'est exactement là que l'argent se perd quand quelque chose échoue entre
+   * les deux.
+   */
+  await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: sender,
-    accountType: "USER_WALLET",
-    accountId: userWalletAccountId(sender, cur),
-    direction: "DEBIT",
     entryType: "RESERVE_CAPTURE",
-    amount: amt,
-    currency: cur,
+    context: "captureSenderReserve",
+    dedupScope: "captureSenderReserve",
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_RESERVE",
+        accountId: systemReserveAccountId(sender, cur),
+        userId: sender,
+      },
+      to: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: systemClearingAccountId(cur),
+        userId: null,
+      },
+      amount: amt,
+      currency: cur,
+    }),
     metadata: { stage: "confirm", flow: transaction.flow || null },
     session,
   });
@@ -575,16 +819,30 @@ async function releaseSenderReserve({ transaction, senderId, amount, currency, s
     maybeSessionOpts(session)
   );
 
-  await createLedgerEntry({
+  /**
+   * PARTIE DOUBLE — l'exacte symétrie de la réservation. Les fonds gelés
+   * redeviennent disponibles ; rien n'entre ni ne sort du système.
+   */
+  await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: sender,
-    accountType: "USER_WALLET",
-    accountId: userWalletAccountId(sender, cur),
-    direction: "CREDIT",
     entryType: "RESERVE_RELEASE",
-    amount: amt,
-    currency: cur,
+    context: "releaseSenderReserve",
+    dedupScope: "releaseSenderReserve",
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_RESERVE",
+        accountId: systemReserveAccountId(sender, cur),
+        userId: sender,
+      },
+      to: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(sender, cur),
+        userId: sender,
+      },
+      amount: amt,
+      currency: cur,
+    }),
     metadata: { stage: "cancel_or_failure", flow: transaction.flow || null },
     session,
   });
@@ -607,16 +865,31 @@ async function creditReceiverFunds({ transaction, receiverId, amount, currency, 
     maybeSessionOpts(session)
   );
 
-  await createLedgerEntry({
+  /**
+   * PARTIE DOUBLE. Le bénéficiaire est crédité DEPUIS la compensation : l'argent
+   * vient de quelque part, et ce quelque part est la capture faite chez
+   * l'expéditeur. La boucle se ferme, et son bouclage devient vérifiable.
+   */
+  await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: receiver,
-    accountType: "USER_WALLET",
-    accountId: userWalletAccountId(receiver, cur),
-    direction: "CREDIT",
     entryType: "USER_CREDIT",
-    amount: amt,
-    currency: cur,
+    context: "creditReceiverFunds",
+    dedupScope: "creditReceiverFunds",
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: systemClearingAccountId(cur),
+        userId: null,
+      },
+      to: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(receiver, cur),
+        userId: receiver,
+      },
+      amount: amt,
+      currency: cur,
+    }),
     metadata: { stage: "confirm", flow: transaction.flow || null },
     session,
   });
@@ -639,16 +912,34 @@ async function debitReceiverFunds({ transaction, receiverId, amount, currency, s
     maybeSessionOpts(session)
   );
 
-  await createLedgerEntry({
+  /**
+   * PARTIE DOUBLE. Reprise chez le bénéficiaire : les fonds retournent en
+   * compensation, d'où ils repartiront vers l'expéditeur (`refundSenderFunds`).
+   *
+   * Les deux mouvements sont DISTINCTS et c'est voulu — une reprise sans
+   * remboursement laisse les fonds en compensation, ce qui est un état
+   * observable plutôt qu'un trou.
+   */
+  await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: receiver,
-    accountType: "USER_WALLET",
-    accountId: userWalletAccountId(receiver, cur),
-    direction: "DEBIT",
     entryType: "REVERSAL",
-    amount: amt,
-    currency: cur,
+    context: "debitReceiverFunds",
+    dedupScope: "debitReceiverFunds",
+    legs: transferLegs({
+      from: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(receiver, cur),
+        userId: receiver,
+      },
+      to: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: systemClearingAccountId(cur),
+        userId: null,
+      },
+      amount: amt,
+      currency: cur,
+    }),
     metadata: { stage: "refund", flow: transaction.flow || null },
     session,
   });
@@ -671,16 +962,44 @@ async function refundSenderFunds({ transaction, senderId, amount, currency, sess
     maybeSessionOpts(session)
   );
 
-  await createLedgerEntry({
+  /**
+   * PARTIE DOUBLE. Le remboursement rend les fonds à l'expéditeur DEPUIS la
+   * compensation — symétrique du crédit au bénéficiaire.
+   */
+  /**
+   * ⚠️ AUCUN `dedupScope` ICI, ET C'EST DÉLIBÉRÉ.
+   *
+   * Un remboursement n'est pas garanti unique par transaction : deux
+   * remboursements partiels du même montant sur la même transaction sont une
+   * opération légitime. Une portée réduite à « refundSenderFunds » les rendrait
+   * indiscernables et l'index REFUSERAIT le second — un faux rejet sur le
+   * chemin de l'argent, aussi grave qu'un doublon.
+   *
+   * Pour protéger ce chemin, il faut d'abord que l'appelant transmette
+   * l'identité du remboursement (l'identifiant de la demande, `TxRefundRequest`)
+   * jusqu'ici : la portée deviendra `refundSenderFunds:<refundRequestId>`. Tant
+   * qu'elle n'est pas disponible dans cette signature, mieux vaut pas de clé
+   * qu'une clé fausse.
+   */
+  await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: sender,
-    accountType: "USER_WALLET",
-    accountId: userWalletAccountId(sender, cur),
-    direction: "CREDIT",
     entryType: "REFUND",
-    amount: amt,
-    currency: cur,
+    context: "refundSenderFunds",
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: systemClearingAccountId(cur),
+        userId: null,
+      },
+      to: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(sender, cur),
+        userId: sender,
+      },
+      amount: amt,
+      currency: cur,
+    }),
     metadata: { stage: "refund", flow: transaction.flow || null },
     session,
   });
@@ -742,20 +1061,64 @@ async function creditRevenueLineToTreasury({
     metadata.rawAmount = Number(revenueLine?.rawAmount || 0);
   }
 
-  const entry = await createLedgerEntry({
+  /**
+   * ═══ PARTIE DOUBLE, ET LE CAS MULTIDEVISES ═══════════════════════════════
+   *
+   * C'est le seul mouvement du grand livre qui peut CHANGER DE DEVISE :
+   * l'expéditeur paie 200 XOF de frais, la trésorerie encaisse l'équivalent en
+   * CAD. `revenueLine.sourceCurrency` et `treasuryCurrency` diffèrent alors.
+   *
+   * Exiger `Σ DEBIT = Σ CREDIT` toutes devises confondues n'aurait aucun sens —
+   * on additionnerait des francs CFA et des dollars canadiens. La règle de tous
+   * les grands livres multidevises, et celle appliquée ici, est :
+   *
+   *     l'équilibre est vérifié PAR DEVISE.
+   *
+   * La contrepartie est donc posée sur la compensation **dans la devise de la
+   * trésorerie**, jamais dans celle de la source. Les deux jambes s'équilibrent,
+   * et la conversion apparaît comme un écart entre les soldes de compensation
+   * XOF et CAD.
+   *
+   * ⚠️ CET ÉCART N'EST PAS UNE ERREUR : c'est la POSITION DE CHANGE. Elle
+   * existait déjà — elle était simplement invisible. Elle devient mesurable, ce
+   * qui est tout l'intérêt de l'opération.
+   */
+  /**
+   * ⚠️ AUCUN `dedupScope` ICI, POUR LA MÊME RAISON QUE LE REMBOURSEMENT.
+   *
+   * Une transaction peut porter PLUSIEURS lignes de revenu de même nature —
+   * deux commissions distinctes versées à `FEES_TREASURY`, par exemple. Elles
+   * partageraient alors `entryType` ET compte de destination : une portée
+   * dérivée du seul type refuserait la seconde, c'est-à-dire perdrait un revenu
+   * réellement encaissé.
+   *
+   * La portée correcte suppose que `revenueLine` porte un identifiant propre.
+   * Elle deviendra `creditRevenueLineToTreasury:<revenueLineId>` le jour où le
+   * calcul de tarification en produira un.
+   */
+  const [entry] = await postDoubleEntry({
     transactionId: transaction._id,
     reference: transaction.reference,
-    userId: treasury.treasuryUserId,
-    accountType: "TREASURY",
-    accountId: treasuryAccountId({
-      treasuryUserId: treasury.treasuryUserId,
-      treasurySystemType: treasury.treasurySystemType,
+    entryType,
+    context: `creditRevenueLineToTreasury:${entryType}`,
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: systemClearingAccountId(treasuryCurrency),
+        userId: null,
+      },
+      to: {
+        accountType: "TREASURY",
+        accountId: treasuryAccountId({
+          treasuryUserId: treasury.treasuryUserId,
+          treasurySystemType: treasury.treasurySystemType,
+          currency: treasuryCurrency,
+        }),
+        userId: treasury.treasuryUserId,
+      },
+      amount: treasuryAmount,
       currency: treasuryCurrency,
     }),
-    direction: "CREDIT",
-    entryType,
-    amount: treasuryAmount,
-    currency: treasuryCurrency,
     metadata,
     session,
   });
@@ -885,16 +1248,35 @@ async function chargeCancellationFee({
       maybeSessionOpts(session)
     );
 
-    await createLedgerEntry({
+    /**
+     * PARTIE DOUBLE. Les frais d'annulation quittent l'expéditeur vers la
+     * compensation, PUIS partent en trésorerie (bloc suivant).
+     *
+     * Deux écritures distinctes, pas une : les deux montants peuvent être dans
+     * des devises différentes (`feeSourceCurrency` ≠ `treasuryFeeCurrency`) et
+     * ne s'équilibrent donc pas entre eux. Passer par la compensation permet à
+     * chaque devise de rester équilibrée seule.
+     */
+    await postDoubleEntry({
       transactionId: transaction._id,
       reference: transaction.reference,
-      userId: sender,
-      accountType: "USER_WALLET",
-      accountId: userWalletAccountId(sender, out.feeSourceCurrency),
-      direction: "DEBIT",
       entryType: "ADJUSTMENT",
-      amount: out.feeSourceAmount,
-      currency: out.feeSourceCurrency,
+      context: "chargeCancellationFee:sender",
+      dedupScope: "chargeCancellationFee:sender",
+      legs: transferLegs({
+        from: {
+          accountType: "USER_WALLET",
+          accountId: userWalletAccountId(sender, out.feeSourceCurrency),
+          userId: sender,
+        },
+        to: {
+          accountType: "SYSTEM_CLEARING",
+          accountId: systemClearingAccountId(out.feeSourceCurrency),
+          userId: null,
+        },
+        amount: out.feeSourceAmount,
+        currency: out.feeSourceCurrency,
+      }),
       metadata: {
         stage: "cancel",
         reason: "cancellation_fee",
@@ -922,20 +1304,34 @@ async function chargeCancellationFee({
       session,
     });
 
-    await createLedgerEntry({
+    /**
+     * PARTIE DOUBLE, jambe trésorerie — dans la devise de la TRÉSORERIE.
+     * Voir `creditRevenueLineToTreasury` pour le raisonnement multidevises.
+     */
+    await postDoubleEntry({
       transactionId: transaction._id,
       reference: transaction.reference,
-      userId: treasury.treasuryUserId,
-      accountType: "TREASURY",
-      accountId: treasuryAccountId({
-        treasuryUserId: treasury.treasuryUserId,
-        treasurySystemType: treasury.treasurySystemType,
+      entryType: "FEE_REVENUE",
+      context: "chargeCancellationFee:treasury",
+      dedupScope: "chargeCancellationFee:treasury",
+      legs: transferLegs({
+        from: {
+          accountType: "SYSTEM_CLEARING",
+          accountId: systemClearingAccountId(out.treasuryFeeCurrency),
+          userId: null,
+        },
+        to: {
+          accountType: "TREASURY",
+          accountId: treasuryAccountId({
+            treasuryUserId: treasury.treasuryUserId,
+            treasurySystemType: treasury.treasurySystemType,
+            currency: out.treasuryFeeCurrency,
+          }),
+          userId: treasury.treasuryUserId,
+        },
+        amount: out.treasuryFeeAmount,
         currency: out.treasuryFeeCurrency,
       }),
-      direction: "CREDIT",
-      entryType: "FEE_REVENUE",
-      amount: out.treasuryFeeAmount,
-      currency: out.treasuryFeeCurrency,
       metadata: {
         stage: "cancel",
         reason: "cancellation_fee",
@@ -960,6 +1356,7 @@ async function chargeCancellationFee({
 }
 
 module.exports = {
+  postDoubleEntry,
   TREASURY_SYSTEM_TYPES,
   TREASURY_ENV_BY_SYSTEM_TYPE,
   normalizeTreasurySystemType,

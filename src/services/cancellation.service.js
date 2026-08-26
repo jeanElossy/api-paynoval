@@ -650,7 +650,24 @@ async function processAdminCancelRefund({
 
     let feeChargeResult = null;
 
-    if (cancellationFee > 0 && treasuryMeta?.treasuryUserId) {
+    /**
+     * ⚠️ `!tx.cancellationFeeCharged` EST INDISPENSABLE.
+     *
+     * La condition ne portait que sur le montant. Or `cancelled → relaunch →
+     * cancelled` est un cycle autorisé par la machine à états, et ce chemin
+     * support partage la portée avec `/cancel` côté utilisateur : une seconde
+     * annulation reprélevait les frais. En mode dégradé, le débit du
+     * portefeuille est déjà validé et non annulable au moment où le grand livre
+     * refuse l'écriture — frais prélevés deux fois, grand livre n'en
+     * enregistrant qu'un.
+     *
+     * Même motif que `if (tx.fundsReserved && !tx.reserveReleased)` au-dessus.
+     */
+    if (
+      cancellationFee > 0 &&
+      treasuryMeta?.treasuryUserId &&
+      !tx.cancellationFeeCharged
+    ) {
       feeChargeResult = await chargeCancellationFee({
         transaction: tx,
         senderId: tx.sender,
@@ -667,6 +684,9 @@ async function processAdminCancelRefund({
         feeId: feeInfo.cancellationFeeId,
         session,
       });
+
+      tx.cancellationFeeCharged = true;
+      tx.cancellationFeeChargedAt = new Date();
     }
 
     tx.status = finalStatus || "cancelled";

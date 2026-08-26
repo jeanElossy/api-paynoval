@@ -3,6 +3,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
+const { resolveProviderMode } = require("../providerMode");
 
 const PROVIDER = "moov";
 
@@ -52,7 +53,11 @@ function getConfig() {
     baseURL: process.env.MOOV_BASE_URL || "",
     apiKey: process.env.MOOV_API_KEY || "",
     timeout: Number(process.env.MOOV_TIMEOUT_MS || 15000),
-    mock: String(process.env.MOOV_MOCK || "true").toLowerCase() === "true",
+    ...resolveProviderMode({
+      provider: PROVIDER,
+      envPrefix: "MOOV",
+      baseURL: process.env.MOOV_BASE_URL || "",
+    }),
   };
 }
 
@@ -112,7 +117,7 @@ async function payout(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("MOOV_PAYOUT"),
       externalStatus: "PENDING",
@@ -161,7 +166,7 @@ async function collect(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("MOOV_COLLECT"),
       externalStatus: "PENDING",

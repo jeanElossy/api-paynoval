@@ -964,7 +964,24 @@ async function cancelController(req, res, next) {
 
       let feeChargeResult = null;
 
-      if (cancellationFee > 0 && treasuryMeta?.treasuryUserId) {
+      /**
+       * ⚠️ `!tx.cancellationFeeCharged` EST INDISPENSABLE.
+       *
+       * La condition ne portait que sur le montant. Or `cancelled → relaunch →
+       * cancelled` est un cycle autorisé par la machine à états, et deux
+       * chemins d'annulation coexistent : une seconde annulation reprélevait
+       * les frais. En mode dégradé, le débit du portefeuille est déjà validé et
+       * non annulable au moment où le grand livre refuse l'écriture — frais
+       * prélevés deux fois, grand livre n'en enregistrant qu'un.
+       *
+       * Même motif que `if (tx.fundsReserved && !tx.reserveReleased)` juste
+       * au-dessus. Voir `models/Transaction.js`.
+       */
+      if (
+        cancellationFee > 0 &&
+        treasuryMeta?.treasuryUserId &&
+        !tx.cancellationFeeCharged
+      ) {
         feeChargeResult = await chargeCancellationFee({
           transaction: tx,
           senderId: tx.sender,
@@ -981,6 +998,9 @@ async function cancelController(req, res, next) {
           feeId: cancellationFeeId,
           session: sess,
         });
+
+        tx.cancellationFeeCharged = true;
+        tx.cancellationFeeChargedAt = new Date();
       }
 
       tx.status = "cancelled";

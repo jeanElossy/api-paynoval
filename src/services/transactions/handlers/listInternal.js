@@ -75,6 +75,15 @@ const LIST_PROJECTION = Object.freeze({
   attemptCount: 0,
   lastAttemptAt: 0,
   lockedUntil: 0,
+
+  /**
+   * Écarté dès la requête, pas seulement à la sérialisation : cinquante
+   * entrées de rappel prestataire par transaction, sur une liste paginée, ce
+   * sont des kilo-octets transférés depuis Mongo pour être jetés ensuite.
+   * L'assertion ci-dessous rend cet oubli impossible.
+   */
+  webhookHistory: 0,
+
   __v: 0,
 });
 

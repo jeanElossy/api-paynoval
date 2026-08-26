@@ -1485,11 +1485,41 @@ router.post(
 /* Admin actions                                                              */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * ---------------------------------------------------------------------------
+ * IDEMPOTENCE DES OPÉRATIONS ADMINISTRATIVES
+ * ---------------------------------------------------------------------------
+ * `/validate`, `/reassign` et `/relaunch` n'avaient AUCUN middleware
+ * d'idempotence. La conséquence n'était pas qu'ils exigeaient une clé — c'est
+ * qu'une clé envoyée par le back-office était purement et simplement IGNORÉE :
+ * aucun rejeu n'était reconnu, sur des routes qui déplacent de l'argent.
+ *
+ * `/relaunch` est le cas qui coûte : il ramène une transaction annulée ou en
+ * échec vers `pending`/`processing`, donc vers un nouvel appel prestataire. Un
+ * double clic d'un agent, ou un délai d'attente réseau suivi d'un rejeu, relance
+ * un versement déjà exécuté.
+ *
+ * ⚠️ `required: false` est DÉLIBÉRÉ, ce n'est pas un relâchement. Le mode souple
+ * laisse passer la requête sans clé (en la journalisant) et honore la clé quand
+ * elle est présente. C'est donc un ajout STRICTEMENT non cassant pour le
+ * back-office actuel, qui n'en envoie pas encore. L'exigence se basculera par
+ * `IDEMPOTENCY_REQUIRED=true` le jour où les clients l'enverront — le
+ * raisonnement complet est en tête de `middleware/idempotency.js`, et un défaut
+ * strict a DÉJÀ cassé le parc mobile une fois.
+ *
+ * ⚠️ PLACEMENT APRÈS `requireRole`, et c'est le bon ordre. Un appelant non
+ * autorisé ne doit pas pouvoir poser d'entrée dans le registre : la portée
+ * inclut l'identifiant utilisateur, donc il ne peut empoisonner personne
+ * d'autre, mais il figerait son propre 403 sous sa clé et écrirait dans le
+ * registre pour rien. `/refund` avait l'ordre inverse — corrigé ici aussi, pour
+ * que les cinq routes se lisent de la même façon.
+ */
+
 router.post(
   "/refund",
   protect,
-  idempotency({ required: false }),
   requireRole(["admin", "superadmin"]),
+  idempotency({ required: false }),
   [txIdValidator, body("reason").optional().trim().escape()],
   requestValidator,
   asyncHandler(refundController)
@@ -1499,6 +1529,7 @@ router.post(
   "/validate",
   protect,
   requireRole(["admin", "superadmin"]),
+  idempotency({ required: false }),
   [
     txIdValidator,
     body("status").notEmpty().isString().withMessage("Nouveau statut requis"),
@@ -1512,6 +1543,7 @@ router.post(
   "/reassign",
   protect,
   requireRole(["admin", "superadmin"]),
+  idempotency({ required: false }),
   [
     txIdValidator,
     body("newReceiverEmail")
@@ -1523,6 +1555,11 @@ router.post(
   asyncHandler(reassignController)
 );
 
+/**
+ * `/archive` n'a pas d'effet financier — pas d'idempotence : le registre a un
+ * coût (une écriture Mongo par requête) qu'il ne faut payer que là où il achète
+ * quelque chose.
+ */
 router.post(
   "/archive",
   protect,
@@ -1536,6 +1573,7 @@ router.post(
   "/relaunch",
   protect,
   requireRole(["admin", "superadmin"]),
+  idempotency({ required: false }),
   [txIdValidator],
   requestValidator,
   asyncHandler(relaunchController)

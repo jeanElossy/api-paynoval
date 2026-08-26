@@ -53,6 +53,31 @@ const swaggerUi = require("swagger-ui-express");
 
 // `config` est déjà chargé et validé en tête de fichier.
 const { connectTransactionsDB } = require("./config/db");
+const {
+  resolveRedisConnection,
+  diagnoseRedisError,
+} = require("./services/redisUrl");
+const { createMetrics } = require("./services/metrics");
+const {
+  createTxMetrics,
+  setTxMetrics,
+  getTxMetrics: getTxMetricsInstance,
+} = require("./services/txMetrics");
+const {
+  startReconciliationWorker,
+} = require("./services/reconciliation/reconciliationScheduler");
+const {
+  startSettlementReplayWorker,
+} = require("./services/settlement/settlementReplay");
+const {
+  checkCriticalIndexes,
+  formatCriticalIndexesReport,
+} = require("./services/ledger/verifyDedupIndex");
+const {
+  describeProviderRails,
+  formatProviderRailsReport,
+  assertProviderRails,
+} = require("./providers/providerConfigReport");
 const { protect } = require("./middleware/authMiddleware");
 const errorHandler = require("./middleware/errorHandler");
 const logger = require("./logger");
@@ -182,6 +207,33 @@ if (process.env.SENTRY_DSN) {
 
 const app = express();
 app.set("trust proxy", 1);
+
+/**
+ * ═══ MÉTRIQUES ════════════════════════════════════════════════════════════
+ *
+ * Ce service n'avait AUCUNE instrumentation : impossible de dire si une
+ * confirmation lente vient de Mongo, de la tarification, ou de Wave. Or c'est
+ * la seule question dont la réponse change ce qu'on fait pendant un incident.
+ *
+ * `metrics` mesure les requêtes HTTP par motif de route (cardinalité bornée —
+ * voir l'en-tête du module). `txMetrics` ajoute la latence et le taux d'erreur
+ * PRESTATAIRE, instrumentés en un point unique (`providers/providerSelector.js`).
+ *
+ * L'instance est posée dans le registre de processus **avant** tout montage de
+ * route : `providerSelector` la lit paresseusement, et tant qu'elle n'est pas
+ * posée les appels prestataires fonctionnent sans être mesurés.
+ */
+const metrics = createMetrics({ client: require("prom-client") });
+
+setTxMetrics(
+  createTxMetrics({ client: require("prom-client"), register: metrics.register })
+);
+
+/**
+ * Monté TÔT, pour englober le temps passé dans les autres intergiciels et pas
+ * seulement dans le contrôleur.
+ */
+app.use(metrics.httpMiddleware);
 
 // ─────────────────────────────────────────────────────────────
 // OpenAPI
@@ -376,6 +428,28 @@ app.get("/healthz", (_req, res) =>
     timestamp: new Date().toISOString(),
   })
 );
+
+/**
+ * ⚠️ `/metrics` N'EST PAS PUBLIQUE.
+ *
+ * Elle divulgue la carte du service : routes internes, volumes, taux d'erreur,
+ * noms de prestataires. C'est un plan de reconnaissance offert. Elle est donc
+ * derrière le jeton interne, comme `/api/v1/internal` — même posture que le
+ * backend principal.
+ */
+app.get("/metrics", async (req, res) => {
+  if (!isTrustedInternalCall(req)) {
+    return res.status(404).end();
+  }
+
+  try {
+    res.set("Content-Type", metrics.contentType);
+    res.set("Cache-Control", "no-store");
+    return res.send(await metrics.metrics());
+  } catch (err) {
+    return res.status(500).send(`# collecte impossible: ${err?.message || err}\n`);
+  }
+});
 
 /**
  * DISPONIBILITÉ. 503 quand une connexion critique manque.
@@ -598,8 +672,26 @@ const baseRateLimitConfig = {
   },
 };
 
-if (process.env.REDIS_URL && RedisStore && Redis) {
-  const redisUrl = String(process.env.REDIS_URL).trim();
+/**
+ * Résolution de la connexion Redis — voir `src/services/redisUrl.js`.
+ *
+ * Auparavant : `if (process.env.REDIS_URL && …)`. Tester la PRÉSENCE d'une
+ * variable n'est pas tester sa VALIDITÉ : une valeur non vide mais fautive
+ * construisait un client qui ne se connectait jamais, et le repli s'activait
+ * en silence. Le résolveur accepte en outre la forme discrète
+ * (REDIS_HOST/PORT/USERNAME/PASSWORD/TLS), qui était déclarée dans le `.env`
+ * de ce service sans qu'aucune ligne de code ne la lise.
+ */
+const redisConn = resolveRedisConnection({
+  logger,
+  scope: "rate-limit",
+  consequence:
+    "Comptage EN MÉMOIRE : correct sur une seule instance ; à plusieurs, " +
+    "chaque limite est multipliée par le nombre d'instances.",
+});
+
+if (redisConn.url && RedisStore && Redis) {
+  const redisUrl = redisConn.url;
 
   /**
    * ═══ TROIS RÉGLAGES, TROIS RAISONS ══════════════════════════════════════
@@ -630,11 +722,27 @@ if (process.env.REDIS_URL && RedisStore && Redis) {
     ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
   });
 
+  /**
+   * ⚠️ LE DIAGNOSTIC EST ÉTRANGLÉ ET EXPLICITE.
+   *
+   * Cet avertissement se contentait du message brut d'ioredis — « wrong version
+   * number », par exemple — qui ne désigne pas le coupable. Et il se répétait à
+   * chaque tentative de reconnexion, donc plusieurs fois par seconde : le
+   * journal se remplissait d'un message que personne ne lisait plus.
+   *
+   * Désormais : une explication actionnable (voir `diagnoseRedisError`) et une
+   * ligne par minute au maximum.
+   */
+  let lastRedisLogAt = 0;
+
   redisClient.on("error", (err) => {
+    const now = Date.now();
+    if (now - lastRedisLogAt < 60000) return;
+    lastRedisLogAt = now;
+
     logger.warn(
-      `[rate-limit] Redis indisponible — les requêtes passent sans limitation : ${
-        err?.message || err
-      }`
+      `[rate-limit] Redis indisponible — comptage EN MÉMOIRE, donc par instance. ` +
+        `${diagnoseRedisError(err, redisUrl)} (message d'origine : ${err?.message || err})`
     );
   });
 
@@ -731,6 +839,8 @@ app.use(
 // ─────────────────────────────────────────────────────────────
 let server = null;
 let autoCancelWorker = null;
+let reconciliationWorker = null;
+let settlementReplayWorker = null;
 let referralOutboxWorker = null;
 
 /**
@@ -815,6 +925,115 @@ async function bootstrap() {
     await connectTransactionsDB();
     readiness.markStarted();
 
+    /**
+     * ÉTAT DES RAILS DE PAIEMENT — AVANT D'ACCEPTER LA MOINDRE REQUÊTE
+     * -------------------------------------------------------------------
+     * Les sept adapters démarraient en mode simulé par défaut : un rail non
+     * configuré ACCEPTAIT l'ordre de virement, réservait les fonds, et ne
+     * payait jamais. Rien ne le signalait.
+     *
+     * `resolveProviderMode()` a fermé cette porte côté paiement. Ce bloc-ci
+     * déplace la découverte au démarrage : le journal dit désormais lesquels
+     * des sept rails sont réels, lesquels sont simulés, et pourquoi.
+     *
+     * En production, un rail mal configuré ARRÊTE le démarrage — c'est le
+     * `catch` ci-dessous qui fait `process.exit(1)`. Ailleurs, on journalise
+     * et on continue : le développement doit tourner sans les identifiants.
+     */
+    /**
+     * ========================================================================
+     * MOTEUR DE RISQUE — LISTE NOIRE DYNAMIQUE ET VÉLOCITÉ
+     * ========================================================================
+     *
+     * Amorcé APRÈS la connexion : le magasin de liste noire lit MongoDB, et
+     * `getTxConn()` lève tant que `connectTransactionsDB()` n'a pas tourné.
+     *
+     * ⚠️ LE CLIENT D'ABONNEMENT EST DÉDIÉ, ET C'EST OBLIGATOIRE. Un client
+     * Redis passé en mode abonné ne peut plus exécuter de commandes
+     * ordinaires : réutiliser `redisClient` casserait la limitation de débit —
+     * silencieusement, puisque `resilientStore` bascule en mémoire sans se
+     * plaindre.
+     *
+     * Sans Redis, tout continue de fonctionner : la vélocité rend `null` (que
+     * le score traduit en `SIGNAL_UNAVAILABLE`, jamais en zéro) et la liste
+     * noire se rafraîchit par TTL au lieu du pub/sub.
+     */
+    try {
+      let riskSubscriber = null;
+
+      if (redisClient && Redis) {
+        try {
+          riskSubscriber = redisClient.duplicate();
+          riskSubscriber.on("error", (err) => {
+            logger.warn(
+              `[risk] abonnement liste noire indisponible : ${err?.message || err}`
+            );
+          });
+        } catch (err) {
+          logger.warn(`[risk] duplication du client Redis impossible : ${err?.message || err}`);
+          riskSubscriber = null;
+        }
+      }
+
+      const riskEngine = require("./services/risk");
+      const etat = await riskEngine.initRiskEngine({
+        redisClient,
+        redisSubscriber: riskSubscriber,
+        logger,
+      });
+
+      logger.info(
+        `[risk] moteur amorcé — vélocité ${etat.velocityEnabled ? "ACTIVE" : "INACTIVE (pas de Redis)"}, ` +
+          `invalidation liste noire ${etat.blacklistSubscribed ? "par pub/sub" : "par TTL seul"}`
+      );
+    } catch (err) {
+      // Fail-open DÉLIBÉRÉ : sans moteur, la liste statique et les limites de
+      // base continuent de s'appliquer. Refuser de démarrer priverait les
+      // utilisateurs du service entier pour une couche de signalement.
+      logger.error(`[risk] amorçage impossible : ${err?.message || err}`);
+    }
+
+    /**
+     * L'index de déduplication du grand livre est-il bien en place ?
+     *
+     * Il se crée à la main (`scripts/ensure-ledger-indexes.js`). S'il manque,
+     * le code écrit des clés qu'aucune contrainte n'observe : la protection est
+     * affichée mais absente. On le dit bruyamment, sans arrêter le démarrage —
+     * priver les utilisateurs du service entier pour une protection qui ne
+     * concerne qu'un régime dégradé serait un mauvais arbitrage.
+     */
+    try {
+      const criticalIndexes = await checkCriticalIndexes(getTxConn());
+      for (const line of formatCriticalIndexesReport(criticalIndexes)) {
+        if (line.includes("❌")) logger.error(line);
+        else if (line.includes("⚠️")) logger.warn(line);
+        else logger.info(line);
+      }
+    } catch (err) {
+      logger.warn(`[ledger] contrôle de l'index de déduplication ignoré : ${err?.message || err}`);
+    }
+
+    const providerReport = describeProviderRails();
+    for (const line of formatProviderRailsReport(providerReport)) {
+      if (line.includes("❌")) logger.error(line);
+      else if (line.includes("⚠️")) logger.warn(line);
+      else logger.info(line);
+    }
+
+    if (!providerReport.ok) {
+      assertProviderRails();
+    }
+
+    /**
+     * L'état simulé/réel des rails devient OBSERVABLE en continu, et pas
+     * seulement dans une ligne de journal au démarrage.
+     *
+     * `provider_rails_mocked > 0` en production attrape le cas où quelqu'un a
+     * posé `ALLOW_PROVIDER_MOCK_IN_PRODUCTION=true` « le temps d'un test » et
+     * l'a oublié — un rail qui accepte les ordres sans jamais payer.
+     */
+    getTxMetricsInstance().setRailModes(providerReport);
+
     const providerWebhookRoutes = require("./routes/providerWebhookRoutes");
     const transactionRoutes = require("./routes/transactionsRoutes");
     const notificationRoutes = require("./routes/notificationRoutes");
@@ -878,6 +1097,40 @@ async function bootstrap() {
     // Démarrage des workers après la connexion DB et le montage des routes.
     autoCancelWorker = startAutoCancelWorker();
     referralOutboxWorker = startReferralWorker();
+
+    /**
+     * RÉCONCILIATION PLANIFIÉE.
+     *
+     * Le service de réconciliation existait déjà et n'était déclenché que par
+     * `npm run reconcile:transactions`, à la main. Il tourne désormais seul, un
+     * seul exécutant par fenêtre (verrou Mongo), et consigne chaque exécution
+     * dans `reconciliation_runs`.
+     *
+     * ⚠️ Il ne CORRIGE rien — il lit, compare et signale. Voir l'en-tête de
+     * `services/reconciliation/transactionReconciliationService.js`.
+     *
+     * Désactivable par `RECONCILIATION_WORKER=false` (par exemple si un service
+     * dédié s'en charge).
+     */
+    reconciliationWorker = startReconciliationWorker();
+
+    /**
+     * ⚠️ CELUI-CI DÉPLACE DE L'ARGENT — ET IL EST DÉSACTIVÉ PAR DÉFAUT.
+     *
+     * Il termine des règlements que nous avions DÉJÀ acceptés : des rappels
+     * prestataire authentifiés dont le traitement s'est interrompu, et que plus
+     * personne ne réémettra. Sans lui, ces événements restent dans le registre,
+     * signalés par la réconciliation et corrigés à la main.
+     *
+     * La distinction avec le worker ci-dessus est nette :
+     *   - la réconciliation DÉDUIT des écarts et ne corrige rien ;
+     *   - le rejeu ACHÈVE un engagement déjà pris.
+     *
+     * `SETTLEMENT_REPLAY_WORKER=true` l'active. Sans cette variable, le rejeu
+     * reste entièrement disponible à la demande (`npm run replay:settlements`,
+     * avec `--dry-run` pour voir sans agir).
+     */
+    settlementReplayWorker = startSettlementReplayWorker();
 
     app.use((_req, res) =>
       res.status(404).json({
@@ -953,6 +1206,15 @@ const graceful = async (signal) => {
       logger.info("⏱️ Auto-cancel TX worker arrêté");
     } catch (err) {
       logger.warn("Erreur arrêt auto-cancel TX worker", {
+        message: err?.message || err,
+      });
+    }
+
+    try {
+      reconciliationWorker?.stop?.();
+      settlementReplayWorker?.stop?.();
+    } catch (err) {
+      logger.warn("Erreur arrêt worker de réconciliation", {
         message: err?.message || err,
       });
     }

@@ -147,6 +147,27 @@ function hasWebhookEventBeenSeen(tx, payload = {}) {
   );
 }
 
+/**
+ * ⚠️ `payload.raw` N'EST PLUS CONSERVÉ ICI.
+ *
+ * Cette fonction recopiait le corps BRUT du prestataire sur la transaction —
+ * donc, selon le rail, le numéro de téléphone et le nom du bénéficiaire, ou les
+ * quatre derniers chiffres d'une carte. Deux aggravations par rapport au même
+ * défaut corrigé sur `provider_webhook_events` :
+ *
+ *   - une transaction ne s'efface jamais, là où le registre a une rétention de
+ *     90 jours ;
+ *   - `webhookHistory` sortait de l'API dans chaque réponse portant une
+ *     transaction (application mobile, back-office, passerelle), le sérialiseur
+ *     ne l'écartant pas.
+ *
+ * On ne garde que ce qui DÉCRIT le fait — la même liste que le registre, et ce
+ * n'est pas un hasard : ce qui ne sert pas à distinguer deux événements ne sert
+ * pas non plus à comprendre ce qui s'est passé.
+ *
+ * `verified` reste, et reste en `!== false` : cette trace sert aussi à savoir
+ * si un règlement est parti d'un rappel authentifié.
+ */
 function appendWebhookHistory(tx, payload = {}) {
   const list = Array.isArray(tx.webhookHistory) ? [...tx.webhookHistory] : [];
 
@@ -160,10 +181,13 @@ function appendWebhookHistory(tx, payload = {}) {
       payload.event ||
       payload.state ||
       null,
+    provider: payload.provider || null,
+    rail: payload.rail || null,
+    amount: typeof payload.amount === "number" ? payload.amount : null,
+    currency: payload.currency || null,
     providerReference: normalizeProviderReference(payload),
     reference: normalizeReference(payload),
     verified: payload.verified !== false,
-    payload: payload.raw || payload,
   });
 
   tx.webhookHistory = list.slice(-50);
@@ -615,7 +639,43 @@ async function settleFailureWebhook({
   };
 }
 
-async function settleExternalTransactionWebhook(req, res, next) {
+/**
+ * ============================================================================
+ * LE MOTEUR DE RÈGLEMENT — F.4
+ * ============================================================================
+ *
+ * ⚠️ CE QUI CHANGE : LE RÈGLEMENT NE DÉPEND PLUS D'UNE REQUÊTE HTTP.
+ *
+ * Toute la logique vivait dans `settleExternalTransactionWebhook(req, res,
+ * next)` : elle lisait `req.body` et écrivait `res`. Conséquence, une seule et
+ * lourde : **rien ne pouvait relancer un règlement, sauf le prestataire.**
+ *
+ * Or F.3 a montré que c'est insuffisant. Le registre des rappels retient
+ * durablement des événements authentifiés dont le règlement ne s'est jamais
+ * terminé — `PROVIDER_EVENT_UNSETTLED` (processus mort en plein règlement) et
+ * `PROVIDER_EVENT_FAILED` (rejeux du prestataire taris). Nous avions la matière
+ * et aucun moyen de nous en servir : il fallait attendre un rappel qui ne
+ * viendrait plus.
+ *
+ * `settleExternalTransaction(payload)` est donc le moteur, et il rend
+ * `{ statusCode, body }` au lieu d'écrire une réponse. Trois appelants :
+ *   1. la route signée du prestataire (via l'adaptateur HTTP ci-dessous) ;
+ *   2. la route interne héritée `POST /webhooks/:provider` ;
+ *   3. le rejeu depuis le registre (`services/settlement/settlementReplay.js`).
+ *
+ * Les trois exécutent EXACTEMENT le même code. C'est le point : une seconde
+ * implémentation du règlement serait une seconde façon de créditer un
+ * bénéficiaire, donc un second risque de double crédit.
+ *
+ * L'idempotence ne change pas de nature — elle est déjà portée par
+ * `hasWebhookEventBeenSeen`, les drapeaux monétaires de la transaction
+ * (`fundsCaptured`, `beneficiaryCredited`…) et la transaction Mongo. Un rejeu
+ * depuis le registre franchit les mêmes gardes qu'un rejeu du prestataire.
+ *
+ * @param {object} payload  Charge NORMALISÉE (sortie de `buildSettlementPayload`).
+ * @returns {Promise<{statusCode: number, body: object}>}
+ */
+async function settleExternalTransaction(payload = {}) {
   const session = await startTxSession();
 
   try {
@@ -638,7 +698,6 @@ async function settleExternalTransactionWebhook(req, res, next) {
      */
     const result = await runInTransaction(session, async (activeSession) => {
     const sessOpts = maybeSessionOpts(activeSession);
-    const payload = req.body || {};
     const mapped = mapProviderState(payload);
 
     const tx = await findTransactionFromWebhook(
@@ -775,11 +834,10 @@ async function settleExternalTransactionWebhook(req, res, next) {
       return result;
     });
 
-    // Réponse écrite APRÈS la transaction, une seule fois.
-    return res.status(result.statusCode).json(result.body);
+    return result;
   } catch (err) {
     await abortAndEnd(session);
-    return next(err);
+    throw err;
   } finally {
     try {
       session?.endSession?.();
@@ -787,6 +845,26 @@ async function settleExternalTransactionWebhook(req, res, next) {
   }
 }
 
+/**
+ * Adaptateur HTTP — et rien d'autre.
+ *
+ * Il ne contient AUCUNE règle de règlement, délibérément : toute logique
+ * ajoutée ici échapperait au rejeu depuis le registre, et le rejeu produirait
+ * alors un résultat différent du direct. C'est précisément le genre de
+ * divergence qui ne se voit qu'en incident.
+ */
+async function settleExternalTransactionWebhook(req, res, next) {
+  try {
+    const result = await settleExternalTransaction(req.body || {});
+
+    // Réponse écrite APRÈS la transaction, une seule fois.
+    return res.status(result.statusCode).json(result.body);
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
+  settleExternalTransaction,
   settleExternalTransactionWebhook,
 };

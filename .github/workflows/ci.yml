@@ -1,0 +1,99 @@
+# ============================================================================
+# TX-CORE — INTÉGRATION CONTINUE
+# ============================================================================
+#
+# POURQUOI CE FICHIER EXISTE
+# --------------------------
+# Aucun des cinq dépôts PayNoval n'avait de chaîne d'intégration. Les 222 tests
+# de ce service existaient, étaient verts, et personne ne les exécutait avant de
+# fusionner. C'est le risque qui amplifie tous les autres : sans chaîne, chaque
+# défaut corrigé peut revenir sans que rien ne le signale.
+#
+# Ce service est celui qui déplace l'argent : il est le premier à en avoir un.
+#
+# CE QUI EST VÉRIFIÉ, ET CE QUI NE L'EST PAS
+# ------------------------------------------
+# Vérifié : les tests passent, sur les DEUX versions de Node concernées, sans
+# aucun `.env` — c'est la propriété qui rend cette suite utilisable ici, et elle
+# a été mesurée avant d'écrire ce fichier.
+#
+# Non vérifié : aucun lint (le dépôt n'en déclare pas), aucune étape de build
+# (il n'y en a pas), aucun test d'intégration avec MongoDB. Ne pas ajouter de
+# suite qui ouvre une connexion sans y réfléchir : les 222 tests tournent en
+# 3 secondes PARCE QU'aucun ne le fait, et c'est ce qui les rend exécutables à
+# chaque poussée.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Une poussée qui en remplace une autre annule la précédente : inutile de payer
+# deux exécutions pour un résultat qu'on ne lira pas.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20.x est la version DÉCLARÉE dans `engines` — donc celle qui tourne en
+        # production. 22.x est celle des postes de développement. Tester les deux
+        # est le seul moyen de voir la dérive avant qu'elle ne casse un déploiement.
+        node: ["20.x", "22.x"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` et non `npm install` : il installe EXACTEMENT le lockfile et
+      # échoue si `package.json` et `package-lock.json` divergent. C'est ce qui
+      # rend l'exécution reproductible.
+      - run: npm ci
+
+      - name: Tests
+        run: npm test
+
+  audit:
+    name: Vulnérabilités
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: npm
+
+      - run: npm ci
+
+      # ─────────────────────────────────────────────────────────────────────
+      # CLIQUET — le seuil est réglé sur l'état ACTUEL du dépôt, pas sur un
+      # idéal. Mesuré le 2026-08-26 : 0 critique, 0 élevée, 16 modérées.
+      #
+      # Bloquer à `high` signifie donc : « ce dépôt est propre sur ce qui
+      # compte, et il le restera ». Une nouvelle dépendance vulnérable est
+      # refusée à la fusion.
+      #
+      # Un seuil plus strict que l'état réel rendrait la chaîne rouge dès sa
+      # création — et une chaîne rouge en permanence est une chaîne qu'on
+      # ignore. Resserrer à `moderate` quand les 16 seront traitées.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: "npm audit (seuil : high)"
+        run: npm audit --audit-level=high

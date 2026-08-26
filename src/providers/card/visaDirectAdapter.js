@@ -3,6 +3,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
+const { resolveProviderMode } = require("../providerMode");
 
 const PROVIDER = "visa_direct";
 
@@ -54,7 +55,11 @@ function getConfig() {
     baseURL: process.env.VISA_DIRECT_BASE_URL || "",
     apiKey: process.env.VISA_DIRECT_API_KEY || "",
     timeout: Number(process.env.VISA_DIRECT_TIMEOUT_MS || 20000),
-    mock: String(process.env.VISA_DIRECT_MOCK || "true").toLowerCase() === "true",
+    ...resolveProviderMode({
+      provider: PROVIDER,
+      envPrefix: "VISA_DIRECT",
+      baseURL: process.env.VISA_DIRECT_BASE_URL || "",
+    }),
   };
 }
 
@@ -119,7 +124,7 @@ async function payout(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("VISA_PAYOUT"),
       externalStatus: "PENDING",
@@ -182,7 +187,7 @@ async function collect(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("VISA_COLLECT"),
       externalStatus: "PENDING",

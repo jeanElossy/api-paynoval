@@ -1047,9 +1047,37 @@ async function applySandboxConfirm({ req, tx, sessOpts }) {
 
   const now = new Date();
 
-  tx.status = tx.status || "completed";
+  /**
+   * ⚠️ CORRECTIF — CE CHEMIN NE POUVAIT PAS ABOUTIR.
+   *
+   * Ces trois lignes écrivaient `tx.status = "completed"`. Or `"completed"`
+   * n'existe pas dans `STATUSES` (`models/Transaction.js:47-58`), qui déclare
+   * `created, pending, pending_review, processing, confirmed, cancelled,
+   * refunded, relaunch, locked, failed`.
+   *
+   * Le `await tx.save()` en fin de fonction déclenche donc la validation
+   * d'énumération de Mongoose et LÈVE. `applySandboxConfirm()` — le chemin
+   * emprunté pour la revue App Store — échouait systématiquement en 500.
+   *
+   * Le statut de succès déclaré est `"confirmed"` : c'est ce qu'écrit le
+   * chemin réel (ligne 1760 de ce fichier), c'est le terminal `CONFIRMED` de
+   * la machine à états, et il figure dans les vocabulaires de lecture
+   * (`autoCancelPolicy.FINAL_STATUSES`) — donc une transaction sandbox ne
+   * partira pas en auto-annulation.
+   *
+   * ⚠️ NE PAS « corriger » en ajoutant `"completed"` à l'énumération : cela
+   * créerait deux statuts de succès pour la même réalité, ce que §24 de
+   * l'architecture interdit explicitement (ne jamais mélanger statut de
+   * transaction, statut prestataire et statut de règlement). `"completed"`
+   * reste un statut PRESTATAIRE, rendu par `canonicalStatus()` des adapters.
+   *
+   * `"initiated"` dans le test d'appartenance ci-dessous n'existe pas non plus,
+   * mais en LECTURE c'est sans conséquence — on le laisse par tolérance aux
+   * documents hérités.
+   */
+  tx.status = tx.status || "confirmed";
   if (["pending", "processing", "initiated", "pending_review", "relaunch"].includes(normalizeStatus(tx.status))) {
-    tx.status = "completed";
+    tx.status = "confirmed";
   }
 
   tx.provider = "sandbox";

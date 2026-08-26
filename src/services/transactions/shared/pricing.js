@@ -26,6 +26,8 @@ const {
   pickCurrency,
 } = require("./helpers");
 
+const { validatePricingQuote } = require("./pricingValidation");
+
 function pickBodyPricingInput(reqBody = {}) {
   const amount = toFloat(reqBody.amount ?? reqBody.amountSource, 0);
 
@@ -136,44 +138,59 @@ function extractPricingBundle(pricingPayload, pricingInput = {}) {
     debug: pricingPayload?.debug || null,
   });
 
-  const fromCurrency = pickCurrency(
-    pricingSnapshot?.request?.fromCurrency,
-    pricingSnapshot?.request?.currency,
-    pricingInput?.fromCurrency,
-    pricingInput?.currency,
-    "CAD"
+  /**
+   * ⚠️ ON VALIDE LE DEVIS AVANT DE S'EN SERVIR — ON NE COMBLE PLUS SES TROUS.
+   *
+   * Chaque champ était auparavant lu avec une valeur de repli silencieuse :
+   * frais à 0, montant reçu à 0, taux à 0, et devise repliée en dur sur « CAD ».
+   * Une réponse incomplète ne produisait donc pas une erreur, elle produisait un
+   * virement — sans frais, ou dans une monnaie que personne n'avait demandée.
+   *
+   * Un devis qu'on ne sait pas lire n'est pas un devis à zéro : c'est une
+   * absence de devis. Le raisonnement complet est en tête de
+   * `pricingValidation.js`.
+   */
+  const controle = validatePricingQuote(
+    { request: pricingSnapshot?.request, result: pricingSnapshot?.result },
+    pricingInput
   );
 
-  const toCurrency = pickCurrency(
-    pricingSnapshot?.request?.toCurrency,
-    pricingInput?.toCurrency,
-    fromCurrency
-  );
+  if (!controle.ok) {
+    logger?.error?.("[TX-CORE][PRICING_QUOTE][INVALIDE]", {
+      errors: controle.errors,
+      pricingInput,
+    });
 
-  const fee = roundMoney(
-    toFloat(pricingSnapshot?.result?.fee, 0),
-    fromCurrency
-  );
+    /**
+     * 502 et non 400 : la requête de l'utilisateur est valide, c'est la réponse
+     * du service de tarification qui ne l'est pas. Même code que lorsque la
+     * passerelle est injoignable — dans les deux cas, nous n'avons pas de prix.
+     */
+    throw createError(
+      502,
+      `Devis de tarification inexploitable : ${controle.errors.join(" ; ")}`
+    );
+  }
 
-  const grossFrom = roundMoney(
-    toFloat(pricingSnapshot?.result?.grossFrom, pricingInput?.amount || 0),
-    fromCurrency
-  );
+  const { fromCurrency, toCurrency } = controle.values;
 
-  const netFrom = roundMoney(
-    toFloat(pricingSnapshot?.result?.netFrom, grossFrom - fee),
-    fromCurrency
-  );
-
-  const rawNetTo = toFloat(pricingSnapshot?.result?.netTo, NaN);
-  const netTo = Number.isFinite(rawNetTo)
-    ? roundMoney(rawNetTo, toCurrency)
-    : 0;
+  const fee = roundMoney(controle.values.fee, fromCurrency);
+  const grossFrom = roundMoney(controle.values.grossFrom, fromCurrency);
+  const netFrom = roundMoney(controle.values.netFrom, fromCurrency);
+  const netTo = roundMoney(controle.values.netTo, toCurrency);
 
   // Un taux n'est pas un montant : `round2` écrasait à 0,00 tout corridor dont
   // le taux est inférieur à 0,01 — XOF → EUR vaut ~0,001524. Les montants,
   // eux, restent arrondis à la devise via `roundMoney`.
-  const appliedRate = toFloat(pricingSnapshot?.result?.appliedRate, 0);
+  const appliedRate = controle.values.appliedRate;
+
+  /**
+   * `marketRate` reste tolérant, et c'est délibéré : quand une règle impose un
+   * taux (`fx.overrideRate`), il n'existe aucun taux de marché à citer et la
+   * passerelle renvoie `null`. L'exiger casserait tous les corridors à taux
+   * imposé. Il ne sert qu'au calcul de la marge de change, jamais au montant
+   * remis au bénéficiaire.
+   */
   const marketRate = toFloat(pricingSnapshot?.result?.marketRate, 0);
 
   const treasuryRevenue = buildTreasuryRevenueBreakdown(pricingSnapshot);

@@ -34,6 +34,8 @@
 
 const { getTxConn } = require("../../config/db");
 
+const { computeTrialBalance } = require("../ledger/doubleEntry");
+
 let logger = console;
 try {
   logger = require("../../logger");
@@ -41,6 +43,16 @@ try {
 
 const ANOMALIES = Object.freeze({
   WALLET_IMBALANCE: "WALLET_IMBALANCE",
+  /**
+   * Débits ≠ crédits sur une transaction, POUR UNE DEVISE DONNÉE.
+   *
+   * C'est le seul contrôle de ce fichier qui n'a pas besoin de connaître le
+   * défaut à l'avance : il attrape une écriture perdue, une écriture en double
+   * ou un montant erroné, sans qu'on ait eu à imaginer le scénario. Les cinq
+   * autres invariants sont énumérés à la main et ne trouvent que ce qu'on a su
+   * prévoir.
+   */
+  LEDGER_UNBALANCED: "LEDGER_UNBALANCED",
   MISSING_LEDGER_FOR_CAPTURE: "MISSING_LEDGER_FOR_CAPTURE",
   MISSING_LEDGER_FOR_CREDIT: "MISSING_LEDGER_FOR_CREDIT",
   DUPLICATE_LEDGER_ENTRY: "DUPLICATE_LEDGER_ENTRY",
@@ -221,6 +233,40 @@ async function checkTransactionLedger({ sinceHours, limit }) {
           detail: "écriture comptable produite plusieurs fois pour un même mouvement",
         });
       }
+    }
+
+    /**
+     * ═══ BALANCE DE VÉRIFICATION ═══════════════════════════════════════════
+     *
+     * L'invariant fondateur de la comptabilité en partie double :
+     * `Σ DEBIT = Σ CREDIT`, **par devise**.
+     *
+     * Vérifié PAR DEVISE et jamais globalement — un virement peut convertir, et
+     * additionner des XOF avec des CAD n'aurait aucun sens. Le raisonnement
+     * complet est en tête de `services/ledger/doubleEntry.js`.
+     *
+     * ⚠️ Ne porte que sur les écritures `ledgerVersion >= 2`. L'historique en
+     * partie simple, antérieur au 2026-08-26, est ignoré : l'inclure ferait
+     * échouer le contrôle sur tout le passé, et un contrôle toujours rouge est
+     * un contrôle qu'on désactive dans la semaine.
+     */
+    const trial = computeTrialBalance(own);
+
+    if (!trial.balanced) {
+      anomalies.push({
+        type: ANOMALIES.LEDGER_UNBALANCED,
+        transactionId: String(tx._id),
+        reference: tx.reference || null,
+        flow: tx.flow || null,
+        byCurrency: trial.byCurrency,
+        consideredEntries: trial.consideredEntries,
+        detail:
+          "débits ≠ crédits sur cette transaction : " +
+          Object.entries(trial.byCurrency)
+            .filter(([, b]) => Math.abs(b.delta) > 0.005)
+            .map(([cur, b]) => `${cur} écart ${b.delta.toFixed(4)}`)
+            .join(", "),
+      });
     }
   }
 

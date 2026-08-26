@@ -3,6 +3,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
+const { resolveProviderMode } = require("../providerMode");
 
 const PROVIDER = "wave";
 
@@ -61,7 +62,11 @@ function getConfig() {
     apiKey: process.env.WAVE_API_KEY || "",
     webhookSecret: process.env.WAVE_WEBHOOK_SECRET || "",
     timeout: Number(process.env.WAVE_TIMEOUT_MS || 15000),
-    mock: String(process.env.WAVE_MOCK || "true").toLowerCase() === "true",
+    ...resolveProviderMode({
+      provider: PROVIDER,
+      envPrefix: "WAVE",
+      baseURL: process.env.WAVE_BASE_URL || "",
+    }),
   };
 }
 
@@ -145,7 +150,7 @@ async function payout(input = {}) {
   const cfg = getConfig();
   const payload = buildPayoutPayload(input);
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("WAVE_PAYOUT"),
       externalStatus: "PENDING",
@@ -184,7 +189,7 @@ async function collect(input = {}) {
   const cfg = getConfig();
   const payload = buildCollectPayload(input);
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("WAVE_COLLECT"),
       externalStatus: "PENDING",

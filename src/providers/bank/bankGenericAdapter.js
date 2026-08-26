@@ -3,6 +3,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { verifyHmacWebhook } = require("../../services/transactions/shared/webhookSecurity");
+const { resolveProviderMode } = require("../providerMode");
 
 const PROVIDER = "bank_generic";
 
@@ -49,7 +50,11 @@ function getConfig() {
     baseURL: process.env.BANK_GENERIC_BASE_URL || "",
     apiKey: process.env.BANK_GENERIC_API_KEY || "",
     timeout: Number(process.env.BANK_GENERIC_TIMEOUT_MS || 20000),
-    mock: String(process.env.BANK_GENERIC_MOCK || "true").toLowerCase() === "true",
+    ...resolveProviderMode({
+      provider: PROVIDER,
+      envPrefix: "BANK_GENERIC",
+      baseURL: process.env.BANK_GENERIC_BASE_URL || "",
+    }),
   };
 }
 
@@ -116,7 +121,7 @@ async function payout(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("BANK_PAYOUT"),
       externalStatus: "PENDING",
@@ -172,7 +177,7 @@ async function collect(input = {}) {
     metadata: input.metadata || {},
   };
 
-  if (cfg.mock || !cfg.baseURL) {
+  if (cfg.mock) {
     return okResult({
       providerReference: buildRef("BANK_COLLECT"),
       externalStatus: "PENDING",

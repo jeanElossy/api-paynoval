@@ -762,7 +762,29 @@ async function initiateInternal(req, res, next) {
       metadata: txMetadata,
       meta: txMeta,
 
-      status: "pending",
+      /**
+       * ⚠️ ÉTAT INITIAL DÉCIDÉ PAR LE SCORE DE RISQUE.
+       *
+       * `amlMiddleware` s'exécute AVANT que la transaction existe : il ne peut
+       * pas poser d'état, il pose son verdict sur `req.riskVerdict`. C'est ici
+       * qu'il s'applique.
+       *
+       * `pending_review` n'est PAS un refus. Les fonds sont réservés
+       * exactement comme pour un `pending` — c'est indispensable : laisser le
+       * solde disponible pendant la revue permettrait de le dépenser ailleurs,
+       * et la transaction deviendrait impayable au moment de sa validation.
+       * Seule la CONFIRMATION attend un opérateur.
+       *
+       * Un 403 aurait dit « non » à un client légitime sans recours ni
+       * explication. Ici il voit un virement « en cours de vérification », et
+       * l'opérateur dispose d'un dossier motivé (`riskVerdict.reasons`).
+       */
+      status: req?.riskVerdict?.band === "review" ? "pending_review" : "pending",
+      riskScore:
+        typeof req?.riskVerdict?.score === "number" ? req.riskVerdict.score : null,
+      riskReasons: Array.isArray(req?.riskVerdict?.reasons)
+        ? req.riskVerdict.reasons
+        : null,
       providerStatus: "FUNDS_RESERVED_PENDING_CONFIRMATION",
 
       ...autoCancelFields,

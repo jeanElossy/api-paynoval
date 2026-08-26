@@ -299,7 +299,7 @@ const logger = require("../logger");
 
 const { getProviderAdapter } = require("../providers/providerSelector");
 const {
-  settleExternalTransactionWebhook,
+  settleExternalTransaction,
 } = require("./externalSettlementController");
 
 function norm(value) {
@@ -617,6 +617,12 @@ function assertSettlementHasIdentifier(payload = {}) {
   );
 }
 
+const {
+  claimEvent,
+  markProcessed,
+  markFailed,
+} = require("../services/webhooks/webhookEventStore");
+
 async function providerWebhookController(req, res, next) {
   try {
     const provider = pickProvider(req);
@@ -691,7 +697,119 @@ async function providerWebhookController(req, res, next) {
 
     req.body = settlementPayload;
 
-    return settleExternalTransactionWebhook(req, res, next);
+    /* ========================================================================
+     * IDEMPOTENCE — LE REJEU EST LE COMPORTEMENT NORMAL D'UN PRESTATAIRE
+     * ========================================================================
+     *
+     * Rien ne dédupliquait ces rappels. Or tous les prestataires réémettent
+     * tant qu'ils n'ont pas reçu un 2xx, et plusieurs réémettent même après :
+     * l'audit classait ce risque « probabilité élevée », et ce n'est pas un
+     * accident, c'est le protocole.
+     *
+     * Le contrôle est posé ICI, et pas ailleurs :
+     *   - APRÈS la vérification de signature — enregistrer un événement non
+     *     authentifié permettrait à n'importe qui de remplir le registre, et
+     *     pire, de RÉSERVER l'identifiant d'un vrai événement pour empêcher son
+     *     traitement ;
+     *   - AVANT le règlement — c'est lui qui déplace l'argent.
+     */
+    const claim = await claimEvent(settlementPayload);
+
+    if (claim.action === "replay") {
+      /**
+       * Déjà traité. On répond 200 : toute autre réponse ferait réessayer le
+       * prestataire indéfiniment sur un événement dont on a déjà tiré toutes
+       * les conséquences.
+       */
+      logger.info("[providerWebhook] rejeu ignoré", {
+        provider,
+        rail,
+        eventId: claim.key,
+        derived: claim.derived,
+      });
+
+      res.set("Webhook-Replayed", "true");
+      return res.status(200).json({
+        success: true,
+        replayed: true,
+        eventId: claim.key,
+      });
+    }
+
+    if (claim.action === "conflict") {
+      /**
+       * Le même événement est en cours de traitement ailleurs — deux instances
+       * l'ont reçu en parallèle, ce que les prestataires font couramment.
+       *
+       * ⚠️ 409 ET SURTOUT PAS 200. Acquitter un traitement qui peut encore
+       * échouer ferait cesser les réémissions, et l'événement serait perdu
+       * définitivement.
+       */
+      logger.warn("[providerWebhook] déjà en cours ailleurs", {
+        provider,
+        rail,
+        eventId: claim.key,
+      });
+
+      return res.status(409).json({
+        success: false,
+        error: "Rappel déjà en cours de traitement",
+        code: "WEBHOOK_IN_PROGRESS",
+        eventId: claim.key,
+      });
+    }
+
+    /**
+     * ⚠️ ON MARQUE APRÈS LE RÈGLEMENT, JAMAIS AVANT.
+     *
+     * Marquer d'abord ferait perdre l'événement pour de bon si le règlement
+     * échouait ensuite : le rejeu suivant serait pris pour un doublon et
+     * ignoré, l'argent n'arriverait jamais chez le bénéficiaire, et aucune
+     * erreur n'apparaîtrait nulle part.
+     *
+     * ⚠️ ON ATTEND LE RÉSULTAT, ON N'OBSERVE PLUS `res.on("finish")`.
+     *
+     * L'écoute de la réponse était le seul moyen tant que le règlement écrivait
+     * lui-même dans `res` et ne rendait rien. Depuis F.4, il rend
+     * `{ statusCode, body }` — on peut donc clore le registre sur un fait plutôt
+     * que sur une inférence. Deux gains concrets :
+     *
+     *   - la clôture précède l'envoi de la réponse. Avec `finish`, elle le
+     *     suivait : un processus tué entre les deux laissait l'événement en
+     *     `processing` pour toujours, alors même que le règlement était acquis ;
+     *   - un échec est saisi comme une exception, avec son message, au lieu
+     *     d'être déduit d'un code HTTP écrit par le gestionnaire d'erreurs.
+     *
+     * Si `markProcessed` échoue, le règlement reste acquis et l'événement paraît
+     * inachevé : le rejeu suivant le retraversera, et les drapeaux monétaires de
+     * la transaction l'arrêteront sans rien doubler. C'est le bon sens de
+     * l'erreur.
+     */
+    let result;
+
+    try {
+      result = await settleExternalTransaction(req.body);
+    } catch (err) {
+      await markFailed(claim.key, provider, err).catch((e) =>
+        logger.error("[providerWebhook] clôture du registre impossible", {
+          eventId: claim.key,
+          error: e?.message || e,
+        })
+      );
+
+      throw err;
+    }
+
+    await markProcessed(claim.key, provider, {
+      responseStatus: result.statusCode,
+    }).catch((e) =>
+      logger.error("[providerWebhook] clôture du registre impossible", {
+        eventId: claim.key,
+        error: e?.message || e,
+      })
+    );
+
+    return res.status(result.statusCode).json(result.body);
   } catch (err) {
     return next(err);
   }

@@ -26,7 +26,14 @@ const createError = require("http-errors");
 const asyncHandler = require("express-async-handler");
 const crypto = require("crypto");
 
+const mongoose = require("mongoose");
+
 const { getUsersConn } = require("../config/db");
+const {
+  resolveDeviceId,
+  evaluateDeviceBinding,
+  buildDeviceQuery,
+} = require("./deviceBinding");
 const config = require("../config");
 
 const isProd = process.env.NODE_ENV === "production";
@@ -109,6 +116,31 @@ if (hasJWKS) {
 // Lazy User Model (évite crash si DB pas prête au require)
 // ─────────────────────────────────────────────────────────────
 let _UserModel = null;
+/**
+ * Modèle `Device`, résolu PARESSEUSEMENT comme `User` : la connexion Users
+ * n'existe qu'après `connectTransactionsDB()`, et le résoudre à l'import
+ * rendrait ce middleware — donc tout le service — impossible à charger hors
+ * d'un processus serveur démarré.
+ *
+ * Rend `null` plutôt que de lever : l'appelant traite l'indisponibilité en
+ * FAIL-CLOSED (503), ce qui est plus lisible qu'une exception remontée.
+ */
+let _DeviceModel = null;
+
+function getDeviceModel() {
+  if (_DeviceModel) return _DeviceModel;
+
+  try {
+    const conn = getUsersConn?.();
+    if (!conn) return null;
+
+    _DeviceModel = require("../models/Device")(conn);
+    return _DeviceModel;
+  } catch (_err) {
+    return null;
+  }
+}
+
 function getUserModel() {
   if (_UserModel) return _UserModel;
 
@@ -370,11 +402,59 @@ exports.internalProtect = asyncHandler(async (req, _res, next) => {
 /**
  * ✅ protect (JWT) + support appels internes gateway (x-internal-token + x-user-id)
  */
+/**
+ * ============================================================================
+ * IDENTITÉ PROUVÉE CONTRE IDENTITÉ ASSERTÉE
+ * ============================================================================
+ *
+ * ⚠️ CE MIDDLEWARE LAISSAIT N'IMPORTE QUEL PORTEUR DU JETON INTERNE SE
+ * DÉCLARER N'IMPORTE QUEL UTILISATEUR — SUPERADMIN COMPRIS.
+ *
+ * L'ancienne première branche était : `x-internal-token` valide + `x-user-id`
+ * ⇒ on charge cet utilisateur et on lui rend son rôle réel, **sans jamais
+ * vérifier le JWT**. Elle rendait la main AVANT même de regarder l'en-tête
+ * `Authorization`. Un secret de service devenait donc une clé d'usurpation
+ * universelle : c'est le « député confus » dans sa forme la plus directe.
+ *
+ * LA RÈGLE APPLIQUÉE MAINTENANT — celle des grands émetteurs de paiement :
+ *
+ *   **Un jeton de service authentifie un SERVICE. Jamais un UTILISATEUR.**
+ *
+ * D'où trois cas, et un seul chemin vers le privilège :
+ *
+ *   1. **Jeton interne + JWT utilisateur** → le JWT GAGNE. L'identité est
+ *      PROUVÉE (l'utilisateur l'a présentée), le rôle réel s'applique, et le
+ *      jeton interne ne sert plus qu'à marquer `req.isInternal` — une confiance
+ *      réseau, pas une identité. C'est le cas de la passerelle, qui relaie déjà
+ *      l'`Authorization` d'origine.
+ *
+ *   2. **Jeton interne + `x-user-id`, sans JWT** → identité ASSERTÉE. Le
+ *      service agit POUR le compte, sans que celui-ci l'ait présenté. On charge
+ *      bien l'utilisateur — un virement doit être rattaché à quelqu'un — mais
+ *      **le rôle est ramené à `user`**. Une identité assertée ne porte AUCUN
+ *      privilège d'exploitation : elle ne peut ni valider, ni rembourser, ni
+ *      annuler autre chose que ce que le compte pourrait faire lui-même.
+ *      C'est exactement le motif « on-behalf-of » : agir pour un client, jamais
+ *      en tant que personnel.
+ *
+ *   3. **Jeton interne seul** → principal de SERVICE (`role: "gateway"`), sans
+ *      identité utilisateur. Inchangé.
+ *
+ * Conséquence concrète : le secret de service, s'il fuite, ne donne plus accès
+ * qu'à ce qu'un utilisateur ordinaire peut faire sur son propre compte. Le
+ * privilège d'exploitation exige un JWT valide et un rôle en base.
+ */
 exports.protect = asyncHandler(async (req, _res, next) => {
-  // 0) ✅ Autoriser les appels internes du Gateway / services internes
   const gotInternal = String(getInternalHeaderToken(req) || "").trim();
+  const isInternalCaller = Boolean(gotInternal && isValidInternalToken(gotInternal));
 
-  if (gotInternal && isValidInternalToken(gotInternal)) {
+  const hdrAuth = req.get("Authorization") || req.get("authorization") || "";
+  const token = extractBearerToken(hdrAuth);
+
+  /* ==========================================================================
+   * CAS 3 — jeton de service seul : aucune identité utilisateur
+   * ======================================================================== */
+  if (isInternalCaller && !token) {
     const uid = String(getUserIdHeader(req) || "").trim();
 
     if (!uid) {
@@ -382,6 +462,7 @@ exports.protect = asyncHandler(async (req, _res, next) => {
       req.auth = {
         internal: true,
         scope: "gateway",
+        assertedIdentity: false,
         tokenPreview: `${gotInternal.slice(0, 6)}...`,
         usedFallback: false,
       };
@@ -389,14 +470,31 @@ exports.protect = asyncHandler(async (req, _res, next) => {
       return next();
     }
 
+    /* ========================================================================
+     * CAS 2 — identité ASSERTÉE : on agit POUR le compte, sans privilège
+     * ====================================================================== */
+    if (!mongoose.isValidObjectId(uid)) {
+      return next(createError(400, "En-tête x-user-id invalide"));
+    }
+
     const User = getUserModel();
     const user = await User.findById(uid).select(USER_SAFE_EXCLUDE).lean();
     if (!user) return next(createError(401, "Utilisateur non trouvé"));
 
-    req.user = mapUserToReqUser(user);
+    const mapped = mapUserToReqUser(user);
+
+    /**
+     * ⚠️ LA LIGNE QUI FERME LA PORTE. Le rôle réel de ce compte n'est PAS
+     * appliqué : personne n'a prouvé que son titulaire est à l'origine de
+     * l'appel. Un compte administrateur asserté par en-tête agit comme un
+     * utilisateur ordinaire — et c'est tout ce dont les appels de service
+     * légitimes (miroir de transactions, relance de file) ont besoin.
+     */
+    req.user = { ...mapped, role: "user", assertedRole: true };
     req.auth = {
       internal: true,
       scope: "gateway",
+      assertedIdentity: true,
       tokenPreview: `${gotInternal.slice(0, 6)}...`,
       usedFallback: false,
     };
@@ -404,10 +502,9 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     return next();
   }
 
-  // 1) JWT classique
-  const hdrAuth = req.get("Authorization") || req.get("authorization") || "";
-  const token = extractBearerToken(hdrAuth);
-
+  /* ==========================================================================
+   * CAS 1 — identité PROUVÉE par JWT (avec ou sans jeton de service)
+   * ======================================================================== */
   if (!token) {
     return next(createError(401, "Non autorisé : token manquant"));
   }
@@ -439,15 +536,82 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     return next(createError(401, "Utilisateur non trouvé"));
   }
 
+  /* ==========================================================================
+   * LIAISON À L'APPAREIL — la révocation de session s'arrêtait à la porte
+   * ========================================================================
+   * Voir `middleware/deviceBinding.js`. En résumé : un jeton exfiltré était
+   * refusé par le backend principal et ACCEPTÉ ICI, c'est-à-dire par le service
+   * qui détient les soldes et exécute les virements.
+   */
+  const binding = resolveDeviceId({ payload: decoded, headers: req.headers });
+
+  if (binding.mismatch) {
+    return next(createError(401, "Appareil incohérent avec le jeton"));
+  }
+
+  if (binding.deviceId) {
+    const Device = getDeviceModel();
+
+    if (!Device) {
+      // Fail-closed : un jeton lié à un appareil ne passe jamais sans que la
+      // vérification ait pu avoir lieu.
+      return next(createError(503, "Vérification de l'appareil indisponible"));
+    }
+
+    let device;
+    try {
+      device = await Device.findOne(
+        buildDeviceQuery(binding.deviceId, String(user._id)),
+        "sessionInvalidBefore status user"
+      ).lean();
+    } catch (_err) {
+      // Fail-closed également sur panne base.
+      return next(createError(503, "Vérification de l'appareil indisponible"));
+    }
+
+    const verdict = evaluateDeviceBinding({
+      device,
+      payloadIat: decoded?.iat,
+    });
+
+    if (!verdict.ok) {
+      /**
+       * ⚠️ DIAGNOSTIC — sans lui, un défaut de configuration se présente comme
+       * un 401 opaque sur TOUTES les requêtes mobiles.
+       *
+       * Le cas redouté : la connexion Users de TX Core ne pointe pas sur la même
+       * base que celle où le backend écrit les appareils. Le contrôle échoue
+       * alors en `UNKNOWN_DEVICE` pour tout le monde, et rien ne distingue « la
+       * session a été révoquée » de « je ne regarde pas au bon endroit ».
+       *
+       * L'identifiant d'appareil n'est pas un secret : le journaliser est sans
+       * risque, et c'est ce qui rend la panne diagnosticable en une ligne.
+       */
+      try {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[auth] appareil refusé (${verdict.code}) user=${String(user._id)} device=${binding.deviceId}`
+        );
+      } catch {}
+
+      return next(createError(verdict.status, verdict.message));
+    }
+
+    req.device = device;
+  }
+
   req.user = mapUserToReqUser(user);
 
   req.auth = {
     tokenPreview: `${token.slice(0, 10)}...`,
     alg: base64UrlDecodeToJson(token.split(".")[0])?.alg || null,
     usedFallback,
-    internal: false,
+    internal: isInternalCaller,
+    assertedIdentity: false,
   };
 
-  req.isInternal = false;
+  // Le jeton de service reste une information de confiance RÉSEAU, jamais une
+  // identité : il ne change ni l'utilisateur ni son rôle.
+  req.isInternal = isInternalCaller;
   return next();
 });

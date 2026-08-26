@@ -19,7 +19,9 @@ npm start        # node src/server.js
 npm test         # node --test "test/**/*.test.js" — runner natif, aucune dépendance
 node --test test/userScopeQuery.test.js  # un seul fichier
 
-npm run reconcile:transactions           # reconciliation de TOUS les flux (lecture seule)
+npm run reconcile:transactions           # reconciliation DEUX AXES (lecture seule)
+npm run replay:settlements -- --dry-run  # ce qui SERAIT rejoue, sans rien faire
+npm run replay:settlements               # ⚠️ DEPLACE DE L'ARGENT (voir plus bas)
 npm run reconcile:referral               # reconciliation des versements de parrainage
 npm run verify:referral-idempotency      # 100 tentatives simultanees -> 1 versement
 
@@ -148,6 +150,68 @@ Double écriture dans `LedgerEntry` avec des `accountId` conventionnels : `user_
 - Au-dessus : `services/transactions/providers/` — `providerExecutorRegistry.resolveExecutor({flow, provider})` choisit l'executor, et **retourne `null` pour tout flow/provider sandbox** (garde-fou secondaire).
 - Webhooks entrants : `POST /webhooks/providers/:rail/:provider` → [src/controllers/providerWebhookController.js](src/controllers/providerWebhookController.js). La signature est vérifiée par `verifyHmacWebhook()` ([shared/webhookSecurity.js](src/services/transactions/shared/webhookSecurity.js)) : HMAC sur `rawBody` ou `${timestamp}.${rawBody}`, comparaison timing-safe, fenêtre de fraîcheur. **Si aucun secret n'est configuré, la requête est REFUSÉE** (`verified: false`, 401). Ce n'était pas le cas avant le 2026-08-19 : la fonction renvoyait `verified: true`, donc un oubli de variable d'environnement transformait l'endpoint en porte ouverte — n'importe qui pouvait forger un webhook de prestataire de paiement. Échappatoire de développement : `WEBHOOK_ALLOW_UNSIGNED=true`, **sans effet en production**. Le contrôleur exige par ailleurs un `verified === true` explicite : « tout sauf `false` » laissait passer un `undefined`.
 - **Ordre de montage critique** dans [src/server.js](src/server.js) : `/webhooks/providers` est monté **avant** `mountSanitizers()` (`express-mongo-sanitize`, `xss-clean`, `hpp`) pour préserver la charge utile ; `express.json({ verify })` alimente `req.rawBody`, indispensable au HMAC. Ne pas déplacer ces appels.
+
+## Réconciliation et rejeu — deux choses opposées, à ne pas confondre
+
+Deux workers touchent aux flux financiers. Leur différence n'est pas technique,
+elle est de nature, et elle décide de ce qu'on a le droit d'y ajouter :
+
+| | `reconciliationScheduler` | `settlementReplay` |
+|---|---|---|
+| Fait quoi | lit, compare, **signale** | **règle** |
+| Écrit de l'argent | jamais | oui |
+| Par défaut | **actif** | **désactivé** |
+| Variable | `RECONCILIATION_WORKER=false` pour couper | `SETTLEMENT_REPLAY_WORKER=true` pour activer |
+| À la demande | `npm run reconcile:transactions` | `npm run replay:settlements` |
+
+**La réconciliation ne corrige RIEN.** C'est une règle absolue, écrite en tête de
+`transactionReconciliationService.js` et de `providerReconciliationService.js` :
+une réconciliation qui répare est une seconde source de mouvements d'argent,
+déclenchée par un travail de fond que personne ne regarde. N'y ajoutez jamais
+d'écriture financière.
+
+**Le rejeu, lui, écrit — mais il n'invente rien.** Il termine un règlement que
+nous avions DÉJÀ accepté : un rappel prestataire authentifié dont le traitement
+s'est interrompu, et que plus personne ne réémettra. La formule qui sépare les
+deux : *la réconciliation répare des écarts qu'elle déduit ; le rejeu achève un
+engagement déjà pris.*
+
+### Les deux axes de la réconciliation
+
+1. **Interne** — portefeuille ↔ grand livre ↔ transaction. Peut être
+   entièrement vert pendant que l'argent est perdu, s'il se trouve qu'on est
+   *cohéremment* en désaccord avec le prestataire.
+2. **Prestataire** — ce qu'il a dit (registre `provider_webhook_events`) contre
+   ce qu'on a fait. Six écarts, dont `PROVIDER_SUCCESS_NOT_APPLIED` (le client a
+   payé et n'a rien reçu) et `PROVIDER_FAILURE_APPLIED` (argent livré sans
+   financement).
+
+Le contrôle des silences prestataire (`SETTLEMENT_TIMEOUT`) se **saute** tant
+que le registre est vide, et le rapport le dit : avant son premier
+enregistrement, « aucun rappel reçu » et « on n'enregistrait pas encore » sont
+indistinguables.
+
+### L'invariant qui rend le rejeu sûr
+
+Le rejeu **ne revérifie pas la signature** — le corps brut n'est plus conservé
+(il portait le numéro et le nom du bénéficiaire). C'est sûr pour une seule
+raison : `providerWebhookController` appelle `claimEvent` **après** la
+vérification de signature et **avant** le règlement, ordre verrouillé par
+`test/webhookIdempotency.test.js`. Le registre ne contient donc que des
+événements déjà authentifiés.
+
+⚠️ **Toute autre voie d'écriture dans `provider_webhook_events` casserait cet
+invariant** et transformerait le rejeu en exécution de virements arbitraires. Il
+n'y en a qu'une, et elle doit le rester.
+
+### Le moteur de règlement est séparé du transport HTTP
+
+`settleExternalTransaction(payload)` rend `{ statusCode, body }` ;
+`settleExternalTransactionWebhook(req, res, next)` n'en est qu'un adaptateur.
+Trois appelants (route signée, route interne héritée, rejeu) exécutent **le même
+code** : une seconde implémentation du règlement serait une seconde façon de
+créditer un bénéficiaire. Ne remettez aucune règle métier dans l'adaptateur —
+elle échapperait au rejeu.
 
 ## Authentification — trois mécanismes coexistants
 

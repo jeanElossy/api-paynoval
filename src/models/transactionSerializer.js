@@ -45,6 +45,26 @@ const SECRET_FIELDS = Object.freeze([
   "attemptCount",
   "lastAttemptAt",
   "lockedUntil",
+
+  /**
+   * ⚠️ `webhookHistory` SORTAIT DE L'API, ET IL PORTAIT LE CORPS BRUT DES
+   * RAPPELS PRESTATAIRE.
+   *
+   * `appendWebhookHistory` y recopiait `payload.raw` — la charge telle que le
+   * prestataire l'a envoyée. Selon le rail, elle contient le numéro de
+   * téléphone et le nom du bénéficiaire, ou les quatre derniers chiffres d'une
+   * carte. Ces cinquante dernières entrées partaient donc dans CHAQUE réponse
+   * portant une transaction : application mobile, back-office, passerelle.
+   *
+   * C'est le même défaut que celui corrigé sur `provider_webhook_events`, en
+   * pire : la collection avait au moins une rétention de 90 jours, alors qu'une
+   * transaction ne s'efface jamais.
+   *
+   * Le champ reste EN BASE — c'est une trace d'exploitation utile au support et
+   * à la réconciliation. Il n'a simplement rien à faire dans la représentation
+   * publique : aucun client ne le lit (vérifié sur les cinq dépôts).
+   */
+  "webhookHistory",
 ]);
 
 /**
