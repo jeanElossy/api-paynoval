@@ -168,7 +168,12 @@ test("l'inventaire ne s'arrête pas au premier rail cassé", () => {
    * Un démarrage qui meurt sur ORANGE fait corriger Orange, redéployer, puis
    * mourir sur MTN. L'inventaire complet permet de tout corriger d'un coup.
    */
-  const report = describeProviderRails({ NODE_ENV: "production" });
+  // Depuis le 2026-08-26, un rail n'est exigé que s'il est DÉCLARÉ : on les
+  // déclare tous ici, puisque c'est le comportement en défaut qu'on teste.
+  const report = describeProviderRails({
+    NODE_ENV: "production",
+    PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct,bank_generic",
+  });
 
   assert.equal(report.broken.length, 7);
   assert.equal(report.ok, false);
@@ -177,11 +182,12 @@ test("l'inventaire ne s'arrête pas au premier rail cassé", () => {
 test("un inventaire mixte sépare correctement réels, simulés et cassés", () => {
   const report = describeProviderRails({
     NODE_ENV: "production",
+    PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct,bank_generic",
     WAVE_BASE_URL: "https://api.wave.example",
     ORANGE_BASE_URL: "https://api.orange.example",
     MTN_MOCK: "true",
     ALLOW_PROVIDER_MOCK_IN_PRODUCTION: "true",
-    // moov, stripe, visa_direct, bank_generic : non configurés ⇒ cassés
+    // moov, stripe, visa_direct, bank_generic : déclarés, non configurés ⇒ cassés
   });
 
   assert.deepEqual(report.live.map((r) => r.provider).sort(), ["orange", "wave"]);
@@ -192,7 +198,11 @@ test("un inventaire mixte sépare correctement réels, simulés et cassés", () 
 
 test("assertProviderRails nomme TOUS les rails en défaut", () => {
   assert.throws(
-    () => assertProviderRails({ NODE_ENV: "production" }),
+    () =>
+      assertProviderRails({
+        NODE_ENV: "production",
+        PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct,bank_generic",
+      }),
     (err) => {
       assert.equal(err.code, "PROVIDER_CONFIG_INVALID");
       assert.equal(err.rails.length, 7);
@@ -222,7 +232,10 @@ test("le rapport ne journalise ni URL, ni clé, ni secret", () => {
 
 test("le rapport signale explicitement qu'aucun rail réel n'existe", () => {
   const text = formatProviderRailsReport(
-    describeProviderRails({ NODE_ENV: "development" })
+    describeProviderRails({
+      NODE_ENV: "development",
+      PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct,bank_generic",
+    })
   ).join("\n");
 
   assert.ok(text.includes("AUCUN rail réel"));

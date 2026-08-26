@@ -702,9 +702,15 @@ if (redisConn.url && RedisStore && Redis) {
    *   un magasin inutilisable — sans repli, puisque `RedisStore` était bel et
    *   bien construit. La limitation de débit ne comptait donc plus rien.
    *
-   * • `enableOfflineQueue: false`. Sans cela, une coupure Redis met les
-   *   commandes EN ATTENTE : chaque requête HTTP se bloquerait jusqu'au délai
-   *   de connexion au lieu d'échouer vite.
+   * • `enableOfflineQueue: false` **une fois connecté**. Sans cela, une coupure
+   *   Redis met les commandes EN ATTENTE : chaque requête HTTP se bloquerait
+   *   jusqu'au délai de connexion au lieu d'échouer vite.
+   *
+   *   ⚠️ Le poser dès la construction faisait rejeter les `SCRIPT LOAD` du
+   *   constructeur de `RedisStore`, avant l'ouverture de la socket — d'où les
+   *   `unhandledRejection` observés au déploiement du 2026-08-26. La file est
+   *   ouverte le temps de la connexion, puis fermée. Voir
+   *   `services/redisStoreSafety.js`.
    *
    * • `passOnStoreError: true`. Une panne du compteur ne doit pas arrêter les
    *   transactions : on laisse passer et on journalise. C'est le choix de
@@ -714,13 +720,29 @@ if (redisConn.url && RedisStore && Redis) {
    * aujourd'hui, mais il partagera le même Redis que la passerelle et le
    * backend. Sans préfixe, leurs compteurs fusionneraient.
    */
+  const {
+    closeOfflineQueueWhenReady,
+    neutralizeScriptLoadRejections,
+  } = require("./services/redisStoreSafety");
+
   redisClient = new Redis(redisUrl, {
-    enableOfflineQueue: false,
+    /**
+     * ⚠️ `true` AU DÉMARRAGE, `false` DÈS LA CONNEXION ÉTABLIE.
+     *
+     * `false` d'emblée faisait REJETER les deux `SCRIPT LOAD` que le
+     * constructeur de `RedisStore` envoie immédiatement — la socket n'étant
+     * pas encore ouverte. Ces rejets sont remontés en `unhandledRejection` au
+     * déploiement du 2026-08-26. Raisonnement complet dans
+     * `services/redisStoreSafety.js`.
+     */
+    enableOfflineQueue: true,
     maxRetriesPerRequest: 2,
     connectTimeout: 5000,
     keepAlive: 30000,
     ...(redisUrl.startsWith("rediss://") ? { tls: {} } : {}),
   });
+
+  closeOfflineQueueWhenReady(redisClient, { logger, label: "rate-limit" });
 
   /**
    * ⚠️ LE DIAGNOSTIC EST ÉTRANGLÉ ET EXPLICITE.
@@ -759,10 +781,13 @@ if (redisConn.url && RedisStore && Redis) {
   globalRateLimiter = rateLimit({
     ...baseRateLimitConfig,
     store: createResilientStore({
-      primary: new RedisStore({
-        prefix: "rl:tx-core-global:",
-        sendCommand: (...args) => redisClient.call(...args),
-      }),
+      primary: neutralizeScriptLoadRejections(
+        new RedisStore({
+          prefix: "rl:tx-core-global:",
+          sendCommand: (...args) => redisClient.call(...args),
+        }),
+        { logger }
+      ),
       fallback: new MemoryStore(),
       logger,
     }),
