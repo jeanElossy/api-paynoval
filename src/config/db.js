@@ -16,6 +16,36 @@ function buildMongooseOpts() {
 
     heartbeatFrequencyMS: Number(process.env.MONGO_HEARTBEAT_MS || 10000),
     retryWrites: true,
+
+    /**
+     * ⚠️ AUCUN INDEX NE SE CRÉE AU DÉMARRAGE. Ces deux lignes valent une
+     * politique, pas une optimisation.
+     *
+     * Mongoose vaut `autoIndex: true` par défaut. Tant que ce défaut tenait,
+     * CHAQUE démarrage d'une instance lançait un `createIndexes` sur les dix
+     * modèles de cette connexion — donc sur Atlas, en production, à un moment
+     * et sur une instance que personne n'avait choisis. Trois conséquences :
+     *
+     *   1. une déclaration d'index égarée dans un schéma partait en production
+     *      sans revue, au premier redéploiement ;
+     *   2. sur une grosse collection, la construction est une opération lourde
+     *      déclenchée au pire moment — le démarrage, quand l'instance doit
+     *      justement se rendre disponible ;
+     *   3. `scripts/ensure-ledger-indexes.js` avait dû être écrit POUR
+     *      contourner ce défaut (son en-tête le dit : « autoIndex n'est
+     *      désactivé nulle part »). Le contournement devient inutile : c'est
+     *      maintenant la règle générale.
+     *
+     * `autoCreate: false` ferme la même porte pour la CRÉATION DE COLLECTION :
+     * sans lui, une faute de frappe sur un nom de modèle fabrique une
+     * collection vide en production au lieu d'échouer bruyamment.
+     *
+     * Les index se posent désormais par script explicite, en heure creuse, et
+     * `services/indexAudit.js` signale au démarrage tout index déclaré mais
+     * absent — un manque doit crier, pas se rattraper en douce.
+     */
+    autoIndex: false,
+    autoCreate: false,
   };
 }
 

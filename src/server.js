@@ -53,6 +53,7 @@ const swaggerUi = require("swagger-ui-express");
 
 // `config` est déjà chargé et validé en tête de fichier.
 const { connectTransactionsDB } = require("./config/db");
+const { auditerIndex } = require("./services/indexAudit");
 const {
   resolveRedisConnection,
   diagnoseRedisError,
@@ -958,6 +959,20 @@ async function bootstrap() {
   try {
     await connectTransactionsDB();
     readiness.markStarted();
+
+    /**
+     * AUDIT DES INDEX — contrepartie observable de `autoIndex: false`.
+     *
+     * Les index ne se créent plus au démarrage (voir `config/db.js`). Le prix
+     * de cette sécurité, c'est qu'un index déclaré et jamais posé n'existe
+     * pas et ne dit rien : la requête rend le bon résultat, en balayant la
+     * collection. Cet audit rend l'écart visible, nommément, au démarrage.
+     *
+     * Volontairement NON bloquant et sans `await` fautif : un audit
+     * indisponible ne doit pas empêcher un service sain de servir. Il ne crée
+     * ni ne supprime jamais d'index.
+     */
+    auditerIndex(getTxConn(), { logger }).catch(() => {});
 
     /**
      * ÉTAT DES RAILS DE PAIEMENT — AVANT D'ACCEPTER LA MOINDRE REQUÊTE

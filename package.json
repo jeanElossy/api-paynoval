@@ -10,7 +10,9 @@
     "reconcile:referral": "node scripts/reconcileReferralPayouts.js",
     "verify:referral-idempotency": "node scripts/verifyReferralIdempotency.js",
     "reconcile:transactions": "node scripts/reconcileTransactions.js",
-    "replay:settlements": "node scripts/replaySettlements.js"
+    "replay:settlements": "node scripts/replaySettlements.js",
+    "indexes:check": "node scripts/ensureIndexes.js",
+    "indexes:apply": "node scripts/ensureIndexes.js --apply"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",
