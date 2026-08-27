@@ -127,10 +127,21 @@ const transactionSchema = new mongoose.Schema(
 
     verificationToken: {
       type: String,
-      unique: true,
       select: false,
       default: null,
-      sparse: true,
+      /**
+       * ⚠️ NI `unique` NI `sparse` ICI — l'unicité de ce champ est portée par
+       * l'index PARTIEL déclaré plus bas, et une clé ne peut avoir qu'un index.
+       *
+       * Le partiel n'est pas un habillage du sparse : `sparse` ignore les
+       * champs ABSENTS, pas les champs à `null`. Avec `default: null`, un index
+       * unique sparse compte donc `null` comme une valeur — et la deuxième
+       * transaction sans jeton aurait été refusée. Seul le `pre("save")`, qui
+       * repasse le champ à `undefined`, empêchait ce défaut de se manifester.
+       *
+       * `partialFilterExpression: { $exists: true, $type: "string" }` dit la
+       * règle voulue directement, sans dépendre de ce hook.
+       */
     },
 
     flow: {
@@ -749,7 +760,12 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       default: null,
       trim: true,
-      index: true,
+      /**
+       * ⚠️ PAS de `index: true` — l'index de ce champ est le `sparse` déclaré
+       * plus bas. Deux déclarations sur la même clé ne peuvent pas coexister
+       * en base : MongoDB refuse la seconde. Voir le contrôle générique dans
+       * `test/schemaIndexCollisions.test.js`.
+       */
     },
 
     providerStatus: {

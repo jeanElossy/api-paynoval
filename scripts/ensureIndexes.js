@@ -74,14 +74,14 @@ async function main() {
 
     let reels = [];
     try {
-      reels = (await modele.collection.indexes()).map((i) => empreinteIndex(i.key));
+      reels = (await modele.collection.indexes()).map((i) => empreinteIndex(i.key, i));
     } catch {
       // Collection encore inexistante : tous les index sont à poser.
       reels = [];
     }
 
     const { manquants } = comparerIndex(
-      declares.map(([cle]) => empreinteIndex(cle)),
+      declares.map(([cle, options]) => empreinteIndex(cle, options)),
       reels
     );
     if (!manquants.length) continue;
@@ -89,7 +89,7 @@ async function main() {
     console.log(`\n  ${nom} (${modele.collection.collectionName}) — ${manquants.length} à poser`);
 
     for (const [cle, options] of declares) {
-      const empreinte = empreinteIndex(cle);
+      const empreinte = empreinteIndex(cle, options);
       if (!manquants.includes(empreinte)) continue;
 
       aPoser += 1;

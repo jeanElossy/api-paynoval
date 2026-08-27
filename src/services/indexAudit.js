@@ -34,14 +34,48 @@
  * index DIFFÉRENTS (un index composé ne sert que ses préfixes de gauche).
  * On ne trie donc surtout pas les entrées.
  *
+ * ═══ LA CLÉ SEULE NE SUFFIT PAS — CORRIGÉ LE 2026-08-27 ══════════════════
+ *
+ * L'empreinte ne portait QUE la clé. Un index ordinaire sur `{startedAt:1}`
+ * satisfaisait donc une déclaration d'index TTL sur `{startedAt:1}`, et
+ * l'audit annonçait « déclarés et posés concordent » alors que l'expiration
+ * n'existait pas : les documents ne disparaissaient jamais.
+ *
+ * Le défaut était exactement celui que ce module est censé empêcher — une
+ * garantie affichée que la base ne porte pas. Constaté sur `reconciliation_runs`
+ * du banc, où `startedAt_1` masquait `reconciliation_runs_ttl` absent.
+ *
+ * Trois traits changent la NATURE d'un index et entrent donc dans l'empreinte :
+ * l'unicité, l'expiration, le filtre partiel. `name` et `background` n'y entrent
+ * pas — ils ne changent pas ce que l'index garantit.
+ *
+ * ⚠️ La DURÉE du TTL est délibérément exclue. Modifier `expireAfterSeconds` se
+ * fait par `collMod` sur l'index existant, pas en en créant un second : inclure
+ * la valeur ferait apparaître un même index comme « manquant » ET « en trop »,
+ * ce qui envoie chercher un problème d'index là où il n'y a qu'un réglage.
+ *
  * @param {object} cle Spécification d'index, ex. `{ provider: 1, status: -1 }`
- * @returns {string} ex. `provider:1|status:-1`
+ * @param {object} [options] Options de l'index (schéma) ou index réel (base)
+ * @returns {string} ex. `provider:1|status:-1+unique`
  */
-function empreinteIndex(cle) {
+function empreinteIndex(cle, options = null) {
   if (!cle || typeof cle !== "object") return "";
-  return Object.entries(cle)
+
+  const base = Object.entries(cle)
     .map(([champ, sens]) => `${champ}:${sens}`)
     .join("|");
+
+  if (!base || !options || typeof options !== "object") return base;
+
+  const traits = [];
+  if (options.unique === true) traits.push("unique");
+  if (options.expireAfterSeconds !== undefined && options.expireAfterSeconds !== null) {
+    traits.push("ttl");
+  }
+  if (options.partialFilterExpression) traits.push("partiel");
+  if (options.sparse === true) traits.push("sparse");
+
+  return traits.length ? `${base}+${traits.join("+")}` : base;
 }
 
 /**
@@ -63,7 +97,7 @@ function lireIndexDeclares(conn) {
     // et les `unique: true`, pas seulement les `schema.index(...)`.
     const empreintes = schema
       .indexes()
-      .map(([cle]) => empreinteIndex(cle))
+      .map(([cle, options]) => empreinteIndex(cle, options))
       .filter(Boolean);
 
     resultat.push({
@@ -150,7 +184,7 @@ async function auditerIndex(conn, { logger = null } = {}) {
       let reels = [];
       try {
         const liste = await conn.models[modele].collection.indexes();
-        reels = liste.map((i) => empreinteIndex(i.key)).filter(Boolean);
+        reels = liste.map((i) => empreinteIndex(i.key, i)).filter(Boolean);
       } catch (err) {
         // Collection absente : normal sur une base neuve, et `autoCreate:false`
         // veut dire qu'elle n'apparaîtra qu'à la première écriture. Ce n'est

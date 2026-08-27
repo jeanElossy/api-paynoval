@@ -78,7 +78,17 @@ const reconciliationRunSchema = new mongoose.Schema(
     /** `hostname:pid:aléa` — quelle instance a exécuté. */
     workerId: { type: String, default: "", trim: true },
 
-    startedAt: { type: Date, default: Date.now, index: true },
+    /**
+     * ⚠️ PAS de `index: true` ICI — l'index de ce champ est le TTL déclaré plus
+     * bas, et MongoDB n'accepte qu'UN index par clé. Les deux déclarations
+     * entraient en collision : la première posée gagnait, la seconde échouait
+     * sur « An equivalent index already exists with different options ».
+     *
+     * En pratique c'est le TTL qui perdait — donc les exécutions de
+     * réconciliation n'expiraient jamais. Un index TTL sert AUSSI les
+     * requêtes de plage sur son champ : rien n'est perdu à n'avoir que lui.
+     */
+    startedAt: { type: Date, default: Date.now },
     finishedAt: { type: Date, default: null },
     durationMs: { type: Number, default: null },
 

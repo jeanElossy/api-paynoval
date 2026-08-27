@@ -328,6 +328,16 @@ function getTxModel(modelName) {
 
 module.exports = {
   connectTransactionsDB,
+
+  /**
+   * Exporté pour `scripts/ensureIndexes.js`, qui doit connaître la liste
+   * EXACTE des modèles portés par la connexion transactions afin d'en
+   * comparer les index. La dupliquer dans le script l'aurait laissée diverger
+   * en silence : un modèle ajouté ici, et l'audit d'index cesse de le voir
+   * sans que rien ne le signale.
+   */
+  registerTransactionModels,
+
   getTxConn,
   getUsersConn,
   getUsersModel,
