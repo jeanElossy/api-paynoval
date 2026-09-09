@@ -12,12 +12,8 @@ const REAL_PROVIDERS = new Set([
   "moov",
   "moov_money",
   "mobilemoney",
-  "stripe",
   "visa_direct",
   "visadirect",
-  "bank",
-  "bank_transfer",
-  "flutterwave",
   "card",
 ]);
 

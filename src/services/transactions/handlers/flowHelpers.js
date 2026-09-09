@@ -210,7 +210,10 @@ function resolveExternalFlow(body = {}) {
 
   if (
     funds === "paynoval" &&
-    ["card", "visa", "stripe", "visa_direct"].includes(destination) &&
+    /* « stripe » retiré le 2026-09-09 : accepté ici, il était réécrit en
+       `visa_direct` plus bas — un prestataire retiré nommé explicitement doit
+       être REFUSÉ, pas substitué (règle B.2). */
+    ["card", "visa", "visa_direct", "visadirect"].includes(destination) &&
     ["send", "withdraw"].includes(action)
   ) {
     return OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT;
@@ -233,7 +236,8 @@ function resolveExternalFlow(body = {}) {
   }
 
   if (
-    ["card", "visa", "stripe", "visa_direct"].includes(funds) &&
+    /* « stripe » retiré le 2026-09-09 — voir ci-dessus. */
+    ["card", "visa", "visa_direct", "visadirect"].includes(funds) &&
     destination === "paynoval" &&
     action === "deposit"
   ) {
@@ -286,14 +290,20 @@ function resolveProviderForFlow(flow, body = {}) {
     return "bank";
   }
 
-  if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
-    if (hinted === "stripe") return "stripe";
+  /**
+   * Les deux flux carte rendent le MÊME prestataire.
+   *
+   * Ils rendaient « stripe » selon le sens, y compris quand l'appelant le
+   * suggérait explicitement. Stripe retiré du périmètre le 2026-09-08 : le rail carte, dans les DEUX
+   sens, est servi par Visa Direct — et demain par le partenaire
+   multi-réseaux. Un défaut pointant vers un prestataire supprimé faisait
+   lever `getProviderAdapter`, donc échouait le dépôt par carte.
+   */
+  if (
+    flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT ||
+    flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL
+  ) {
     return "visa_direct";
-  }
-
-  if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
-    if (hinted === "visa_direct") return "visa_direct";
-    return "stripe";
   }
 
   return hinted || "paynoval";

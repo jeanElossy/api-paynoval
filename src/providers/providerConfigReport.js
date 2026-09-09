@@ -72,7 +72,6 @@ const RAILS = Object.freeze([
   { rail: "mobilemoney", provider: "mtn",          envPrefix: "MTN" },
   { rail: "mobilemoney", provider: "moov",         envPrefix: "MOOV" },
   { rail: "mobilemoney", provider: "wave",         envPrefix: "WAVE" },
-  { rail: "card",        provider: "stripe",       envPrefix: "STRIPE" },
   { rail: "card",        provider: "visa_direct",  envPrefix: "VISA_DIRECT" },
   // ⚠️ PAS DE RAIL BANCAIRE. Retiré le 2026-08-26 : le §1 de l'architecture
   // cible dit qu'il n'y en a aucun et qu'il ne faut en créer un que si cela

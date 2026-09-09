@@ -136,16 +136,16 @@ function buildConfig(env = process.env) {
     jwtExpiresIn: env.JWT_EXPIRES_IN || '1h',
     hmacSecret: env.HMAC_SECRET,
 
-    // Email SMTP (repli si le microservice emails est indisponible)
-    email: {
-      host: env.SMTP_HOST,
-      port: Number(env.SMTP_PORT) || 587,
-      secure: env.SMTP_SECURE === 'true',
-      auth: {
-        user: env.SMTP_USER,
-        pass: env.SMTP_PASS,
-      },
-    },
+    /**
+     * ⚠️ LE BLOC `email` (SMTP) A ÉTÉ RETIRÉ LE 2026-09-02.
+     *
+     * Il se présentait comme « repli si le microservice emails est
+     * indisponible ». Ce n'en était pas un : **`config.email` n'était lu nulle
+     * part** dans ce dépôt — vérifié par recherche sur tout `src/`. C'était une
+     * configuration morte qui décrivait un repli inexistant, donc une fausse
+     * assurance. Et PayNoval n'envoie pas par SMTP : la production envoie par
+     * SendGrid.
+     */
 
     // Microservice emails (SendGrid + templates)
     emailMicroserviceUrl: env.EMAIL_MICROSERVICE_URL || '',

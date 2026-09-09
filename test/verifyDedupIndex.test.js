@@ -101,18 +101,56 @@ const {
   formatCriticalIndexesReport,
 } = require("../src/services/ledger/verifyDedupIndex");
 
-test("les deux contraintes d'intégrité sont surveillées", () => {
+test("les trois contraintes d'intégrité sont surveillées", () => {
   /**
    * Elles partagent la même propriété redoutable : leur absence ne se voit pas.
    * Le code continue de fonctionner, il se comporte simplement comme s'il avait
    * une protection qu'il n'a plus — et on ne s'en aperçoit qu'après le doublon.
+   *
+   * `outboxes.uniq_outbox_idempotency_key` a rejoint la liste le 2026-09-03.
+   * `models/Outbox.js` le déclare et son propre commentaire DOUTE qu'il existe
+   * en base : `autoIndex` est coupé hors développement, et un index déclaré
+   * n'est pas un index créé. Or le dédoublonnage des événements de parrainage
+   * repose sur le `E11000` qu'il produit — sans lui, ce `E11000` ne survient
+   * jamais et le dédoublonnage est muet.
+   *
+   * Cette liste est une frontière : y ajouter une entrée est une décision, et
+   * ce test la rend explicite plutôt que tacite.
    */
   const noms = CRITICAL_INDEXES.map((i) => `${i.collection}.${i.name}`);
 
   assert.deepEqual(noms.sort(), [
     "ledgerentries.dedupKey_unique_partial",
+    "outboxes.uniq_outbox_idempotency_key",
     "provider_webhook_events.uniq_webhook_provider_event",
   ]);
+});
+
+test("chaque index surveillé est réellement déclaré par un modèle", () => {
+  /**
+   * Un index surveillé mais déclaré nulle part serait signalé absent à chaque
+   * démarrage — une alarme permanente qu'on finirait par ignorer, ce qui est
+   * pire que pas d'alarme.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const srcDir = path.join(__dirname, "..", "src");
+
+  const sources = [];
+  (function parcourir(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) parcourir(p);
+      else if (e.name.endsWith(".js")) sources.push(fs.readFileSync(p, "utf8"));
+    }
+  })(srcDir);
+
+  for (const i of CRITICAL_INDEXES) {
+    assert.ok(
+      sources.some((s) => s.includes(i.name)),
+      `${i.name} est surveillé mais aucun modèle ne le déclare`
+    );
+  }
 });
 
 test("chaque contrainte explique CE QU'ELLE protège", () => {
@@ -149,10 +187,15 @@ test("le contrôle ne LÈVE jamais, même collection par collection", async () =
 
   const r = await checkCriticalIndexes(conn);
 
-  assert.equal(r.length, 2);
+  // Une collection qui n'existe pas ne doit pas interrompre le contrôle des
+  // suivantes : chaque cible est évaluée pour elle-même.
+  assert.equal(r.length, CRITICAL_INDEXES.length);
   assert.equal(r[0].present, true);
-  assert.equal(r[1].present, false);
-  assert.equal(r[1].reason, "collection-absente");
+
+  for (const ligne of r.slice(1)) {
+    assert.equal(ligne.present, false);
+    assert.equal(ligne.reason, "collection-absente");
+  }
 });
 
 test("un index vraiment absent est signalé en ❌ avec la marche à suivre", () => {

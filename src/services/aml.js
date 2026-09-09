@@ -189,8 +189,34 @@ async function logTransaction({
       loggedAt: new Date(),
     });
   } catch (e) {
+    /**
+     * ON N'AVALE PLUS EN SILENCE — mais on ne LÈVE PAS non plus.
+     * ========================================================================
+     *
+     * Le `catch` d'origine ne faisait qu'un `console.error`. Conséquence non
+     * évidente, trouvée le 2026-09-03 : la promesse ne rejetait JAMAIS, donc le
+     * `.catch()` structuré posé la veille sur `initiateInternal.js` — celui qui
+     * devait rendre visible un échec du journal d'audit avec `transactionId` et
+     * `reference` — ne pouvait pas se déclencher. **Un correctif inerte est
+     * pire qu'un correctif absent : on le croit en place.**
+     *
+     * Pourquoi on ne lève pas pour autant : `middleware/aml.js` appelle cette
+     * fonction avec `await`, sur le chemin de la requête, AVANT le mouvement
+     * d'argent. Lever y transformerait un échec d'écriture de journal en échec
+     * de paiement. Or le banc du 2026-09-03 a montré que ces écritures peuvent
+     * échouer pour une raison bénigne — « AMLLog validation failed: type:
+     * `auto_cancel` is not a valid enum value ». Une ligne de journal mal typée
+     * n'a pas à refuser un virement.
+     *
+     * On rend donc un RÉSULTAT. L'appelant sait, et décide selon sa position :
+     * avant le mouvement il peut refuser, après il ne peut que signaler.
+     */
     console.error("[AML-LOG] Failed to record log", e?.message || e);
+
+    return { ok: false, error: e?.message || String(e) };
   }
+
+  return { ok: true };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -276,11 +302,18 @@ function buildProviderOrMatch(provider) {
     aliases.add("flutterwave");
   }
 
+  /**
+   * Rail carte. « stripe » reste dans les ALIAS DE LECTURE, et seulement là :
+   * les transactions historiques portent encore ce prestataire, et les exclure
+   * fausserait les cumuls AML — un utilisateur repartirait à zéro de compteur
+   * journalier le jour du changement de rail. C'est une requête d'historique,
+   * pas une autorisation de router.
+   */
   if (p === "stripe" || p === "visa_direct" || p === "card") {
-    aliases.add("stripe");
     aliases.add("visa_direct");
     aliases.add("visa");
     aliases.add("card");
+    aliases.add("stripe"); // historique uniquement — plus aucun rail actif
   }
 
   const values = Array.from(aliases);

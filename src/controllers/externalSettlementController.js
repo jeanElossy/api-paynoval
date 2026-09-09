@@ -18,6 +18,8 @@
 const createError = require("http-errors");
 
 const runtime = require("../services/transactions/shared/runtime");
+const { canTransition } = require("../services/transactionStateMachine");
+const logger = require("../utils/logger");
 const { captureSenderReserve, releaseSenderReserve, refundSenderFunds, creditReceiverFunds, creditTreasuryRevenue, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, canUseSharedSession, runInTransaction } = runtime;
 
 /**
@@ -775,6 +777,65 @@ async function settleExternalTransaction(payload = {}) {
     const notifyCurrency = sourceCurrency || targetCurrency || "XOF";
     const grossSource = resolveGrossSource(tx);
     const targetAmount = resolveTargetAmount(tx);
+
+    /**
+     * LA MACHINE À ÉTATS TRANCHE — AVANT TOUT MOUVEMENT D'ARGENT
+     * ========================================================================
+     *
+     * Jusqu'au 2026-09-03, ce chemin — celui qui crédite un bénéficiaire sur
+     * rappel prestataire — écrivait `tx.status` EN DIRECT à quatre endroits
+     * (`settleProcessingWebhook`, `settleOutboundSuccess`, `settleInboundSuccess`,
+     * `settleFailureWebhook`), sans jamais consulter `assertTransition`. C'est le
+     * chemin le plus exposé du service : il est déclenché par un TIERS.
+     *
+     * `isFinalOrAutoCancelled` ci-dessus couvrait déjà les états FINAUX
+     * (confirmed, cancelled, refunded, failed…) et l'auto-annulation. Restaient
+     * ouverts les états que la machine refuse sans qu'ils soient finaux :
+     * `created → processing`, `locked → confirmed`, `relaunch → confirmed`.
+     * Un rappel prestataire sur une transaction VERROUILLÉE créditait le
+     * bénéficiaire.
+     *
+     * ── Pourquoi ICI et pas dans les quatre fonctions ────────────────────────
+     *
+     * Parce qu'elles écrivent le statut APRÈS avoir déplacé l'argent : à
+     * `settleOutboundSuccess`, le bénéficiaire et la trésorerie sont déjà
+     * crédités quand `tx.status = "confirmed"` est atteint. Une vérification à
+     * cet endroit refuserait le statut sans annuler le crédit — le pire des
+     * deux. La barrière doit précéder le mouvement.
+     *
+     * ── Pourquoi 409 et pas une exception ────────────────────────────────────
+     *
+     * Un 4xx dit au prestataire « ne rejoue pas » : l'incohérence est chez nous,
+     * pas dans son rappel. L'événement reste dans `provider_webhook_events`, et
+     * la réconciliation prestataire le relèvera en `PROVIDER_SUCCESS_NOT_APPLIED`
+     * — le client a payé, il n'a rien reçu — ce qui est exactement le signal
+     * qu'on veut voir remonter plutôt qu'un crédit sur un état incohérent.
+     */
+    const statutVise =
+      mapped === "PROCESSING" ? "processing" : mapped === "SUCCESS" ? "confirmed" : "failed";
+
+    if (!canTransition(tx.status, statutVise)) {
+      logger.error("[settlement] transition REFUSÉE par la machine à états", {
+        transactionId: tx._id.toString(),
+        reference: tx.reference,
+        statutActuel: tx.status,
+        statutVise,
+        mapped,
+        flow: tx.flow,
+      });
+
+      return {
+        statusCode: 409,
+        body: {
+          success: false,
+          reason: "INVALID_STATE_TRANSITION",
+          message:
+            `Règlement refusé : transition ${tx.status} -> ${statutVise} ` +
+            "non autorisée par la machine à états. Aucun mouvement d'argent n'a eu lieu.",
+          transactionId: tx._id.toString(),
+        },
+      };
+    }
 
     let result;
 

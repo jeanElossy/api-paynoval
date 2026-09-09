@@ -814,18 +814,14 @@ const router = express.Router();
 /* Constantes                                                                 */
 /* -------------------------------------------------------------------------- */
 
-const MOBILEMONEY_PROVIDERS = ["wave", "orange", "mtn", "moov", "flutterwave"];
+const MOBILEMONEY_PROVIDERS = ["wave", "orange", "mtn", "moov"];
 
-const RAILS_ALLOWED = [
-  "paynoval",
-  "stripe",
-  "bank",
-  "mobilemoney",
-  "visa_direct",
-  "stripe2momo",
-  "cashin",
-  "cashout",
-];
+// Périmètre arrêté le 2026-09-08 : trois rails, et rien d'autre.
+// `stripe`, `bank`, `stripe2momo`, `flutterwave`, `cashin` et `cashout` en ont
+// été retirés — les quatre premiers ne sont plus au périmètre produit,
+// `flutterwave` est un OPÉRATEUR du rail mobile money (pas un rail), et
+// cashin/cashout n'ont jamais été routés nulle part. Voir `tools/amlLimits.js`.
+const RAILS_ALLOWED = ["paynoval", "mobilemoney", "visa_direct"];
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */

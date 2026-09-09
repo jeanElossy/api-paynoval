@@ -11,9 +11,13 @@
     "reconcile:referral": "node scripts/reconcileReferralPayouts.js",
     "verify:referral-idempotency": "node scripts/verifyReferralIdempotency.js",
     "reconcile:transactions": "node scripts/reconcileTransactions.js",
+    "reconcile:wallet-ledger": "node scripts/reconcileWalletLedger.js",
     "replay:settlements": "node scripts/replaySettlements.js",
     "indexes:check": "node scripts/ensureIndexes.js",
-    "indexes:apply": "node scripts/ensureIndexes.js --apply"
+    "indexes:apply": "node scripts/ensureIndexes.js --apply",
+    "indexes:ledger": "node scripts/ensure-ledger-indexes.js --apply",
+    "indexes:prune": "node scripts/dropRedundantTransactionIndexes.js",
+    "indexes:prune:webhooks": "node scripts/dropRedundantWebhookIndexes.js"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",
@@ -43,13 +47,11 @@
     "mongoose": "^7.8.7",
     "morgan": "^1.10.0",
     "node-cache": "^5.1.2",
-    "nodemailer": "^9.0.5",
     "pino": "^9.7.0",
     "prom-client": "^15.1.3",
     "promise-retry": "^2.0.1",
     "rate-limit-redis": "^4.2.2",
     "redis": "^5.1.0",
-    "stripe": "^18.1.1",
     "swagger-ui-express": "^5.0.1",
     "winston": "^3.17.0",
     "xss-clean": "^0.1.4",

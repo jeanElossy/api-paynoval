@@ -32,6 +32,7 @@
 
 const { getTxConn } = require("../../config/db");
 const { withCronLock, WORKER_ID } = require("../cronLock");
+const { WORKERS, declareWorker } = require("../workerMetrics");
 const { LEASE_MS } = require("../webhooks/webhookIdempotency");
 const {
   settleExternalTransaction,
@@ -247,14 +248,31 @@ async function runReplayOnce(options = {}) {
 function startSettlementReplayWorker({
   intervalMs = Number(process.env.SETTLEMENT_REPLAY_INTERVAL_MS || 15 * 60 * 1000),
   enabled = String(process.env.SETTLEMENT_REPLAY_WORKER ?? "false").toLowerCase() === "true",
+  /**
+   * Travail d'un tour. Injectable pour que le test de câblage exerce le VRAI
+   * `startSettlementReplayWorker` **sans déplacer d'argent** ni ouvrir de
+   * connexion Mongo (règle B.5).
+   */
+  runOnce = runReplayOnce,
 } = {}) {
   if (!enabled) {
     logger.info?.(
       "[REPLAY] worker désactivé (SETTLEMENT_REPLAY_WORKER≠true) — " +
         "le rejeu reste disponible via `npm run replay:settlements`."
     );
+
+    /**
+     * Déclaré même éteint — et c'est ici que ça compte le plus : ce worker est
+     * éteint PAR DÉFAUT. Sans déclaration, `/metrics` serait muet à son sujet et
+     * on ne pourrait pas distinguer « volontairement éteint » (`worker_enabled=0`)
+     * de « censé tourner et jamais démarré » (`-1`).
+     */
+    declareWorker(WORKERS.SETTLEMENT_REPLAY, { enabled: false, logger });
+
     return null;
   }
+
+  const metrics = declareWorker(WORKERS.SETTLEMENT_REPLAY, { logger });
 
   // Plancher à 1 minute : plus court transformerait un rattrapage en charge
   // permanente sur le chemin de l'argent.
@@ -262,7 +280,7 @@ function startSettlementReplayWorker({
 
   const tick = async () => {
     try {
-      await runReplayOnce();
+      await metrics.record(() => runOnce());
     } catch (err) {
       logger.error?.("[REPLAY] tour échoué", { message: err?.message || err });
     }
@@ -277,6 +295,9 @@ function startSettlementReplayWorker({
   );
 
   return {
+    /** Un tour, à la demande. Exposé pour le test de câblage. */
+    tick,
+
     stop() {
       clearInterval(timer);
       logger.info?.("[REPLAY] worker arrêté");

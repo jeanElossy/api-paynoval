@@ -74,7 +74,44 @@ const STORED_PAYLOAD_FIELDS = Object.freeze([
   "amount",
   "currency",
   "reason",
+
+  /**
+   * `verified` — AJOUTÉ : le rejeu l'INFÉRAIT au lieu de le lire.
+   *
+   * `appendWebhookHistory` (`controllers/externalSettlementController.js`)
+   * écrit `verified: payload.verified !== false`. Tant que ce champ n'était pas
+   * conservé, il valait `undefined` au rejeu — donc `!== false` — donc **`true`**.
+   * Autrement dit : un événement rejoué depuis le registre s'inscrivait sur la
+   * transaction comme « signature vérifiée », alors que personne n'avait
+   * revérifié quoi que ce soit. Une observation remplacée par une supposition,
+   * sur le champ qui dit si l'on peut faire confiance au message.
+   *
+   * ⚠️ Ce champ ne participe PAS à l'empreinte d'idempotence
+   * (`computeEventFingerprint`, liste distincte de huit champs) : l'ajouter ici
+   * ne change ni la déduplication ni le rejeu d'un événement déjà enregistré.
+   */
+  "verified",
 ]);
+
+/**
+ * Bornes de conservation. `reason` est du **texte libre rendu par le
+ * prestataire** — `providerWebhookController` le remplit depuis `raw.message`,
+ * `raw.error` ou `raw.data.message`. C'est le seul champ de la liste blanche
+ * dont nous ne choisissons pas le contenu, et il était conservé 90 jours **sans
+ * borne** : un opérateur qui renvoie son corps d'erreur complet dans ce champ
+ * réintroduisait par la fenêtre ce que la liste blanche ferme à la porte.
+ *
+ * Même borne que `lastError` ci-dessous, et pour la même raison.
+ */
+const MAX_REASON_LENGTH = 300;
+
+function truncateReason(value) {
+  if (value === undefined || value === null) return value;
+
+  const text = String(value);
+
+  return text.length > MAX_REASON_LENGTH ? text.slice(0, MAX_REASON_LENGTH) : text;
+}
 
 function sanitizeStoredPayload(payload = {}) {
   const kept = {};
@@ -83,6 +120,8 @@ function sanitizeStoredPayload(payload = {}) {
     const value = payload?.[field];
     if (value !== undefined) kept[field] = value;
   }
+
+  if (kept.reason !== undefined) kept.reason = truncateReason(kept.reason);
 
   return kept;
 }

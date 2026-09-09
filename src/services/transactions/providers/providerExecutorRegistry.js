@@ -66,7 +66,8 @@ function normalizeProvider(provider) {
     return "visa_direct";
   }
 
-  if (["card", "stripe_card"].includes(p)) {
+  /* « stripe_card » retiré le 2026-09-09 avec le rail Stripe. */
+  if (["card", "visa", "visadirect", "visa_direct"].includes(p)) {
     return "card";
   }
 
@@ -109,7 +110,33 @@ function resolveMobileMoneyExecutor(flow, provider) {
     return null;
   }
 
-  const resolvedProvider = normalizeProvider(provider) || "wave";
+  /**
+   * ═══════════════════════════════════════════════════════════════════════
+   * AUCUN REPLI D'OPÉRATEUR — RÈGLE B.2
+   * ═══════════════════════════════════════════════════════════════════════
+   *
+   * Cette ligne valait `normalizeProvider(provider) || "wave"`.
+   *
+   * Une transaction dont l'opérateur n'était pas résolu partait donc **chez
+   * Wave**, sans journal, sans erreur, sans que rien ne distingue ce choix
+   * d'un choix délibéré de l'utilisateur. L'argent d'un client destiné à
+   * Orange Money pouvait être poussé vers un autre opérateur — et le seul
+   * symptôme aurait été un échec côté Wave, attribué au réseau.
+   *
+   * Choisir un opérateur par défaut sur le chemin de l'argent n'est pas de la
+   * robustesse : c'est décider à la place du client, en silence. On lève.
+   */
+  const resolvedProvider = normalizeProvider(provider);
+
+  if (!resolvedProvider) {
+    const err = new Error(
+      "Opérateur mobile money non résolu — aucun repli n'est appliqué sur le " +
+        "chemin de l'argent (règle B.2). Poser explicitement l'opérateur."
+    );
+    err.status = 422;
+    err.code = "OPERATEUR_NON_RESOLU";
+    throw err;
+  }
 
   return {
     execute:
@@ -143,8 +170,16 @@ function resolveCardExecutor(flow, provider) {
 
   const normalizedProvider = normalizeProvider(provider);
 
-  const fallbackProvider =
-    flow === FLOWS.CARD_TOPUP_TO_PAYNOVAL ? "stripe" : "visa_direct";
+  /**
+   * Le dépôt par carte retombait sur « stripe ». Stripe retiré du périmètre le 2026-09-08 : le rail carte, dans les DEUX
+   sens, est servi par Visa Direct — et demain par le partenaire
+   multi-réseaux. Un défaut pointant vers un prestataire supprimé faisait
+   lever `getProviderAdapter`, donc échouait le dépôt par carte.
+   *
+   * Les deux sens partagent désormais le même défaut : il n'y a plus qu'un
+   * prestataire carte, et le distinguer par flux n'avait plus d'objet.
+   */
+  const fallbackProvider = "visa_direct";
 
   return {
     execute:

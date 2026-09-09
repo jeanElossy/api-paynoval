@@ -7,7 +7,8 @@
  *
  * CE QUE CE MODULE CORRIGE
  * ------------------------
- * Les sept adapters portaient tous la même ligne :
+ * Les adapters (sept à l'époque ; six depuis le retrait du rail bancaire le
+ * 2026-08-26) portaient tous la même ligne :
  *
  *     mock: String(process.env.ORANGE_MOCK || "true").toLowerCase() === "true"
  *

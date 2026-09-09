@@ -167,9 +167,13 @@ schema.index(
  * deux qui restent, `rail_1` et `providerReference_1`, ne sont préfixes
  * d'aucun composé : ils sont utiles.
  *
- * ⚠️ RETIRER LA DÉCLARATION NE SUFFIT PAS. Tant que `autoIndex` est actif,
- * Mongoose recrée au démarrage tout index déclaré — mais il ne SUPPRIME jamais
- * un index qui n'est plus déclaré. Le retrait en base est un acte séparé
+ * ⚠️ RETIRER LA DÉCLARATION NE SUFFIT PAS — et la raison a changé le
+ * 2026-08-28. Ce commentaire disait « tant que `autoIndex` est actif » ; il est
+ * coupé depuis `config/db.js:47`. La conclusion, elle, tient toujours, pour une
+ * raison plus simple : **rien ne supprime jamais un index qui n'est plus
+ * déclaré.** Ni Mongoose, ni `npm run indexes:apply` — qui pose et ne retire
+ * rien, délibérément (voir l'en-tête de `scripts/ensureIndexes.js`). Le retrait
+ * en base reste donc un acte séparé et explicite
  * (`scripts/dropRedundantWebhookIndexes.js`).
  */
 

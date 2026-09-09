@@ -98,7 +98,6 @@ const FOREIGN_STATUS_FILES = new Set([
   "mtnAdapter.js",
   "moovAdapter.js",
   "waveAdapter.js",
-  "stripeAdapter.js",
   "visaDirectAdapter.js",
   "bankGenericAdapter.js",
 ]);

@@ -224,6 +224,37 @@ function normalizeStatus(status) {
   return String(status || "").trim().toLowerCase();
 }
 
+/**
+ * Statuts depuis lesquels un payout sortant peut être confirmé PAR L'UTILISATEUR.
+ * ============================================================================
+ *
+ * Cette liste est une POLITIQUE DE ROUTE : elle a le droit d'être plus stricte
+ * que la machine à états, jamais plus permissive. `assertTransition` est appelée
+ * juste après et tranche en dernier ressort.
+ *
+ * ── Le défaut qu'elle ferme (2026-09-03) ─────────────────────────────────
+ *
+ * L'ancienne liste était `["pending", "pending_review", "relaunch"]`, sans
+ * appel à `assertTransition`. Elle divergeait de `ALLOWED` DANS LES DEUX SENS :
+ *
+ *   • `relaunch → confirmed` était autorisé ici et INTERDIT par la machine
+ *     (`ALLOWED[relaunch]` = pending, processing, cancelled, failed). Une
+ *     transaction relancée doit repasser par `pending` avant d'être confirmée ;
+ *     la sauter contournait l'étape où la réserve est reconstituée — le statut
+ *     `relaunch` est précisément celui au cœur du défaut de re-capture de
+ *     réserve traité en `confirmTransaction.js:913-935`. Il est RETIRÉ.
+ *
+ *   • `processing → confirmed` est permis par la machine et refusé ici. On le
+ *     GARDE refusé : un payout déjà remis au prestataire se confirme sur son
+ *     rappel authentifié, pas à la main par l'utilisateur. Dériver mécaniquement
+ *     de `ALLOWED` — la lettre de la recommandation R4 — aurait ouvert ce
+ *     chemin. Une correction ne doit pas élargir un chemin d'argent.
+ *
+ * `test/confirmPolicyMatchesStateMachine.test.js` échoue si cette liste
+ * réintroduit un statut que la machine refuse.
+ */
+const PAYOUT_CONFIRMABLE_DEPUIS = Object.freeze(["pending", "pending_review"]);
+
 function isFinalNegativeStatus(status) {
   return ["cancelled", "canceled", "failed", "refunded", "reversed"].includes(
     normalizeStatus(status)
@@ -670,13 +701,21 @@ function assertConfirmable({ req, tx, now }) {
       );
     }
   } else if (isOutboundExternalPayout(tx)) {
-    if (
-      !["pending", "pending_review", "relaunch"].includes(
-        normalizeStatus(tx.status)
-      )
-    ) {
+    const statutActuel = normalizeStatus(tx.status);
+
+    if (!PAYOUT_CONFIRMABLE_DEPUIS.includes(statutActuel)) {
       throw createError(409, "Transaction non confirmable dans son état actuel");
     }
+
+    /**
+     * La machine à états a le DERNIER mot. La liste ci-dessus restreint, elle
+     * n'autorise pas : une transition doit être permise par les DEUX.
+     *
+     * Avant le 2026-09-03, cette branche n'appelait pas `assertTransition` — la
+     * liste en dur décidait seule, et elle DIVERGEAIT de la machine dans les
+     * deux sens (voir le commentaire de `PAYOUT_CONFIRMABLE_DEPUIS`).
+     */
+    assertTransition(statutActuel, "confirmed");
 
     if (String(tx.sender) !== getAuthedUserId(req)) {
       throw createError(
@@ -1088,4 +1127,4 @@ async function confirmController(req, res, next) {
   }
 }
 
-module.exports = { confirmController };
+module.exports = { confirmController, PAYOUT_CONFIRMABLE_DEPUIS };

@@ -260,12 +260,24 @@ async function checkTransactionLedger({ sinceHours, limit }) {
         flow: tx.flow || null,
         byCurrency: trial.byCurrency,
         consideredEntries: trial.consideredEntries,
-        detail:
-          "débits ≠ crédits sur cette transaction : " +
-          Object.entries(trial.byCurrency)
-            .filter(([, b]) => Math.abs(b.delta) > 0.005)
-            .map(([cur, b]) => `${cur} écart ${b.delta.toFixed(4)}`)
-            .join(", "),
+        anomaliesDeLecture: trial.anomalies,
+        /**
+         * Deux causes possibles, à ne pas confondre : un déséquilibre réel, ou
+         * des écritures que la balance n'a pas su lire. La seconde était
+         * silencieuse jusqu'au 2026-09-03 — un montant illisible comptait pour
+         * zéro, un sens corrompu pour un crédit.
+         */
+        detail: !trial.ecartsDansLaTolerance
+          ? "débits ≠ crédits sur cette transaction : " +
+            Object.entries(trial.byCurrency)
+              .filter(([, b]) => Math.abs(b.delta) > 0.005)
+              .map(([cur, b]) => `${cur} écart ${b.delta.toFixed(4)}`)
+              .join(", ")
+          : "écritures ILLISIBLES : " +
+            `${trial.anomalies.montantIllisible} montant(s), ` +
+            `${trial.anomalies.sensInconnu} sens, ` +
+            `${trial.anomalies.deviseIllisible} devise(s). ` +
+            "L'équilibre ne peut pas être affirmé sur ces écritures.",
       });
     }
   }

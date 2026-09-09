@@ -24,7 +24,6 @@ if (process.env.NODE_ENV !== "production") {
 const jwt = require("jsonwebtoken");
 const createError = require("http-errors");
 const asyncHandler = require("express-async-handler");
-const crypto = require("crypto");
 
 const mongoose = require("mongoose");
 
@@ -35,6 +34,7 @@ const {
   buildDeviceQuery,
 } = require("./deviceBinding");
 const config = require("../config");
+const { getVerificationKey, readKid } = require("../utils/jwtKeyring");
 
 const isProd = process.env.NODE_ENV === "production";
 const hasJWKS = !!process.env.JWKS_URI;
@@ -194,7 +194,21 @@ async function verifyJwt(token, verifyOpts, algorithms) {
       });
     });
   }
-  return jwt.verify(token, JWT_SECRET, { ...verifyOpts, algorithms });
+  /**
+   * ⚠️ CLÉ CHOISIE PAR `kid` — POSÉ LE 2026-09-03.
+   *
+   * Tx Core vérifie ce que le backend principal signe. Depuis que celui-ci
+   * signe avec un trousseau, il faut savoir choisir la même clé — sinon la
+   * première rotation refuserait ici tous les jetons utilisateur, c'est-à-dire
+   * bloquerait le moteur transactionnel.
+   *
+   * `JWT_SECRET` reste le repli pour les jetons sans `kid` (tous ceux émis
+   * avant ce déploiement). Le régime JWKS, s'il est actif, passe au-dessus :
+   * il porte sa propre résolution de clé.
+   */
+  const cle = getVerificationKey(readKid(token)) || JWT_SECRET;
+
+  return jwt.verify(token, cle, { ...verifyOpts, algorithms });
 }
 
 function buildVerifyOpts({ withAudience = true } = {}) {
@@ -243,12 +257,33 @@ async function verifyWithFallback(token) {
 /* ------------------------------------------------------------------ */
 /* ✅ INTERNAL helpers                                                  */
 /* ------------------------------------------------------------------ */
+/**
+ * Comparaison à temps constant — UNE SEULE implémentation pour tout le service.
+ *
+ * Il en existait trois jusqu'au 2026-09-03, et les deux copies locales
+ * retournaient tôt sur une différence de longueur :
+ *
+ *     if (left.length !== right.length) return false;   // ← la fuite
+ *
+ * Ce retour anticipé rend le temps de réponse dépendant de la LONGUEUR du
+ * secret attendu : un appelant non authentifié peut la mesurer statistiquement,
+ * ce qui réduit d'autant l'espace à explorer. `utils/internalTokens.js` complète
+ * les tampons par des zéros AVANT de comparer, puis vérifie l'égalité des
+ * longueurs — l'ordre est ce qui fait la propriété.
+ *
+ * Même geste que `requireRole.js` côté passerelle : un doublon divergent sur un
+ * chemin d'autorisation finit toujours par diverger du mauvais côté.
+ */
+const { timingSafeEqualStr: comparaisonSure } = require("../utils/internalTokens");
+
 function timingSafeEqualStr(a, b) {
-  const aa = Buffer.from(String(a || "").trim(), "utf8");
-  const bb = Buffer.from(String(b || "").trim(), "utf8");
-  if (!aa.length || !bb.length) return false;
-  if (aa.length !== bb.length) return false;
-  return crypto.timingSafeEqual(aa, bb);
+  // Un token vide n'authentifie personne : garde conservée de l'implémentation
+  // locale, elle ne dépend d'aucun secret et ne fuit donc rien.
+  const gauche = String(a || "").trim();
+  const droite = String(b || "").trim();
+  if (!gauche || !droite) return false;
+
+  return comparaisonSure(gauche, droite);
 }
 
 function getInternalHeaderToken(req) {

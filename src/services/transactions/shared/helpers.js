@@ -176,9 +176,49 @@ function pickAuthedUserId(req) {
   return (req.user?.id || req.user?._id || req.user?.userId || null)?.toString?.() || null;
 }
 
+/**
+ * BASE DE LA PASSERELLE — AUCUN REPLI
+ * ============================================================================
+ *
+ * ⚠️ Cette fonction retombait sur `https://api-gateway-8cgy.onrender.com` —
+ * l'URL de la passerelle de PRODUCTION — quand `GATEWAY_URL` était absente.
+ * Retiré le 2026-09-02.
+ *
+ * Ce n'était pas un problème de secret : cette URL est déjà en clair dans les
+ * bundles distribués (`payNoval-master/app.json`, `web_paynoval/src/tools/api.jsx`).
+ * Le problème était le REPLI SILENCIEUX vers la production sur le chemin de
+ * l'argent : un poste de développement, un banc de charge ou un environnement
+ * mal configuré demandaient leurs devis à la production sans que rien ne le
+ * dise. C'est exactement le défaut qui a fait pointer la première campagne de
+ * charge sur l'Atlas de production (A1).
+ *
+ * La règle B.2 demande une FERMETURE : une donnée financière absente arrête
+ * l'opération avec une erreur explicite, elle ne prend jamais de valeur par
+ * défaut. Un devis est une donnée de tarification — le prix payé par
+ * l'utilisateur en dépend.
+ *
+ * Le 503 dit « service sain, dépendance non configurée », pas « la demande est
+ * mauvaise » : la faute est côté déploiement, pas côté appelant.
+ *
+ * Le défaut de configuration est par ailleurs annoncé AU DÉMARRAGE
+ * (`src/server.js`, contrôle `GATEWAY_URL`), pour qu'il se voie au déploiement
+ * et non au premier devis demandé par un utilisateur.
+ */
 function getGatewayBase(GATEWAY_URL) {
-  let gatewayBase = String(GATEWAY_URL || process.env.GATEWAY_URL || "").replace(/\/+$/, "");
-  if (!gatewayBase) gatewayBase = "https://api-gateway-8cgy.onrender.com";
+  // `trim()` d'abord : une variable d'environnement qui ne contient que des
+  // espaces est une variable NON configurée, pas une URL.
+  let gatewayBase = String(GATEWAY_URL || process.env.GATEWAY_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (!gatewayBase) {
+    const err = new Error(
+      "GATEWAY_URL absente : le devis ne peut pas être demandé. Aucun repli " +
+        "n'est appliqué (règle B.2 — le chemin de l'argent échoue en fermeture)."
+    );
+    err.status = 503;
+    err.code = "GATEWAY_URL_MISSING";
+    throw err;
+  }
   if (!gatewayBase.endsWith("/api/v1")) gatewayBase = `${gatewayBase}/api/v1`;
   return gatewayBase;
 }
@@ -209,7 +249,22 @@ function inferMethodValue(reqBody = {}) {
 
   if (funds === "mobilemoney" || destination === "mobilemoney") return "MOBILEMONEY";
   if (funds === "bank" || destination === "bank") return "BANK";
-  if (funds === "card" || destination === "card" || provider === "stripe") return "CARD";
+  /**
+   * `provider === "stripe"` a été retiré le 2026-09-09 avec le rail Stripe.
+   *
+   * ⚠️ Ce classificateur reconnaissait le prestataire SUPPRIMÉ et ignorait le
+   * prestataire SURVIVANT : un corps portant `provider: "visa_direct"` sans
+   * `funds`/`destination` carte tombait dans le repli `INTERNAL` ci-dessous.
+   * On nomme donc les prestataires carte réellement servis.
+   */
+  if (
+    funds === "card" ||
+    destination === "card" ||
+    provider === "visa_direct" ||
+    provider === "visadirect"
+  ) {
+    return "CARD";
+  }
   if (destination === "paynoval" || provider === "paynoval" || funds === "wallet") return "INTERNAL";
 
   return "INTERNAL";

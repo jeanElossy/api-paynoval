@@ -12,6 +12,7 @@
  */
 
 const mongoose = require("mongoose");
+const { normalizeAccountCurrency } = require("../utils/currency");
 const {
   roundMoney,
   buildTreasuryRevenueBreakdown,
@@ -29,6 +30,17 @@ const {
   transferLegs,
   systemReserveAccountId,
   systemClearingAccountId,
+  /**
+   * ⚠️ Importés depuis `doubleEntry` depuis le 2026-09-03. Ce fichier en
+   * portait ses propres copies, dont la normalisation de devise DIVERGEAIT de
+   * celle du module : `"FCFA"` produisait `…:XOF` ici et `…:FCFA` là-bas —
+   * « deux comptes pour un seul argent ». Une convention d'identifiant de
+   * compte est la clé de jointure entre le grand livre et sa projection : elle
+   * ne peut pas avoir deux implémentations. `doubleEntry` normalise désormais
+   * par `normalizeAccountCurrency`, comme ici.
+   */
+  userWalletAccountId,
+  treasuryAccountId,
   buildDedupKey,
 } = require("./ledger/doubleEntry");
 
@@ -124,12 +136,24 @@ function maybeSessionOpts(session) {
   return sharedSessionAvailable() && session ? { session } : {};
 }
 
+/**
+ * ⚠️ CETTE FONCTION SE CONTENTAIT DE MAJUSCULER — ET C'ÉTAIT UN DÉFAUT.
+ *
+ * `TxWalletBalance.normCurrency` traduisait `FCFA`/`CFA` → `XOF` ; celle-ci non.
+ * Un appel en `FCFA` créait donc un portefeuille en **XOF** et des écritures de
+ * grand livre sur `user_wallet:<id>:**FCFA**` : deux comptes pour un seul
+ * argent, dont un que plus aucun contrôle ne réconcilie.
+ *
+ * L'invariant 2 dit que le grand livre fait foi et que le solde en est une
+ * projection. Une projection qui ne porte pas le même nom de compte que sa
+ * source n'est pas une projection.
+ *
+ * Les deux modules partagent désormais `utils/currency.normalizeAccountCurrency`.
+ * **Ne pas réintroduire de normalisation locale ici** : c'est exactement ce qui
+ * a produit le défaut.
+ */
 function normalizeCurrency(currency) {
-  const cur = String(currency || "").trim().toUpperCase();
-  if (!cur || cur.length < 3 || cur.length > 6) {
-    throw new Error(`Devise invalide: ${currency}`);
-  }
-  return cur;
+  return normalizeAccountCurrency(currency);
 }
 
 function normalizeObjectIdLike(v, fieldName) {
@@ -190,16 +214,6 @@ function assertTransactionLike(transaction) {
   }
 }
 
-function userWalletAccountId(userId, currency) {
-  return `user_wallet:${normalizeObjectIdLike(userId, "userId")}:${normalizeCurrency(currency)}`;
-}
-
-function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
-  const userId = normalizeObjectIdLike(treasuryUserId, "treasuryUserId");
-  const systemType = normalizeTreasurySystemType(treasurySystemType);
-  const cur = normalizeCurrency(currency);
-  return `treasury:${systemType}:${userId}:${cur}`;
-}
 
 function assertUserWalletModel() {
   const UserWalletBalance = userWalletModel();
@@ -483,7 +497,7 @@ async function createLedgerEntry({
     "FEE_REVENUE",
     "FX_REVENUE",
     "ADJUSTMENT",
-    // Doit rester aligné sur `ENTRY_TYPES` de models/ledgerEntryModel().js : les deux
+    // Doit rester aligné sur `ENTRY_TYPES` de models/LedgerEntry.js : les deux
     // listes sont séparées, un ajout ici sans l'autre passe la validation du
     // service puis échoue à l'écriture.
     "REFERRAL_PAYOUT",
@@ -662,7 +676,7 @@ async function postDoubleEntry({
       throw err;
     }
 
-    const found = await model.find({ dedupKey: { $in: keys } });
+    const found = await model.find(filtreRelectureDedup(keys));
 
     /**
      * Remis dans l'ordre des jambes. `find` rend l'ordre de l'index, pas celui
@@ -685,6 +699,50 @@ async function postDoubleEntry({
     partial.details = { transactionId: String(transactionId), keys };
     throw partial;
   }
+}
+
+/**
+ * ============================================================================
+ * `$type: "string"` N'EST PAS DÉCORATIF — SANS LUI, C'EST UN BALAYAGE COMPLET
+ * DE COLLECTION SUR LE CHEMIN DE L'ARGENT
+ * ============================================================================
+ *
+ * Filtre de la RELECTURE de déduplication : après un refus d'index unique, on
+ * relit les clés du lot pour distinguer « ce mouvement était déjà enregistré »
+ * de « le lot précédent s'est interrompu au milieu ».
+ *
+ * `dedupKey_unique_partial` est un index PARTIEL, de condition
+ * `{ dedupKey: { $type: "string" } }` (voir `scripts/ensure-ledger-indexes.js`).
+ * MongoDB n'accepte d'utiliser un index partiel que si le prédicat PROUVE que
+ * les documents cherchés satisfont sa condition — et une égalité sur une chaîne
+ * littérale ne le prouve pas : le planificateur ne déduit pas « c'est une
+ * chaîne » de « c'est "abc" ».
+ *
+ * Sans la clause `$type`, l'index existe, il est unique, il protège bien
+ * l'ÉCRITURE — mais la RELECTURE balaye toute la collection.
+ *
+ * Mesuré le 2026-08-28 sur le banc de charge, 240 000 écritures :
+ *
+ *     sans `$type`  →  COLLSCAN, 240 000 documents examinés
+ *     avec `$type`  →  dedupKey_unique_partial, 0 document examiné
+ *
+ * Sous la charge de `test-concurrency/`, ce balayage prenait **11 s en moyenne,
+ * 16 s au pire**, 285 fois — sur un chemin qui ne s'exécute qu'au REJEU, donc
+ * précisément quand le système est déjà en train de se rattraper. La suite
+ * entière est passée de 35,7 s à 8,5 s une fois la clause posée.
+ *
+ * ⚠️ La clause ne change RIEN au résultat : `keys` ne contient que des chaînes,
+ * donc tout document qui satisfaisait le `$in` satisfait déjà `$type: "string"`.
+ * Elle ne restreint pas la recherche, elle AUTORISE le planificateur.
+ *
+ * ⚠️ EXPORTÉE, et ce n'est pas un détail de confort. Le garde-fou
+ * (`test-concurrency/ledgerDedupPlan.concurrency.test.js`) demande à MongoDB le
+ * plan d'exécution de CE filtre-ci. Une première version du test recopiait le
+ * filtre : retirer `$type` du service laissait alors le test au vert — il ne
+ * vérifiait plus que lui-même. Le test doit interroger le filtre RÉEL.
+ */
+function filtreRelectureDedup(keys) {
+  return { dedupKey: { $in: keys, $type: "string" } };
 }
 
 /**
@@ -1355,6 +1413,130 @@ async function chargeCancellationFee({
   return out;
 }
 
+
+/**
+ * ============================================================================
+ * PAIEMENTS INTERNES — L'ÉCRITURE COMPTABLE QUI MANQUAIT
+ * ============================================================================
+ *
+ * ── Le défaut ────────────────────────────────────────────────────────────────
+ * `controllers/internalPaymentsController.js` déplaçait des portefeuilles par
+ * `TxWalletBalance.debit` et `.credit` **sans écrire une seule ligne au grand
+ * livre**. Le fichier ne contenait aucune occurrence de « ledger ».
+ *
+ * Ce chemin n'est pas marginal : c'est celui où aboutit `POST /api/v1/pay` du
+ * backend principal, via `transactionsService.createInternalPayment` →
+ * `POST /api/v1/internal-payments`. De l'argent bougeait donc réellement, sans
+ * contrepartie comptable.
+ *
+ * Deux invariants tombaient d'un coup :
+ *   · **2** — le grand livre fait foi, le solde n'en est qu'une projection. Une
+ *     projection qui bouge sans que sa source bouge n'est plus une projection ;
+ *   · **4** — toute écriture financière est auditable. Il n'y avait rien à
+ *     auditer.
+ *
+ * ── Pourquoi une primitive ici, et pas des appels dans le contrôleur ────────
+ * Parce qu'un contrôleur n'a pas à connaître le nommage des comptes.
+ * `userWalletAccountId` et `systemClearingAccountId` ne sont pas exportés, et
+ * c'est délibéré : le jour où la nomenclature change, elle doit changer à un
+ * seul endroit. Le contrôleur dit *quel argent a bougé* ; ce module décide
+ * *comment il se book*.
+ *
+ * ── La forme des écritures ──────────────────────────────────────────────────
+ * Chaque côté passe par **SYSTEM_CLEARING**, comme le font déjà
+ * `captureSenderReserve` et `creditReceiverFunds`. Un virement interne produit
+ * donc deux paires équilibrées plutôt qu'une seule ligne d'un portefeuille à
+ * l'autre. Ce n'est pas un détour : un débit sans crédit correspondant se
+ * constate alors comme un **solde de compensation non nul**, c'est-à-dire un
+ * état observable, plutôt que comme un trou invisible.
+ *
+ * ── Idempotence ─────────────────────────────────────────────────────────────
+ * `dedupScope` distinct par côté : un rejeu de la requête ne peut pas doubler
+ * l'écriture, l'index unique partiel `dedupKey_unique_partial` la refuse. C'est
+ * l'invariant 3, et il s'appuie sur un index que seul `npm run indexes:ledger`
+ * pose — voir `BENCHMARKS.md` §8.2.
+ *
+ * ⚠️ À APPELER DANS LA MÊME SESSION que les mouvements de portefeuille. Hors
+ * transaction, un échec entre les deux laisserait précisément l'incohérence que
+ * cette fonction existe pour empêcher.
+ */
+async function postInternalPaymentEntries({
+  transaction,
+  debit = null,
+  credit = null,
+  session = null,
+}) {
+  assertTransactionLike(transaction);
+
+  if (!debit && !credit) {
+    throw new Error(
+      "postInternalPaymentEntries : ni débit ni crédit. Un mouvement d'argent " +
+        "sans côté n'existe pas — appeler cette fonction pour rien masquerait " +
+        "un chemin qui ne book rien."
+    );
+  }
+
+  if (debit) {
+    const cur = normalizeCurrency(debit.currency);
+    const amt = normalizePositiveAmount(debit.amount, cur);
+    const from = normalizeObjectIdLike(debit.userId, "debit.userId");
+
+    await postDoubleEntry({
+      transactionId: transaction._id,
+      reference: transaction.reference,
+      entryType: "USER_DEBIT",
+      context: "internalPayment.debit",
+      dedupScope: "internalPayment.debit",
+      legs: transferLegs({
+        from: {
+          accountType: "USER_WALLET",
+          accountId: userWalletAccountId(from, cur),
+          userId: from,
+        },
+        to: {
+          accountType: "SYSTEM_CLEARING",
+          accountId: systemClearingAccountId(cur),
+          userId: null,
+        },
+        amount: amt,
+        currency: cur,
+      }),
+      metadata: { stage: "internal-payment", mode: debit.mode || null },
+      session,
+    });
+  }
+
+  if (credit) {
+    const cur = normalizeCurrency(credit.currency);
+    const amt = normalizePositiveAmount(credit.amount, cur);
+    const to = normalizeObjectIdLike(credit.userId, "credit.userId");
+
+    await postDoubleEntry({
+      transactionId: transaction._id,
+      reference: transaction.reference,
+      entryType: "USER_CREDIT",
+      context: "internalPayment.credit",
+      dedupScope: "internalPayment.credit",
+      legs: transferLegs({
+        from: {
+          accountType: "SYSTEM_CLEARING",
+          accountId: systemClearingAccountId(cur),
+          userId: null,
+        },
+        to: {
+          accountType: "USER_WALLET",
+          accountId: userWalletAccountId(to, cur),
+          userId: to,
+        },
+        amount: amt,
+        currency: cur,
+      }),
+      metadata: { stage: "internal-payment", mode: credit.mode || null },
+      session,
+    });
+  }
+}
+
 module.exports = {
   postDoubleEntry,
   TREASURY_SYSTEM_TYPES,
@@ -1374,4 +1556,6 @@ module.exports = {
   creditTreasuryRevenue,
   chargeCancellationFee,
   createLedgerEntry,
+  filtreRelectureDedup,
+  postInternalPaymentEntries,
 };

@@ -147,6 +147,18 @@ function idempotency({ required } = {}) {
       });
     }
 
+    /**
+     * On EXPOSE la clé validée aux handlers.
+     *
+     * Sans cette ligne, les handlers ne la voyaient que si elle arrivait par le
+     * CORPS — or le client mobile ne l'envoie que par l'EN-TÊTE. Le champ
+     * `Transaction.idempotencyKey` restait vide, et les index uniques partiels
+     * qui s'appuient dessus ne s'appliquaient à aucune transaction réelle.
+     * C'est exactement le filet invoqué plus bas, quand le registre est
+     * indisponible (`return next()`).
+     */
+    req.idempotencyKey = rawKey;
+
     const userId = resolveUserId(req);
     const method = req.method;
     const path = req.baseUrl ? `${req.baseUrl}${req.path}` : req.path;
@@ -158,8 +170,14 @@ function idempotency({ required } = {}) {
     try {
       IdempotencyRecord = getModel();
     } catch (err) {
-      // Base indisponible : on ne bloque pas le paiement pour autant. Le risque
-      // de doublon reste couvert en aval par les index uniques.
+      /**
+       * Base indisponible : on ne bloque pas le paiement pour autant. Le risque
+       * de doublon reste couvert en aval par les index uniques partiels
+       * `{sender, idempotencyKey}` et `{userId, idempotencyKey}` — ce qui n'est
+       * vrai QUE parce que `req.idempotencyKey` est posée ci-dessus et que les
+       * handlers la persistent (`resolvePersistedIdempotencyKey`). Avant le
+       * 2026-09-03, ce repli ne reposait sur rien pour le trafic mobile.
+       */
       logger.warn?.("[IDEMPOTENCY] registre indisponible", { message: err?.message });
       return next();
     }

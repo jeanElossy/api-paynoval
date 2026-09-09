@@ -39,6 +39,8 @@ const {
   settleFailure,
 } = require("./referralEventOutbox");
 
+const { WORKERS, declareWorker } = require("../workerMetrics");
+
 function normalizeBaseUrl(value) {
   return String(value || "")
     .trim()
@@ -237,11 +239,38 @@ function startReferralOutboxWorker({
   reapIntervalMs = Number(process.env.REFERRAL_OUTBOX_REAP_INTERVAL_MS || 60_000),
   batchSize = Number(process.env.REFERRAL_OUTBOX_BATCH_SIZE || 50),
   workerId,
+  /**
+   * Travail d'un tour. Injectable pour que le test de câblage exerce le VRAI
+   * `startReferralOutboxWorker` sans ouvrir de connexion Mongo (règle B.5).
+   */
+  runOnce = processPendingReferralEvents,
 } = {}) {
   if (String(process.env.REFERRAL_OUTBOX_WORKER_ENABLED || "true") === "false") {
     logger.warn?.("[REFERRAL][WORKER] desactive par configuration");
-    return { workerId: workerId || "", stop() {} };
+
+    // Déclaré même éteint : une série absente n'alerte pas. Voir
+    // `services/workerMetrics.js`.
+    declareWorker(WORKERS.REFERRAL_OUTBOX, { enabled: false, logger });
+    declareWorker(WORKERS.REFERRAL_LOCK_REAPER, { enabled: false, logger });
+
+    return { workerId: workerId || "", async tick() {}, stop() {} };
   }
+
+  const metrics = declareWorker(WORKERS.REFERRAL_OUTBOX, { logger });
+
+  /**
+   * ⚠️ SECONDE BOUCLE, SECONDE DÉCLARATION.
+   *
+   * `reapTick` est un `setInterval` distinct de `tick`. Son arrêt a sa propre
+   * conséquence : les verrous expirés ne sont plus libérés, et les événements
+   * de parrainage restent verrouillés **indéfiniment**. La boucle principale,
+   * elle, continuerait de tourner et d'afficher un âge sain — une série verte à
+   * côté d'une file qui ne s'écoule plus.
+   *
+   * Ce qui se déclare n'est pas « un worker », c'est **chaque boucle dont
+   * l'arrêt a une conséquence**.
+   */
+  const reaperMetrics = declareWorker(WORKERS.REFERRAL_LOCK_REAPER, { logger });
 
   const wid = workerId || buildWorkerId();
 
@@ -260,17 +289,25 @@ function startReferralOutboxWorker({
    */
   let running = false;
 
+  /**
+   * ⚠️ Un tour SAUTÉ par le verrou de ré-entrance n'est pas compté comme un
+   * passage : ce n'en est pas un. L'âge continue donc de monter tant que le
+   * tour en cours n'est pas fini — exactement ce qu'on veut voir si un tour
+   * reste bloqué (`worker_running` vaut alors 1 et le dit).
+   */
   const tick = async () => {
     if (running) return;
     running = true;
 
     try {
-      const result = await processPendingReferralEvents({
-        limit: batchSize,
-        workerId: wid,
-      });
+      const result = await metrics.record(() =>
+        runOnce({
+          limit: batchSize,
+          workerId: wid,
+        })
+      );
 
-      if (result.claimed) {
+      if (result?.claimed) {
         logger.info?.("[REFERRAL][WORKER] lot traite", result);
       }
     } catch (err) {
@@ -285,7 +322,12 @@ function startReferralOutboxWorker({
 
   const reapTick = async () => {
     try {
-      await reapExpiredLocks();
+      /**
+       * `record` est posé À L'INTÉRIEUR du try/catch, pas autour. Autour, il ne
+       * verrait jamais un échec : ce tour absorbe déjà ses erreurs, et l'appel
+       * extérieur rendrait toujours un succès.
+       */
+      await reaperMetrics.record(() => reapExpiredLocks());
     } catch (err) {
       logger.error?.("[REFERRAL][WORKER] ramassage des verrous echoue", {
         err: err?.message || err,
@@ -306,6 +348,9 @@ function startReferralOutboxWorker({
 
   return {
     workerId: wid,
+
+    /** Un tour, à la demande. Exposé pour le test de câblage. */
+    tick,
 
     stop() {
       clearInterval(timer);

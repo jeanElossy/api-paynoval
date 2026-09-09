@@ -26,19 +26,33 @@ const {
   isRestrictedProfile,
 } = require("../src/services/transactions/shared/railPolicy");
 
-/** Environnement vierge : aucune variable posée, donc régime par défaut. */
-const ENV = {};
+/**
+ * Ces tests portent sur le MÉCANISME de la politique — normalisation des pays,
+ * rôle de la devise, régime report-only, pilotage par variable — et non sur la
+ * liste de rails effectivement restreinte, qui est une décision produit.
+ *
+ * Ils fournissaient auparavant un environnement vierge et s'appuyaient sur le
+ * défaut `["stripe"]`. Ce couplage les a fait tomber en bloc le 2026-09-08,
+ * quand `stripe` est sorti du périmètre et que la liste est devenue vide : la
+ * mécanique n'avait pourtant pas changé d'un iota. Le rail restreint est donc
+ * désormais POSÉ ici, ce qui rend ces tests indépendants du catalogue produit.
+ *
+ * `RAIL_POLICY_RESTRICTED_RAILS` non vide + `RAIL_POLICY_STRICT` absente =
+ * exactement le régime qu'on veut éprouver.
+ */
+const RAIL_TEMOIN = "un_rail_restreint";
+const ENV = { RAIL_POLICY_RESTRICTED_RAILS: RAIL_TEMOIN };
 
-test("un compte ivoirien ne peut pas débiter par stripe", () => {
+test("un compte ivoirien ne peut pas débiter par un rail restreint", () => {
   const verdict = evaluateRailPolicy({
     country: "Côte d'Ivoire",
-    funds: "stripe",
+    funds: RAIL_TEMOIN,
     destination: "paynoval",
     env: ENV,
   });
 
   assert.equal(verdict.allowed, false);
-  assert.equal(verdict.violations[0].rail, "stripe");
+  assert.equal(verdict.violations[0].rail, RAIL_TEMOIN);
   assert.equal(verdict.violations[0].side, "funds");
   assert.equal(verdict.violations[0].reason, "RAIL_RESTRICTED_FOR_REGION");
 });
@@ -46,13 +60,12 @@ test("un compte ivoirien ne peut pas débiter par stripe", () => {
 test("la devise suffit, même sans pays renseigné", () => {
   // Un compte dont la devise est XOF opère dans la zone même si le pays est
   // absent ou mal saisi — c'est la règle du mobile, et elle est la bonne.
-  // « stripe » et non « bank » : le rail bancaire a été retiré le 2026-08-26,
-  // il n'est donc plus restreint — il n'existe plus. La propriété testée est
-  // inchangée : la DEVISE suffit à situer le compte dans la zone.
+  // Le rail employé ici est un TÉMOIN, pas un rail du produit : la propriété
+  // testée est que la DEVISE suffit à situer le compte dans la zone.
   const verdict = evaluateRailPolicy({
     currency: "XOF",
     funds: "paynoval",
-    destination: "stripe",
+    destination: RAIL_TEMOIN,
     env: ENV,
   });
 
@@ -72,7 +85,7 @@ test("les accents et la casse ne contournent pas la règle", () => {
   ]) {
     const verdict = evaluateRailPolicy({
       country,
-      funds: "stripe",
+      funds: RAIL_TEMOIN,
       destination: "paynoval",
       env: ENV,
     });
@@ -89,7 +102,7 @@ test("un compte hors zone n'est pas restreint", () => {
   const verdict = evaluateRailPolicy({
     country: "France",
     currency: "EUR",
-    funds: "stripe",
+    funds: RAIL_TEMOIN,
     destination: "paynoval",
     env: ENV,
   });
@@ -125,7 +138,7 @@ test("les rails autorisés restent autorisés dans la zone", () => {
 test("report-only par défaut : la règle constate sans bloquer", () => {
   const verdict = evaluateRailPolicy({
     country: "mali",
-    funds: "stripe",
+    funds: RAIL_TEMOIN,
     destination: "paynoval",
     env: ENV,
   });
@@ -139,7 +152,7 @@ test("report-only par défaut : la règle constate sans bloquer", () => {
 test("le régime strict s'active explicitement", () => {
   const verdict = evaluateRailPolicy({
     country: "mali",
-    funds: "stripe",
+    funds: RAIL_TEMOIN,
     destination: "paynoval",
     env: { RAIL_POLICY_STRICT: "true" },
   });
@@ -160,10 +173,13 @@ test("la liste de pays se pilote par variable d'environnement", () => {
   // Elle était figée en dur dans un écran mobile, donc jusqu'à la prochaine
   // soumission en magasin. Une restriction opérationnelle doit pouvoir se
   // lever le jour où le partenaire ouvre le corridor.
-  const env = { RAIL_POLICY_RESTRICTED_COUNTRIES: "ghana,nigeria" };
+  const env = {
+    RAIL_POLICY_RESTRICTED_COUNTRIES: "ghana,nigeria",
+    RAIL_POLICY_RESTRICTED_RAILS: RAIL_TEMOIN,
+  };
 
   assert.equal(
-    evaluateRailPolicy({ country: "ghana", funds: "stripe", env }).allowed,
+    evaluateRailPolicy({ country: "ghana", funds: RAIL_TEMOIN, env }).allowed,
     false
   );
 

@@ -27,15 +27,10 @@ const VALID_FLOWS = new Set([
   "UNKNOWN_FLOW",
 ]);
 
-const VALID_RAILS = new Set([
-  "paynoval",
-  "stripe",
-  "mobilemoney",
-  "visa_direct",
-  "stripe2momo",
-  "cashin",
-  "cashout",
-]);
+// Le bac à sable doit offrir EXACTEMENT les rails de la production : un rail
+// simulable mais non opéré ferait passer en revue Apple un parcours qui
+// n'existe pas. Aligné sur le périmètre du 2026-09-08.
+const VALID_RAILS = new Set(["paynoval", "mobilemoney", "visa_direct"]);
 
 function normalizeCurrency(value) {
   const s = String(value || "CAD").trim().toUpperCase();
@@ -56,7 +51,8 @@ function normalizeRail(value, fallback = "paynoval") {
     .replace(/\s+/g, "_")
     .replace(/-/g, "_");
 
-  if (mapped === "card") return fallback === "visa_direct" ? "visa_direct" : "stripe";
+  // Rendait « stripe » quand le repli n'était pas explicitement « visa_direct ».
+  if (mapped === "card") return "visa_direct";
   if (mapped === "visa" || mapped === "visadirect") return "visa_direct";
   if (mapped === "momo" || mapped === "mobile_money") return "mobilemoney";
   if (mapped === "sandbox") return fallback;
@@ -412,7 +408,7 @@ function resolveReceiverIdForTx({ userId, flowInfo, recipientSnapshot }) {
 
 function resolveFundsRail(body = {}, flowInfo) {
   if (flowInfo.type === "external_in") {
-    return normalizeRail(body.funds || body.provider || body.method, "stripe");
+    return normalizeRail(body.funds || body.provider || body.method, "visa_direct");
   }
 
   return normalizeRail(body.funds || "paynoval", "paynoval");

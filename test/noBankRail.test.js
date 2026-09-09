@@ -112,8 +112,29 @@ test("aucune trace du rail bancaire dans le modèle Transaction", () => {
 test("les rails offerts restent intacts", () => {
   // Une garde qui emporterait les rails réels serait pire que le défaut
   // qu'elle corrige.
+  //
+  // `stripe` figurait dans cette liste jusqu'au 2026-09-08. Il en a été retiré
+  // par DÉCISION PRODUIT, pas par accident : les cartes passeront par un
+  // partenaire servant Visa, Mastercard et les autres réseaux. La garde suit le
+  // périmètre réel — trois rails.
   const src = fs.readFileSync(path.join(SRC, "models", "Transaction.js"), "utf8");
-  for (const rail of ["paynoval", "mobilemoney", "visa_direct", "stripe"]) {
+  for (const rail of ["paynoval", "mobilemoney", "visa_direct"]) {
     assert.ok(src.includes(`"${rail}"`), `le rail ${rail} doit rester`);
+  }
+});
+
+test("les rails retirés du produit ne reviennent pas par l'énumération", () => {
+  /**
+   * Le pendant de la garde ci-dessus. Un rail retiré de la politique AML mais
+   * laissé dans l'énumération du modèle serait persistable sans plafond : la
+   * transaction se créerait, et c'est seulement au moment de bouger l'argent
+   * que ça coincerait — trop tard, et sans dire pourquoi.
+   */
+  const src = fs.readFileSync(path.join(SRC, "models", "Transaction.js"), "utf8");
+  for (const retiré of ["stripe", "stripe2momo", "flutterwave", "cashin", "cashout"]) {
+    assert.ok(
+      !new RegExp(`"${retiré}"`).test(src),
+      `le rail ${retiré} a été retiré du produit et ne doit plus être persistable`
+    );
   }
 });

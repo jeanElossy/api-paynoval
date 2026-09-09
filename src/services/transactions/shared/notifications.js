@@ -3,7 +3,12 @@
 const crypto = require("crypto");
 
 const runtime = require("./runtime");
-const { notifyTransactionViaGateway, logger, PRINCIPAL_URL, maybeSessionOpts } = runtime;
+/**
+ * `notifyTransactionViaGateway` a été retiré de cette destructuration le
+ * 2026-09-09 : `runtime` ne l'expose pas, il valait `undefined`, et son seul
+ * appelant a été supprimé (voir le bloc commenté dans `notifyParties`).
+ */
+const { logger, maybeSessionOpts } = runtime;
 
 /**
  * Modèles liés PARESSEUSEMENT : chaque accès de propriété va chercher le
@@ -187,6 +192,10 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
           service: "notifications",
           event: `transaction_${status}`,
           payload: { userId: sender._id.toString(), data: dataSender },
+          // 2 = HIGH. Voir le commentaire du champ `priority` dans
+          // `models/Outbox.js` : sans lui, ces envois passaient devant les
+          // alertes de sécurité.
+          priority: 2,
           idempotencyKey: buildOutboxIdempotencyKey(
             tx._id.toString(),
             sender._id.toString(),
@@ -197,6 +206,7 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
           service: "notifications",
           event: `transaction_${status}`,
           payload: { userId: receiver._id.toString(), data: dataReceiver },
+          priority: 2,
           idempotencyKey: buildOutboxIdempotencyKey(
             tx._id.toString(),
             receiver._id.toString(),
@@ -207,31 +217,39 @@ async function notifyParties(tx, status, session, senderCurrencySymbol) {
       { ordered: false, ...sessOpts }
     );
 
-    notifyTransactionViaGateway(status, {
-      transaction: {
-        id: tx._id.toString(),
-        reference: tx.reference,
-        amount: senderAmount,
-        currency: senderCurrency,
-        dateIso: buildTxDateIso(tx),
-      },
-      sender: {
-        email: sender.email,
-        name: sender.fullName || sender.email,
-        wantsEmail: senderWantsEmail,
-      },
-      receiver: {
-        email: receiverEmail,
-        name: tx.nameDestinataire || receiver.fullName || receiver.email,
-        wantsEmail: receiverWantsEmail,
-      },
-      links: {
-        sender: `${PRINCIPAL_URL}/transactions/${tx._id}`,
-        receiverConfirm: `${PRINCIPAL_URL}/confirm/${tx._id}`,
-      },
-    }).catch((err) => {
-      logger?.error?.("[notifyParties] gateway notify error", err?.message || err);
-    });
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * IL Y AVAIT ICI UN SECOND CANAL DE NOTIFICATION — RETIRÉ LE 2026-09-09
+     * ═══════════════════════════════════════════════════════════════════════
+     *
+     * Un appel direct `notifyTransactionViaGateway(status, {...}).catch(...)`
+     * suivait l'écriture d'outbox ci-dessus. Il était cassé DEPUIS TOUJOURS, et
+     * de la façon la plus discrète qui soit :
+     *
+     *   • `notifyTransactionViaGateway` était déstructuré de `runtime`, qui ne
+     *     l'expose pas. Il valait donc `undefined` ;
+     *   • l'appeler levait un `TypeError` **synchrone** — avant que la promesse
+     *     n'existe. Le `.catch()` écrit pour ce cas était **inatteignable** ;
+     *   • le `TypeError` remontait au `catch` général ci-dessous, qui
+     *     journalisait `[notifyParties] error` — le message générique, jamais
+     *     le message spécifique. Rien, dans les journaux, ne désignait ce bloc.
+     *
+     * Il n'a pas été réparé, il a été RETIRÉ, pour deux raisons :
+     *
+     *   1. **La notification est déjà durable.** L'`insertMany` ci-dessus écrit
+     *      un événement d'outbox porteur d'une clé d'idempotence, dans la MÊME
+     *      transaction que le fait métier. Un worker le draine. C'est le motif
+     *      « transactional outbox » — un seul canal, rejouable, dédoublonné.
+     *   2. **Cet appel était un envoi réseau À L'INTÉRIEUR d'une transaction
+     *      Mongo** (`notifyParties` est appelée depuis le bloc transactionnel
+     *      de `externalSettlementController`). Le réparer sans le déplacer
+     *      aurait armé un défaut pire que celui qu'il corrigeait : une
+     *      transaction annulée après l'envoi aurait notifié un client d'un
+     *      règlement qui n'a pas eu lieu, sans clé d'idempotence pour rattraper.
+     *
+     * ⚠️ NE PAS LE RÉINTRODUIRE. Deux canaux pour un même message, c'est un
+     * double envoi le jour où le premier remarche.
+     */
   } catch (err) {
     logger?.error?.("[notifyParties] error", err?.message || err);
   }

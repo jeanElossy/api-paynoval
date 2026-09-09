@@ -61,6 +61,7 @@ const {
 } = require("../shared/transactionEligibility");
 
 const { submitExternalExecution } = require("./submitExternalExecution");
+const { resolvePersistedIdempotencyKey } = require("../../../utils/idempotencyKeys");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
@@ -452,7 +453,16 @@ async function buildPricingContext({
   const amountSourceStd = round2(grossFrom);
   const feeSourceStd = round2(fee);
   const amountTargetStd = round2(netTo);
-  const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
+  /**
+   * Pas de `|| 1` ici. Il y en avait un jusqu'au 2026-09-03, et il rendait la
+   * garde de la ligne suivante INCAPABLE d'attraper ce qu'elle prétend
+   * attraper : un `appliedRate` absent, nul ou `NaN` devenait 1 — un taux
+   * 1:1 parfaitement fini et positif, qui franchit le contrôle. Sur une paire
+   * XOF→EUR, cela transforme une panne de tarification en perte silencieuse
+   * de trois ordres de grandeur (règle B.2 : le chemin de l'argent échoue en
+   * FERMETURE, il ne prend pas de valeur par défaut).
+   */
+  const rateUsed = Number(pricingSnapshot?.result?.appliedRate);
 
   if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
     throw createError(500, "Taux appliqué invalide");
@@ -760,7 +770,7 @@ async function initiateOutboundExternal(req, res, next) {
             contextId: null,
 
             reference,
-            idempotencyKey: body.idempotencyKey || null,
+            idempotencyKey: resolvePersistedIdempotencyKey(req, body) || null,
 
             sender: senderUser._id,
             receiver: null,
@@ -1228,12 +1238,15 @@ async function initiateInboundExternal(req, res, next) {
       eligibilitySnapshot
     );
 
+    /**
+     * Le repli valait « stripe » : rail retiré le 2026-09-08, dont l'adapter a
+     * été supprimé. Toute alimentation par carte y retombait dès que `provider`
+     * n'était pas exactement « visa_direct ».
+     */
     const fundsValue =
       flow === INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL
         ? "mobilemoney"
-        : provider === "visa_direct"
-        ? "visa_direct"
-        : "stripe";
+        : "visa_direct";
 
     /**
      * PHASE 2 — UNITÉ DE TRAVAIL, REJOUABLE.
@@ -1258,7 +1271,7 @@ async function initiateInboundExternal(req, res, next) {
             contextId: null,
 
             reference,
-            idempotencyKey: body.idempotencyKey || null,
+            idempotencyKey: resolvePersistedIdempotencyKey(req, body) || null,
 
             sender: null,
             receiver: receiverUser._id,

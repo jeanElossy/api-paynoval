@@ -1,0 +1,51 @@
+# Montée de version automatisée des dépendances.
+#
+# ── Pourquoi ce fichier existe ────────────────────────────────────────────────
+#
+# `npm audit` tourne déjà en intégration continue dans les cinq dépôts (voir
+# `.github/workflows/ci.yml`). Il SIGNALE — il ne corrige rien. Le seuil agit
+# comme un cliquet : il empêche d'empirer, il ne fait pas progresser.
+#
+# Mesuré le 2026-09-02 sur `paynoval-backend` : 5 vulnérabilités (1 élevée,
+# 4 modérées), toutes sous le seuil `critical` du dépôt. La chaîne passait donc
+# au vert avec elles, indéfiniment. C'est exactement la moitié qui manquait.
+#
+# ── Le rythme ─────────────────────────────────────────────────────────────────
+#
+# Hebdomadaire, plafonné à 5 demandes ouvertes. Un flux quotidien illimité finit
+# ignoré, et une mise à jour qu'on n'examine pas ne vaut pas mieux que pas de
+# mise à jour du tout.
+#
+# Les montées de version MAJEURES sont exclues : elles se décident, elles ne se
+# subissent pas un lundi matin. Les correctifs de sécurité, eux, arrivent
+# presque toujours en patch ou en mineure.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    ignore:
+      # Une majeure se planifie. Dependabot la proposerait sans savoir ce
+      # qu'elle casse, et la demande resterait ouverte des mois.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(ci)"

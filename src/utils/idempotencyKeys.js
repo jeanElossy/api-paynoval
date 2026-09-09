@@ -100,9 +100,49 @@ function computeRequestFingerprint({ method, path, body }) {
   return crypto.createHash("sha256").update(payload, "utf8").digest("hex");
 }
 
+/**
+ * La clé À PERSISTER sur la transaction.
+ *
+ * ⚠️ Ce n'est PAS la même chose que `extractIdempotencyKey`. Celle-ci lit la
+ * requête entrante ; celle-là dit ce qu'on écrit dans `Transaction.idempotencyKey`,
+ * champ sur lequel reposent les index uniques partiels `{sender, idempotencyKey}`
+ * et `{userId, idempotencyKey}`.
+ *
+ * Le défaut qu'elle ferme (trouvé le 2026-09-03) : les handlers ne lisaient la
+ * clé que dans le CORPS (`body.idempotencyKey`), alors que l'application mobile
+ * ne l'envoie que dans l'EN-TÊTE (`payNoval-master/tools/api.js` :
+ * `headers: { "Idempotency-Key": … }`, et `buildUnifiedInitiatePayload` n'en met
+ * aucune au corps). Le champ restait donc `undefined`, le
+ * `partialFilterExpression: { idempotencyKey: { $type: "string", $gt: "" } }`
+ * excluait le document, et les deux index uniques ne mordaient JAMAIS sur le
+ * trafic de production.
+ *
+ * Cela n'avait aucune conséquence en régime nominal — le registre
+ * `idempotency_records` fait le travail. Mais quand ce registre est
+ * indisponible, `middleware/idempotency.js` appelle `next()` en s'appuyant
+ * explicitement sur ces index (« le risque de doublon reste couvert en aval »).
+ * Le filet annoncé n'existait pas là où il comptait : deux `/initiate`
+ * concurrents auraient créé deux transactions et RÉSERVÉ LES FONDS DEUX FOIS.
+ *
+ * Ordre de lecture : `req.idempotencyKey`, posée par le middleware après
+ * validation (elle vient de l'en-tête ou du corps, en-tête prioritaire), puis
+ * le corps en repli si le middleware n'est pas monté sur la route.
+ *
+ * @returns {string|undefined} `undefined` — jamais `null` ni `""` — quand il n'y
+ *   a pas de clé : le filtre partiel de l'index exige un `$type: "string"`.
+ */
+function resolvePersistedIdempotencyKey(req, body) {
+  const depuisMiddleware = typeof req?.idempotencyKey === "string" ? req.idempotencyKey.trim() : "";
+  if (depuisMiddleware) return depuisMiddleware;
+
+  const depuisCorps = typeof body?.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+  return depuisCorps || undefined;
+}
+
 module.exports = {
   stableStringify,
   extractIdempotencyKey,
+  resolvePersistedIdempotencyKey,
   isValidIdempotencyKey,
   buildScope,
   computeRequestFingerprint,

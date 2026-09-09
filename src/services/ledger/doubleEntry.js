@@ -105,8 +105,50 @@ const BALANCE_EPSILON = 0.005;
 /* Identifiants de comptes                                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Devise d'un IDENTIFIANT DE COMPTE — stricte, avec alias.
+ * ============================================================================
+ *
+ * Jusqu'au 2026-09-03, ce module normalisait par un simple `toUpperCase()`
+ * tandis que `ledgerService.js` passait par `normalizeAccountCurrency`, qui
+ * connaît les alias. Deux implémentations, deux résultats :
+ *
+ *     "FCFA" →  user_wallet:<id>:FCFA   (ici)
+ *     "FCFA" →  user_wallet:<id>:XOF    (ledgerService)
+ *
+ * Soit exactement « deux comptes pour un seul argent », le défaut que
+ * `utils/currency.js:81-85` raconte avoir déjà coûté cher. Le chemin de
+ * production était sauf — `ledgerService` normalise avant d'appeler ces
+ * constructeurs — mais la version exportée d'ici restait un piège armé pour
+ * quiconque l'appellerait directement.
+ *
+ * Une convention d'identifiant de compte est la clé de jointure entre le grand
+ * livre et sa projection : elle ne peut pas avoir deux implémentations.
+ *
+ * ⚠️ Cette fonction LÈVE sur une devise absente ou illisible. C'est voulu
+ * (règle B.2) : un repli ferait porter l'écriture au mauvais compte sans
+ * qu'aucune erreur ne le signale.
+ */
+const { normalizeAccountCurrency } = require("../../utils/currency");
+
 function normCurrency(c) {
-  return String(c || "").trim().toUpperCase();
+  return normalizeAccountCurrency(c);
+}
+
+/**
+ * Devise pour un CUMUL DE LECTURE — tolérante, et qui SIGNALE.
+ *
+ * `summarizeLegs` relit des données déjà écrites : y lever transformerait le
+ * contrôle en panne. On tolère donc, mais on compte — voir `summarizeLegs`.
+ */
+function normCurrencyLecture(c) {
+  const brut = String(c || "").trim().toUpperCase();
+  if (!brut) return "?";
+  try {
+    return normalizeAccountCurrency(brut);
+  } catch {
+    return brut;
+  }
 }
 
 function normId(v) {
@@ -159,28 +201,62 @@ function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
  * @param {Array} legs
  * @returns {Map<string, { debit: number, credit: number, delta: number }>}
  */
+/**
+ * Cumule les jambes par devise — ET COMPTE CE QU'ELLE NE SAIT PAS LIRE.
+ * ============================================================================
+ *
+ * ⚠️ Deux replis silencieux existaient ici jusqu'au 2026-09-03 :
+ *
+ *   1. `Number(leg?.amount || 0)` — un montant illisible comptait pour **zéro** ;
+ *   2. `else { bucket.credit += … }` — tout sens différent de `"DEBIT"`, y
+ *      compris un sens absent ou corrompu, comptait pour un **crédit**.
+ *
+ * Sur le chemin d'ÉCRITURE, c'était sans conséquence : `checkBalanced` valide
+ * en amont. Mais `computeTrialBalance` appelle cette fonction **sans aucune
+ * validation**, sur des données relues depuis la base — et c'est précisément le
+ * contrôle que le §3 de `ledger.md` désigne comme « le filet » contre une
+ * écriture de masse qui aurait contourné les gardes du modèle.
+ *
+ * Autrement dit : le filet avait des mailles exactement là où on lui demande de
+ * tenir. Une écriture corrompue par le chemin qu'il surveille pouvait être
+ * absorbée en silence et laisser la balance équilibrée.
+ *
+ * On ne LÈVE pas — un contrôle qui tombe en panne sur une donnée douteuse ne
+ * contrôle plus rien. On COMPTE, et l'appelant décide.
+ *
+ * @returns {{byCurrency: Map, anomalies: {montantIllisible: number, sensInconnu: number, deviseIllisible: number}}}
+ */
 function summarizeLegs(legs = []) {
   const byCurrency = new Map();
+  const anomalies = { montantIllisible: 0, sensInconnu: 0, deviseIllisible: 0 };
 
   for (const leg of legs) {
-    const cur = normCurrency(leg?.currency);
-    const amount = Number(leg?.amount || 0);
+    const curBrute = String(leg?.currency || "").trim();
+    const cur = normCurrencyLecture(leg?.currency);
+    if (!curBrute || cur === "?") anomalies.deviseIllisible += 1;
+
+    const brut = Number(leg?.amount);
+    const amount = Number.isFinite(brut) ? brut : 0;
+    if (!Number.isFinite(brut)) anomalies.montantIllisible += 1;
 
     if (!byCurrency.has(cur)) {
       byCurrency.set(cur, { debit: 0, credit: 0, delta: 0 });
     }
 
     const bucket = byCurrency.get(cur);
+    const sens = String(leg?.direction || "").toUpperCase();
 
-    if (String(leg?.direction || "").toUpperCase() === "DEBIT") {
+    if (sens === "DEBIT") {
       bucket.debit += amount;
     } else {
+      if (sens !== "CREDIT") anomalies.sensInconnu += 1;
       bucket.credit += amount;
     }
 
     bucket.delta = bucket.debit - bucket.credit;
   }
 
+  byCurrency.anomalies = anomalies;
   return byCurrency;
 }
 
@@ -254,7 +330,20 @@ function checkBalanced(legs = []) {
       };
     }
 
-    if (!normCurrency(leg?.currency)) {
+    /**
+     * ⚠️ `normCurrencyLecture`, pas `normCurrency`.
+     *
+     * `checkBalanced` est un VALIDATEUR : il rend un refus structuré, il ne
+     * lève pas. Utiliser ici la version stricte ferait remonter une exception
+     * à la place du `{ ok: false, reason: "missing-currency" }` que tout
+     * l'appelant attend — la garde disparaîtrait derrière un plantage.
+     *
+     * Trois normalisations, trois rôles :
+     *   • `normCurrency` — construction d'identifiant : LÈVE (règle B.2) ;
+     *   • `normCurrencyLecture` — validation et cumul : tolère et signale ;
+     *   • ici : tolère, et c'est le test explicite ci-dessous qui refuse.
+     */
+    if (normCurrencyLecture(leg?.currency) === "?") {
       return {
         ok: false,
         reason: "missing-currency",
@@ -353,15 +442,37 @@ function computeTrialBalance(entries = [], { minVersion = LEDGER_VERSION } = {})
   );
 
   const byCurrency = {};
-  let balanced = true;
+  let ecartsDansLaTolerance = true;
 
   for (const [cur, b] of summary) {
     byCurrency[cur] = { debit: b.debit, credit: b.credit, delta: b.delta };
-    if (Math.abs(b.delta) > BALANCE_EPSILON) balanced = false;
+    if (Math.abs(b.delta) > BALANCE_EPSILON) ecartsDansLaTolerance = false;
   }
 
+  const anomalies = summary.anomalies || {
+    montantIllisible: 0,
+    sensInconnu: 0,
+    deviseIllisible: 0,
+  };
+  const nbAnomalies =
+    anomalies.montantIllisible + anomalies.sensInconnu + anomalies.deviseIllisible;
+
+  /**
+   * ⚠️ Une donnée illisible rend `balanced: false`, depuis le 2026-09-03.
+   *
+   * Avant, un montant illisible comptait pour 0 et un sens corrompu pour un
+   * crédit : la balance pouvait rendre `balanced: true` sur des écritures
+   * qu'elle n'avait pas su lire. « Je ne sais pas » n'est pas « équilibré » —
+   * et c'est bien ici, dans le filet, que la distinction compte le plus.
+   *
+   * `ecartsDansLaTolerance` reste exposé séparément pour que l'appelant
+   * distingue « les débits ne valent pas les crédits » de « je n'ai pas su
+   * lire ces écritures ». Deux problèmes différents, deux actions différentes.
+   */
   return {
-    balanced,
+    balanced: ecartsDansLaTolerance && nbAnomalies === 0,
+    ecartsDansLaTolerance,
+    anomalies,
     byCurrency,
     consideredEntries: eligible.length,
     skippedLegacyEntries: entries.length - eligible.length,

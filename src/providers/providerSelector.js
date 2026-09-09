@@ -22,7 +22,6 @@ const moovAdapter = require("./mobilemoney/moovAdapter");
  * n'exécute — le défaut n°1 de l'audit d'architecture.
  */
 
-const stripeAdapter = require("./card/stripeAdapter");
 const visaDirectAdapter = require("./card/visaDirectAdapter");
 
 const { getTxMetrics } = require("../services/txMetrics");
@@ -49,7 +48,21 @@ function getMobileMoneyAdapter(provider) {
 function getCardAdapter(provider) {
   switch (norm(provider)) {
     case "stripe":
-      return stripeAdapter;
+      /**
+       * REFUS EXPLICITE, comme pour le rail bancaire retiré avant lui.
+       *
+       * Stripe est sorti du périmètre le 2026-09-08 et son adapter a été
+       * SUPPRIMÉ. Une transaction héritée peut encore porter ce prestataire :
+       * elle doit lever ici, bruyamment, plutôt que d'être routée vers un
+       * adapter de remplacement. Router un ordre Stripe vers Visa Direct
+       * déplacerait de l'argent par un chemin que personne n'a choisi.
+       */
+      throw new Error(
+        "Stripe a été retiré de PayNoval (2026-09-08) — aucun adapter ne le sert. " +
+          "Le rail carte est servi par Visa Direct, et le sera par le partenaire " +
+          "multi-réseaux à venir."
+      );
+
     case "visa_direct":
     case "visadirect":
     case "visa-direct":

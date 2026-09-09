@@ -1,100 +1,79 @@
 // src/routes/pay.js
+"use strict";
 
-const express = require('express');
+/**
+ * CHEMIN RETIRÉ — `POST /api/v1/pay`
+ * ============================================================================
+ *
+ * Cette route déplaçait de l'argent SANS PASSER PAR LE GRAND LIVRE.
+ *
+ * Ce qu'elle faisait (jusqu'au 2026-09-03) : elle appelait `debitUser` puis
+ * `creditUserByEmail` de `src/services/transactions.js`, qui écrivent
+ * directement sur `TxWalletBalance`. Aucune écriture de `LedgerEntry`, aucun
+ * `idempotency()` monté, aucun `assertTransition`, aucun devis — devise codée
+ * en dur `'F CFA'`, `exchangeRate: 1`, et `Math.random()` pour la référence.
+ * Elle violait simultanément les invariants 2 (le grand livre fait foi),
+ * 3 (idempotence), 4 (auditabilité) et 12 (Tx Core, moteur unique).
+ *
+ * ── Pourquoi elle n'avait encore rien cassé ───────────────────────────────
+ *
+ * Uniquement parce qu'elle était cassée en TROIS endroits indépendants et
+ * sortait en 500 avant la première écriture :
+ *   1. `findBalanceByUserId(user._id)` appelée sans devise → « Devise invalide ».
+ *   2. `debitUser(id, amount, 'Paiement marchand', …)` — la signature est
+ *      `(userId, currency, amount, reason, opts)` : le montant passait comme
+ *      devise → « Montant invalide ».
+ *   3. `require('../models/Transaction')` rend une FABRIQUE `(conn) => model`,
+ *      pas un modèle : `Transaction.create` était `undefined`.
+ *
+ * Autrement dit, elle ressemblait à un bug d'une ligne. Sa correction « évidente »
+ * aurait créé, en trois lignes, un transfert de portefeuille à portefeuille
+ * invisible du grand livre, de la machine à états et de l'idempotence.
+ *
+ * ── Ce qui la rendait atteignable ─────────────────────────────────────────
+ *
+ * La passerelle poste les paiements sur `${SERVICE_PAYNOVAL_URL}/pay`
+ * (`api-gateway/controllers/paymentController.js:26`), et `SERVICE_PAYNOVAL_URL`
+ * DÉSIGNE Tx Core (`docs/load/bench/env.sh:91,93` : même valeur que
+ * `TRANSACTIONS_SERVICE_URL`). Seul le préfixe `/api/v1` séparait le paiement
+ * public des cagnottes de ce chemin sans grand livre. Un préfixe n'est pas une
+ * barrière.
+ *
+ * ── Traitement retenu ─────────────────────────────────────────────────────
+ *
+ * On ne supprime pas (règle : corriger, pas retirer), on échoue en FERMETURE —
+ * même traitement que le webhook hérité de `transactionsRoutes.js:1377-1387`.
+ * Un appel est REFUSÉ et JOURNALISÉ : quelqu'un qui vise un chemin d'argent
+ * retiré doit être visible, pas silencieux.
+ *
+ * Le chemin légitime est `POST /api/v1/transactions/initiate`, qui passe par
+ * la machine à états, l'idempotence, le devis et `ledgerService`.
+ */
+
+const express = require("express");
+const logger = require("../utils/logger");
+
 const router = express.Router();
-const {
-  findUserByEmail,
-  debitUser,
-  creditUserByEmail,
-  findBalanceByUserId
-} = require('../services/transactions');
-const { protect } = require('../middleware/authMiddleware');
-const Transaction = require('../models/Transaction'); // pour enregistrer l'audit
 
-router.post('/', protect, async (req, res) => {
-  const {
-    toEmail,
-    amount,
-    description, // facultatif
-    reference,   // référence/facture/commande facultative
-    metadata     // objet facultatif, infos libres du marchand
-  } = req.body;
-  const user = req.user; // déjà auth via middleware
-
-  // Vérif basique des champs
-  if (!toEmail || typeof amount !== 'number' || amount <= 0) {
-    return res.status(400).json({ success: false, error: 'Paramètres invalides' });
-  }
-
-  if (user.email === toEmail) {
-    return res.status(400).json({ success: false, error: 'Vous ne pouvez pas vous payer vous-même' });
-  }
-
-  try {
-    // 1️⃣ Vérifier la balance de l'expéditeur
-    const senderBalance = await findBalanceByUserId(user._id);
-    if (!senderBalance) {
-      return res.status(404).json({ success: false, error: 'Solde introuvable' });
+router.all("/", (req, res) => {
+  logger.error(
+    "[PAY] appel sur un chemin d'argent RETIRÉ — refusé. " +
+      "Ce chemin déplaçait des fonds sans écriture au grand livre. " +
+      "Utiliser POST /api/v1/transactions/initiate.",
+    {
+      method: req.method,
+      userId: req.user?._id ? String(req.user._id) : null,
+      requestId: req.id || req.headers["x-request-id"] || null,
     }
-    if (senderBalance.amount < amount) {
-      return res.status(402).json({ success: false, error: 'Fonds insuffisants' });
-    }
+  );
 
-    // 2️⃣ Vérifie que le destinataire existe
-    const destUser = await findUserByEmail(toEmail);
-    if (!destUser) {
-      return res.status(404).json({ success: false, error: "Destinataire introuvable" });
-    }
-
-    // 3️⃣ Effectuer le débit et le crédit avec contexte pour audit
-    await debitUser(user._id, amount, 'Paiement marchand', {
-      description,
-      reference,
-      metadata,
-      to: toEmail
-    });
-
-    await creditUserByEmail(toEmail, amount, 'Paiement marchand', {
-      description,
-      reference,
-      metadata,
-      from: user.email
-    });
-
-    // 4️⃣ Historiser dans la collection Transaction (optionnel, mais recommandé)
-    await Transaction.create({
-      sender: user._id,
-      receiver: destUser._id,
-      reference: reference || (Math.random().toString(36).substring(2, 12)), // fallback référence unique
-      amount,
-      transactionFees: 0,
-      netAmount: amount,
-      senderName: user.fullName || user.email,
-      senderEmail: user.email,
-      senderCurrencySymbol: 'F CFA', // ou adapte selon ton contexte devise
-      exchangeRate: 1,
-      localAmount: amount,
-      localCurrencySymbol: 'F CFA',
-      nameDestinataire: destUser.fullName || destUser.email,
-      recipientEmail: destUser.email,
-      country: user.selectedCountry || '',
-      securityQuestion: '',
-      securityCode: '', // Pas de code pour paiement direct
-      destination: 'PayNoval',
-      funds: 'Solde PayNoval',
-      status: 'confirmed',
-      description,
-      orderId: reference || null,
-      metadata: metadata || null,
-      confirmedAt: new Date()
-    });
-
-    return res.json({ success: true, message: 'Paiement effectué avec succès' });
-
-  } catch (err) {
-    console.error('[PAY] error:', err);
-    return res.status(500).json({ success: false, error: err.message || 'Erreur interne' });
-  }
+  return res.status(410).json({
+    success: false,
+    code: "PAY_ROUTE_REMOVED",
+    error:
+      "Ce chemin de paiement a été retiré : il déplaçait des fonds sans " +
+      "écriture au grand livre. Utiliser POST /api/v1/transactions/initiate.",
+  });
 });
 
 module.exports = router;

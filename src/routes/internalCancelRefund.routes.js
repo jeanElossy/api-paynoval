@@ -2,7 +2,6 @@
 
 "use strict";
 
-const crypto = require("crypto");
 const express = require("express");
 const createError = require("http-errors");
 
@@ -21,15 +20,27 @@ function getExpectedInternalToken() {
   ).trim();
 }
 
+/**
+ * Comparaison à temps constant — UNE SEULE implémentation pour tout le service.
+ *
+ * Il en existait trois jusqu'au 2026-09-03, et les deux copies locales
+ * retournaient tôt sur une différence de longueur :
+ *
+ *     if (left.length !== right.length) return false;   // ← la fuite
+ *
+ * Ce retour anticipé rend le temps de réponse dépendant de la LONGUEUR du
+ * secret attendu : un appelant non authentifié peut la mesurer statistiquement,
+ * ce qui réduit d'autant l'espace à explorer. `utils/internalTokens.js` complète
+ * les tampons par des zéros AVANT de comparer, puis vérifie l'égalité des
+ * longueurs — l'ordre est ce qui fait la propriété.
+ *
+ * Même geste que `requireRole.js` côté passerelle : un doublon divergent sur un
+ * chemin d'autorisation finit toujours par diverger du mauvais côté.
+ */
+const { timingSafeEqualStr } = require("../utils/internalTokens");
+
 function safeCompare(a, b) {
-  const left = Buffer.from(String(a || ""));
-  const right = Buffer.from(String(b || ""));
-
-  if (left.length !== right.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(left, right);
+  return timingSafeEqualStr(a, b);
 }
 
 /**

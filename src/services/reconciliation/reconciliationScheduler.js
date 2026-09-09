@@ -42,10 +42,14 @@
 
 const { getTxConn } = require("../../config/db");
 const { withCronLock, WORKER_ID } = require("../cronLock");
+const { WORKERS, declareWorker } = require("../workerMetrics");
 const { reconcileTransactions } = require("./transactionReconciliationService");
 const {
   reconcileAgainstProviders,
 } = require("./providerReconciliationService");
+const {
+  reconcileWalletsAgainstLedger,
+} = require("./walletLedgerReconciliationService");
 
 let logger = console;
 try {
@@ -88,11 +92,13 @@ function summarizeAnomalies(anomalies = []) {
 }
 
 /**
- * ═══ POURQUOI UN SEUL RAPPORT POUR DEUX AXES ═══════════════════════════════
+ * ═══ POURQUOI UN SEUL RAPPORT POUR TROIS AXES ══════════════════════════════
  *
- * La réconciliation a désormais deux axes : la cohérence INTERNE (nos données
- * entre elles) et la confrontation au PRESTATAIRE (ce qu'il nous a dit contre
- * ce que nous avons fait). Ils sont complémentaires, pas redondants — le
+ * La réconciliation a désormais TROIS axes : la cohérence INTERNE (nos données
+ * entre elles), la confrontation au PRESTATAIRE (ce qu'il nous a dit contre
+ * ce que nous avons fait), et depuis le 2026-09-03 le rapprochement
+ * PORTEFEUILLE ↔ GRAND LIVRE — le seul qui vérifie l'invariant 2 de bout en
+ * bout, et le seul qui soit PARTIEL par construction (balayage tournant). Ils sont complémentaires, pas redondants — le
  * premier peut être entièrement vert pendant que l'argent est perdu, s'il se
  * trouve que nous sommes cohéremment en désaccord avec le rail.
  *
@@ -104,19 +110,39 @@ function summarizeAnomalies(anomalies = []) {
  *
  * Pure : elle ne touche ni la base ni l'horloge.
  */
-function mergeReports(internal, provider) {
+/**
+ * Le troisième axe est actif par défaut. On le coupe séparément des deux
+ * autres, parce qu'il balaie les portefeuilles sans fenêtre temporelle : si un
+ * jour ce balayage coûte trop cher, il faut pouvoir l'arrêter sans perdre les
+ * deux autres.
+ */
+function axeWalletLedgerActif() {
+  return (
+    String(process.env.RECONCILE_WALLET_LEDGER ?? "true").toLowerCase() !== "false"
+  );
+}
+
+function mergeReports(internal, provider, walletLedger = null) {
   const anomalies = [
     ...(Array.isArray(internal?.anomalies) ? internal.anomalies : []),
     ...(Array.isArray(provider?.anomalies) ? provider.anomalies : []),
+    ...(Array.isArray(walletLedger?.anomalies) ? walletLedger.anomalies : []),
   ];
 
   return {
     healthy: anomalies.length === 0,
     window: internal?.window ?? provider?.window ?? null,
     checked: {
-      wallets: internal?.checked?.wallets || 0,
+      /**
+       * Les deux axes comptent des portefeuilles et des écritures : on ADDITIONNE
+       * plutôt que d'en écraser un. Prendre le maximum masquerait le travail de
+       * l'autre, et « 4 portefeuilles vérifiés » quand deux passes en ont vu
+       * quatre chacune est une mesure fausse.
+       */
+      wallets: (internal?.checked?.wallets || 0) + (walletLedger?.checked?.wallets || 0),
       transactions: internal?.checked?.transactions || 0,
-      ledgerEntries: internal?.checked?.ledgerEntries || 0,
+      ledgerEntries:
+        (internal?.checked?.ledgerEntries || 0) + (walletLedger?.checked?.ledgerEntries || 0),
       reservations: internal?.checked?.reservations || 0,
       providerEvents: provider?.checked?.providerEvents || 0,
       awaitingSettlement: provider?.checked?.awaitingSettlement || 0,
@@ -131,7 +157,30 @@ function mergeReports(internal, provider) {
  *
  * Pure : elle ne touche ni la base, ni l'horloge (la durée lui est donnée).
  */
-function buildRunDocument(report, { workerId, startedAt, durationMs }) {
+/**
+ * L'état de rotation à persister pour le tour suivant.
+ *
+ * `sweepsSinceRotation` se remet à zéro quand la rotation s'achève : c'est ce
+ * compteur qui permet de voir, dans les journaux, qu'un balayage tourne bien en
+ * rond au lieu de piétiner. Un axe désactivé rend `null` — on ne fabrique pas
+ * un état pour un contrôle qui n'a pas tourné.
+ */
+function construireEtatBalayage(walletLedger, reprise) {
+  if (!walletLedger || !reprise) return null;
+
+  const c = walletLedger.cursor || {};
+  const complete = c.rotationCompleted === true;
+
+  return {
+    lastSeen: complete ? null : c.lastSeen || null,
+    rotationCompleted: complete,
+    population: walletLedger.population?.matching ?? null,
+    sweepsSinceRotation: complete ? 0 : Number(reprise.sweepsSinceRotation || 0) + 1,
+    lastRotationAt: complete ? new Date() : reprise.lastRotationAt || null,
+  };
+}
+
+function buildRunDocument(report, { workerId, startedAt, durationMs, walletLedgerSweep = null }) {
   const anomalies = Array.isArray(report?.anomalies) ? report.anomalies : [];
 
   return {
@@ -158,6 +207,7 @@ function buildRunDocument(report, { workerId, startedAt, durationMs }) {
       reason: report?.registry?.reason ?? null,
       settlementTimeoutSkipped: report?.registry?.settlementTimeoutSkipped === true,
     },
+    walletLedgerSweep,
     healthy: anomalies.length === 0,
     anomalyCount: anomalies.length,
     anomaliesByType: summarizeAnomalies(anomalies),
@@ -166,6 +216,58 @@ function buildRunDocument(report, { workerId, startedAt, durationMs }) {
     anomaliesTruncated: anomalies.length > MAX_STORED_ANOMALIES,
     error: null,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Le point de reprise du balayage portefeuille ↔ grand livre                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Où le dernier tour s'est arrêté.
+ *
+ * ⚠️ En cas d'illisibilité on rend un état NEUF (repartir du début) — et c'est
+ * le seul repli tolérable ici, parce qu'il ne masque rien : un balayage qui
+ * repart du début couvre quand même sa tranche, et la rotation reprendra. Ce
+ * qui serait inacceptable, c'est de PRÉTENDRE reprendre sans le faire ; d'où le
+ * `logger.warn` et le compteur remis à zéro, qui rendent le redémarrage
+ * visible dans le rapport suivant.
+ */
+async function dernierPointDeReprise() {
+  const NEUF = { lastSeen: null, sweepsSinceRotation: 0, lastRotationAt: null };
+
+  try {
+    const precedent = await runModel()
+      .findOne({ job: JOB_NAME, status: "completed" })
+      .sort({ startedAt: -1 })
+      .select("walletLedgerSweep")
+      .lean();
+
+    const sweep = precedent?.walletLedgerSweep;
+    if (!sweep) return NEUF;
+
+    /* Une rotation qui vient de s'achever repart du début, par construction. */
+    if (sweep.rotationCompleted) {
+      return {
+        lastSeen: null,
+        sweepsSinceRotation: 0,
+        lastRotationAt: sweep.lastRotationAt || null,
+      };
+    }
+
+    return {
+      lastSeen: sweep.lastSeen || null,
+      sweepsSinceRotation: Number(sweep.sweepsSinceRotation || 0),
+      lastRotationAt: sweep.lastRotationAt || null,
+    };
+  } catch (err) {
+    logger.warn?.(
+      "[RECONCILE][WALLET-LEDGER] point de reprise illisible — le balayage " +
+        "REPART DU DÉBUT. La rotation en cours est perdue, la couverture " +
+        "complète est décalée d'autant.",
+      { message: err?.message }
+    );
+    return NEUF;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -202,13 +304,55 @@ async function runReconciliationOnce({
         const internal = await reconcileTransactions({ sinceHours, limit });
         const provider = await reconcileAgainstProviders({ sinceHours, limit });
 
-        const report = mergeReports(internal, provider);
+        /**
+         * TROISIÈME AXE — portefeuille ↔ grand livre. Planifié le 2026-09-03.
+         *
+         * `walletLedgerReconciliation` existait depuis le 2026-09-01 mais
+         * n'avait que deux appelants : un script manuel et un test. Un contrôle
+         * qui ne tourne pas ne couvre rien.
+         *
+         * Il pose la question que les deux autres axes ne posent PAS : *le solde
+         * est-il bien le cumul de ses écritures ?* C'est la vérification la plus
+         * directe de l'invariant 2 — le grand livre fait foi, le solde n'est
+         * qu'une projection. Sans elle, un doublon parfait en mode dégradé
+         * laisse la balance de vérification ÉQUILIBRÉE et passe inaperçu.
+         *
+         * Il ne prend pas de fenêtre temporelle : un solde faux le reste, et
+         * l'écart ne vieillit pas hors de portée.
+         *
+         * Comme les deux autres : en séquence, et il n'écrit RIEN.
+         */
+        /**
+         * ⚠️ Il reprend où le tour précédent s'est arrêté.
+         *
+         * Sans `after`, la pagination par clé repartait de `null` à chaque
+         * exécution : le balayage rebalayait indéfiniment les `limit` plus
+         * petits `_id` et le reste n'était JAMAIS vérifié — 5 000 sur 20 000
+         * portefeuilles, toujours les mêmes, sur le seul contrôle qui vérifie
+         * l'invariant 2 de bout en bout.
+         *
+         * `keepResults: false` : un balayage de fond n'a pas à garder en
+         * mémoire des milliers de verdicts « OK » que personne ne lira. Seuls
+         * les écarts sont conservés.
+         */
+        const reprise = axeWalletLedgerActif() ? await dernierPointDeReprise() : null;
+
+        const walletLedger = axeWalletLedgerActif()
+          ? await reconcileWalletsAgainstLedger({
+              limit,
+              after: reprise.lastSeen,
+              keepResults: false,
+            })
+          : null;
+
+        const report = mergeReports(internal, provider, walletLedger);
         const durationMs = Date.now() - t0;
 
         const doc = buildRunDocument(report, {
           workerId: WORKER_ID,
           startedAt,
           durationMs,
+          walletLedgerSweep: construireEtatBalayage(walletLedger, reprise),
         });
 
         await runModel().create(doc);
@@ -218,9 +362,21 @@ async function runReconciliationOnce({
          * balayage qui aboutit ET trouve des écarts n'est pas un succès.
          */
         if (doc.healthy) {
+          /**
+           * La couverture du balayage tournant figure ici, sinon « aucun écart »
+           * se lit comme « toute la population va bien » alors qu'une tranche
+           * seulement a été regardée (règle B.6).
+           */
           logger.info?.("[RECONCILE] aucun écart", {
             durationMs,
             checked: doc.checked,
+            walletLedgerSweep: doc.walletLedgerSweep
+              ? {
+                  population: doc.walletLedgerSweep.population,
+                  rotationCompleted: doc.walletLedgerSweep.rotationCompleted,
+                  sweepsSinceRotation: doc.walletLedgerSweep.sweepsSinceRotation,
+                }
+              : "axe désactivé",
           });
         } else {
           logger.warn?.("[RECONCILE] ÉCARTS DÉTECTÉS", {
@@ -290,14 +446,38 @@ async function getLastRun() {
 function startReconciliationWorker({
   intervalMs = Number(process.env.RECONCILIATION_INTERVAL_MS || 24 * 3600 * 1000),
   enabled = String(process.env.RECONCILIATION_WORKER ?? "true").toLowerCase() !== "false",
+  /**
+   * Travail d'un tour. Injectable pour que le test de câblage exerce le VRAI
+   * `startReconciliationWorker` sans ouvrir de connexion Mongo (règle B.5).
+   */
+  runOnce = runReconciliationOnce,
 } = {}) {
   if (!enabled) {
     logger.info?.(
       "[RECONCILE] worker désactivé (RECONCILIATION_WORKER=false) — " +
         "la réconciliation reste disponible via `npm run reconcile:transactions`."
     );
+
+    // Déclaré même éteint : une série absente n'alerte pas. Voir
+    // `services/workerMetrics.js`.
+    declareWorker(WORKERS.RECONCILIATION, { enabled: false, logger });
+
     return null;
   }
+
+  /**
+   * ⚠️ CETTE MESURE N'EST PAS CELLE DE `reconciliation_last_run_age_seconds`.
+   *
+   * Celle-là (exposée par le backend principal, qui lit `reconciliation_runs`)
+   * dit quand la réconciliation a réellement BALAYÉ, quelle que soit
+   * l'instance. Celle-ci dit que la BOUCLE DE CETTE INSTANCE est vivante.
+   *
+   * Conséquence assumée : un tour qui n'obtient pas le verrou (une autre
+   * instance balaie déjà) compte quand même comme un passage. C'est voulu —
+   * sinon, sur une flotte de trois instances, deux afficheraient un âge qui
+   * monte indéfiniment alors qu'elles fonctionnent parfaitement.
+   */
+  const metrics = declareWorker(WORKERS.RECONCILIATION, { logger });
 
   // Plancher à 1 minute : une valeur trop basse transformerait un contrôle en
   // charge permanente sur la base.
@@ -305,7 +485,7 @@ function startReconciliationWorker({
 
   const tick = async () => {
     try {
-      await runReconciliationOnce();
+      await metrics.record(() => runOnce());
     } catch (err) {
       logger.error?.("[RECONCILE] tour échoué", {
         message: err?.message || err,
@@ -325,6 +505,9 @@ function startReconciliationWorker({
   );
 
   return {
+    /** Un tour, à la demande. Exposé pour le test de câblage. */
+    tick,
+
     stop() {
       clearInterval(timer);
       logger.info?.("[RECONCILE] worker arrêté");
@@ -341,4 +524,5 @@ module.exports = {
   summarizeAnomalies,
   buildRunDocument,
   mergeReports,
+  construireEtatBalayage,
 };

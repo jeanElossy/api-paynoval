@@ -373,6 +373,10 @@ async function enqueueUserNotification({
       },
     },
     idempotencyKey: buildOutboxIdempotencyKey(txId, recipient, status, channel),
+    // 2 = HIGH dans `paynoval-backend/services/notifications/priority.js` :
+    // « Transactions, cagnottes : l'utilisateur attend le message ». Sans cette
+    // valeur, le champ était absent et triait AVANT les alertes de sécurité.
+    priority: 2,
     availableAt: new Date(),
     processedAt: null,
     lockedAt: null,
@@ -486,7 +490,19 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       sessOpts,
     });
 
+    /**
+     * Ordre `(message, meta)` — celui de winston. L'appel inverse
+     * `(objet, message)` produisait une ligne illisible, observée telle quelle
+     * sur le banc le 2026-09-03 :
+     *
+     *   [object Object] {"0":"[","1":"t","2":"r","3":"a", … }
+     *
+     * Le message devenait `[object Object]` et la chaîne était éclatée
+     * caractère par caractère dans les métadonnées. Une trace du chemin de
+     * l'argent illisible ne vaut pas mieux qu'une trace absente.
+     */
     logger?.info?.(
+      "[transactionNotificationService] notifications persisted to principal DB",
       {
         txId: tx?._id?.toString?.(),
         reference: tx?.reference || "",
@@ -496,14 +512,52 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
         senderChannels,
         receiverChannels,
         targetDb: "users/main",
-      },
-      "[transactionNotificationService] notifications persisted to principal DB"
+      }
     );
   } catch (err) {
-    logger?.error?.(
-      { err: err?.message || err, txId: tx?._id?.toString?.() || null, status },
-      "[transactionNotificationService] notifyTransactionEvent failed"
-    );
+    /**
+     * PERTE D'ÉVÉNEMENT ASSUMÉE — mais plus jamais muette.
+     * ========================================================================
+     *
+     * On n'élève PAS l'erreur, et c'est délibéré : cette fonction est appelée
+     * APRÈS le commit du mouvement d'argent. La faire échouer rendrait un 500
+     * pour un virement acquis, ce qui pousserait le client à rejouer un
+     * paiement déjà passé. Une notification perdue est moins grave qu'un
+     * virement rejoué.
+     *
+     * Ce qui n'était PAS acceptable, jusqu'au 2026-09-03 : que la perte n'ait
+     * aucun signal exploitable. Le §6 de `transaction-engine.md` annonce
+     * « ou les deux existent, ou aucun » — l'atomicité porte sur l'écriture
+     * conjointe notification+outbox, PAS sur le fait que l'appel ait lieu.
+     * Quand ce bloc s'exécute, ni l'un ni l'autre n'existe, et le bénéficiaire
+     * ne sera pas prévenu que son argent est arrivé.
+     *
+     * Le marqueur `OUTBOX_EVENT_LOST` est STABLE : c'est sur lui que se règle
+     * une alerte. Ne pas le reformuler sans mettre à jour l'alerte.
+     *
+     * `logger?.error?.` reste en accès optionnel parce que `logger` vient de
+     * `runtime` par un getter paresseux : il peut être absent si le module est
+     * chargé avant la connexion. Le `console.error` de repli garantit qu'une
+     * perte d'événement financier laisse une trace même dans ce cas — un
+     * silence sur un silence serait le pire des deux.
+     */
+    const details = {
+      marqueur: "OUTBOX_EVENT_LOST",
+      err: err?.message || String(err),
+      txId: tx?._id?.toString?.() || null,
+      reference: tx?.reference || null,
+      status,
+      consequence:
+        "notification ET événement d'outbox absents : le destinataire ne sera " +
+        "pas prévenu, et aucun worker ne rattrapera l'envoi",
+    };
+
+    if (typeof logger?.error === "function") {
+      logger.error("[transactionNotificationService] OUTBOX_EVENT_LOST", details);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error("[transactionNotificationService] OUTBOX_EVENT_LOST", details);
+    }
   }
 }
 

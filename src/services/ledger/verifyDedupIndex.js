@@ -55,6 +55,25 @@ const CRITICAL_INDEXES = Object.freeze([
       "comportement NORMAL d'un prestataire, et un « paiement confirmé » traité " +
       "deux fois crédite le bénéficiaire deux fois",
   },
+  {
+    collection: "outboxes",
+    name: "uniq_outbox_idempotency_key",
+    /**
+     * Ajouté le 2026-09-03. `models/Outbox.js:120-128` déclare cet index et son
+     * propre commentaire DOUTE de sa présence en base : `autoIndex` est coupé
+     * hors développement, et un index déclaré n'est pas un index créé.
+     *
+     * Or le dédoublonnage des événements de parrainage repose sur le `E11000`
+     * qu'il produit. Sans lui, ce `E11000` ne se produit jamais et le
+     * dédoublonnage est MUET — il croit dédoublonner, il ne dédoublonne rien.
+     * C'est exactement la famille de défaut que ce contrôle existe pour rendre
+     * visible au démarrage plutôt qu'au premier doublon.
+     */
+    protects:
+      "le dédoublonnage des événements d'outbox repose sur le E11000 de cet " +
+      "index : sans lui il ne se produit jamais, et un même événement de " +
+      "parrainage peut être versé deux fois",
+  },
 ]);
 
 /**

@@ -154,21 +154,27 @@ test("inspectProviderMode rend l'erreur au lieu de la lever", () => {
 /* Inventaire des rails                                                       */
 /* -------------------------------------------------------------------------- */
 
-test("les SIX rails sont inventoriés — plus de rail bancaire", () => {
-  // Sept rails jusqu'au 2026-08-26. Le rail bancaire a été retiré : le §1 de
-  // l'architecture cible dit qu'il n'y en a aucun, et PayNoval démarre sur
-  // interne, mobile money et cartes. Ce test tombe si quelqu'un le réintroduit
-  // — un rail présent dans le registre finit par être proposé, et un rail
-  // proposé sans contrat accepte des ordres que personne n'exécute.
-  assert.equal(RAILS.length, 6);
-  assert.ok(
-    !RAILS.some((r) => r.rail === "bank"),
-    "aucun rail bancaire ne doit figurer au registre"
-  );
+test("les CINQ prestataires sont inventoriés — ni bancaire, ni Stripe", () => {
+  // Sept jusqu'au 2026-08-26, six jusqu'au 2026-09-08. Deux retraits successifs :
+  // le rail bancaire (§1 : PayNoval démarre sur interne, mobile money et cartes),
+  // puis Stripe (décision produit — les cartes passent par un partenaire servant
+  // Visa, Mastercard et les autres réseaux).
+  //
+  // Ce test tombe si l'un des deux revient. Un prestataire présent au registre
+  // finit par être proposé, et un prestataire proposé sans contrat accepte des
+  // ordres que personne n'exécute.
+  assert.equal(RAILS.length, 5);
+
+  for (const retiré of ["bank", "stripe"]) {
+    assert.ok(
+      !RAILS.some((r) => r.rail === retiré || r.provider === retiré),
+      `« ${retiré} » ne doit plus figurer au registre`
+    );
+  }
 
   const report = describeProviderRails({ NODE_ENV: "development" });
-  assert.equal(report.rails.length, 6);
-  assert.equal(report.mocked.length, 6, "rien n'est configuré ⇒ tout est simulé hors prod");
+  assert.equal(report.rails.length, 5);
+  assert.equal(report.mocked.length, 5, "rien n'est configuré ⇒ tout est simulé hors prod");
   assert.equal(report.ok, true);
 });
 
@@ -181,27 +187,27 @@ test("l'inventaire ne s'arrête pas au premier rail cassé", () => {
   // déclare tous ici, puisque c'est le comportement en défaut qu'on teste.
   const report = describeProviderRails({
     NODE_ENV: "production",
-    PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct",
+    PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,visa_direct",
   });
 
-  assert.equal(report.broken.length, 6);
+  assert.equal(report.broken.length, 5);
   assert.equal(report.ok, false);
 });
 
 test("un inventaire mixte sépare correctement réels, simulés et cassés", () => {
   const report = describeProviderRails({
     NODE_ENV: "production",
-    PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct",
+    PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,visa_direct",
     WAVE_BASE_URL: "https://api.wave.example",
     ORANGE_BASE_URL: "https://api.orange.example",
     MTN_MOCK: "true",
     ALLOW_PROVIDER_MOCK_IN_PRODUCTION: "true",
-    // moov, stripe, visa_direct : déclarés, non configurés ⇒ cassés
+    // moov, visa_direct : déclarés, non configurés ⇒ cassés
   });
 
   assert.deepEqual(report.live.map((r) => r.provider).sort(), ["orange", "wave"]);
   assert.deepEqual(report.mocked.map((r) => r.provider), ["mtn"]);
-  assert.equal(report.broken.length, 3);
+  assert.equal(report.broken.length, 2);
   assert.equal(report.ok, false);
 });
 
@@ -210,12 +216,12 @@ test("assertProviderRails nomme TOUS les rails en défaut", () => {
     () =>
       assertProviderRails({
         NODE_ENV: "production",
-        PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct",
+        PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,visa_direct",
       }),
     (err) => {
       assert.equal(err.code, "PROVIDER_CONFIG_INVALID");
-      assert.equal(err.rails.length, 6);
-      for (const p of ["orange", "mtn", "moov", "wave", "stripe", "visa_direct"]) {
+      assert.equal(err.rails.length, 5);
+      for (const p of ["orange", "mtn", "moov", "wave", "visa_direct"]) {
         assert.ok(err.message.includes(p), `${p} absent du message`);
       }
       return true;
@@ -243,7 +249,7 @@ test("le rapport signale explicitement qu'aucun rail réel n'existe", () => {
   const text = formatProviderRailsReport(
     describeProviderRails({
       NODE_ENV: "development",
-      PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,stripe,visa_direct",
+      PROVIDER_RAILS_ENABLED: "orange,mtn,moov,wave,visa_direct",
     })
   ).join("\n");
 
@@ -265,7 +271,6 @@ test("chaque adapter consomme resolveProviderMode et n'a plus de défaut permiss
     "mobilemoney/mtnAdapter.js",
     "mobilemoney/moovAdapter.js",
     "mobilemoney/waveAdapter.js",
-    "card/stripeAdapter.js",
     "card/visaDirectAdapter.js",
     // Plus d'adapter bancaire : le fichier a été supprimé le 2026-08-26.
   ];

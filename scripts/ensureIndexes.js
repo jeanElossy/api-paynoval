@@ -113,12 +113,48 @@ async function main() {
 
   console.log("\n  " + "─".repeat(60));
   if (!aPoser) {
-    console.log("  ✅ Tous les index déclarés sont déjà posés.\n");
+    console.log("  ✅ Tous les index DÉCLARÉS AU SCHÉMA sont déjà posés.");
   } else if (!APPLIQUER) {
-    console.log(`  ${aPoser} index à poser. Relancer avec --apply, en heure creuse.\n`);
+    console.log(`  ${aPoser} index à poser. Relancer avec --apply, en heure creuse.`);
   } else {
-    console.log(`  ${poses} posé(s), ${echecs} échec(s).\n`);
+    console.log(`  ${poses} posé(s), ${echecs} échec(s).`);
   }
+
+  /**
+   * ⚠️ CE SCRIPT NE COUVRE PAS TOUT, ET LE TAIRE EST PIRE QUE NE RIEN DIRE.
+   *
+   * Il ne pose que les index DÉCLARÉS AUX SCHÉMAS. HUIT index vivent
+   * délibérément hors schéma, dans `ensure-ledger-indexes.js` — quatre sur
+   * `ledgerentries`, un sur `transactions`, trois sur
+   * `provider_webhook_events` — dont
+   * `dedupKey_unique_partial`, l'index UNIQUE qui empêche le double
+   * enregistrement d'une écriture au grand livre, et
+   * `uniq_webhook_provider_event`, celui qui rend un rappel prestataire
+   * idempotent. Ce sont les invariants 3 et 10.
+   *
+   * Le message « ✅ tous les index sont posés » se lisait donc comme un feu
+   * vert général sur une base où l'unicité du grand livre était absente.
+   * Constaté le 2026-08-28 sur le banc de charge : après `npm run
+   * indexes:apply` sur une base neuve, `ledgerentries` portait 11 index sur
+   * 15, et une requête de série journalière triait 59 380 documents en
+   * mémoire pour en rendre 20 (101 ms). Une fois l'autre script passé :
+   * 20 documents examinés, 10 ms.
+   *
+   * C'est la faute déjà commise une fois par `indexAudit.empreinteIndex()`
+   * (voir A2) : un garde incomplet qui annonce une couverture complète produit
+   * exactement la garantie fictive qu'il était censé empêcher.
+   */
+  console.log(`
+  ⚠️ Ce script ne pose QUE les index déclarés aux schémas.
+     HUIT index vivent hors schéma — dont l'unicité du grand livre
+     (\`dedupKey_unique_partial\`) et celle des rappels prestataires
+     (\`uniq_webhook_provider_event\`). Ils se posent par :
+
+         npm run indexes:ledger
+
+     Tant que cette commande n'a pas tourné, la base ne porte pas
+     les invariants 3 et 10, quoi que dise la ligne ci-dessus.
+`);
 
   await conn.close();
   process.exit(echecs ? 1 : 0);

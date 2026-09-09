@@ -1,6 +1,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { exigerMontant, exigerDevise } = require("../../../utils/montant");
 const { getProviderAdapter } = require("../../../providers/providerSelector");
 
 function buildCardPayoutPayload(tx) {
@@ -16,8 +17,15 @@ function buildCardPayoutPayload(tx) {
     flow: tx.flow,
     provider,
 
-    amount: Number(tx.amountTarget || tx.localAmount || 0),
-    currency: tx.currencyTarget || tx.localCurrencySymbol || null,
+    /** Règle B.2 — voir `utils/montant.js`. Absent ⇒ on ARRÊTE, pas 0. */
+    amount: exigerMontant(
+      tx.amountTarget ?? tx.localAmount,
+      "card.payout.amount"
+    ),
+    currency: exigerDevise(
+      tx.currencyTarget ?? tx.localCurrencySymbol,
+      "card.payout.currency"
+    ),
 
     recipient: {
       pan: ext.pan || null,
@@ -53,7 +61,8 @@ function buildCardPayoutPayload(tx) {
 function buildCardTopupPayload(tx) {
   const md = tx.metadata || {};
   const ext = md.externalSource || {};
-  const provider = String(tx.provider || "stripe").trim().toLowerCase();
+  // Défaut « stripe » remplacé le 2026-09-08 — voir `providerExecutorRegistry`.
+  const provider = String(tx.provider || "visa_direct").trim().toLowerCase();
 
   return {
     txReference: tx.reference,
@@ -63,8 +72,15 @@ function buildCardTopupPayload(tx) {
     flow: tx.flow,
     provider,
 
-    amount: Number(tx.amountSource || tx.amount || 0),
-    currency: tx.currencySource || tx.senderCurrencySymbol || null,
+    /** Règle B.2 — voir `utils/montant.js`. */
+    amount: exigerMontant(
+      tx.amountSource ?? tx.amount,
+      "card.topup.amount"
+    ),
+    currency: exigerDevise(
+      tx.currencySource ?? tx.senderCurrencySymbol,
+      "card.topup.currency"
+    ),
 
     sender: {
       pan: ext.pan || null,
@@ -114,6 +130,32 @@ async function executeCardPayout({ req, transaction }) {
   const result = await adapter.payout(payload);
 
   return {
+    /**
+     * ⚠️ `ok` DOIT REMONTER — c'est le verdict du prestataire.
+     *
+     * Il ne remontait pas : l'exécuteur ne rendait que `providerStatus`,
+     * `providerReference` et `raw`. Le handler écrivait alors
+     * `pending → processing` SANS CONDITION, y compris sur un refus explicite.
+     * Une transaction carte refusée restait « en cours », fonds immobilisés
+     * chez l'expéditeur, jusqu'au `SETTLEMENT_TIMEOUT` de 6 h — alors que
+     * l'information était disponible à la milliseconde.
+     *
+     * Sur ce rail le cas n'est pas marginal : `visaDirectAdapter` refuse TOUT
+     * encaissement tant que `VISA_DIRECT_COLLECT_ENABLED` n'est pas posée, par
+     * `failResult`. Tout dépôt par carte empruntait donc ce chemin.
+     */
+    ok: result?.ok !== false,
+    /**
+     * `mock` remonte du bloc simulé de l'adapter (`raw.mock`). Sans lui,
+     * une référence prestataire FABRIQUÉE est indiscernable d'une vraie
+     * sur le document de transaction — même champ, même index. Un
+     * booléen normalisé ne porte aucune donnée personnelle : il a sa
+     * place dans la liste blanche de `sanitizeExecutionResult`.
+     */
+    mock: result?.raw?.mock === true || result?.mock === true,
+    errorCode: result?.errorCode || null,
+    errorMessage: result?.errorMessage || result?.message || null,
+
     providerStatus:
       result?.externalStatus ||
       result?.status ||
@@ -127,7 +169,8 @@ async function executeCardPayout({ req, transaction }) {
 }
 
 async function startCardTopup({ req, transaction }) {
-  const provider = String(transaction.provider || "stripe").trim().toLowerCase();
+  // Défaut « stripe » remplacé le 2026-09-08 : l'adapter n'existe plus.
+  const provider = String(transaction.provider || "visa_direct").trim().toLowerCase();
 
   const adapter = getProviderAdapter({
     rail: "card",
@@ -142,6 +185,19 @@ async function startCardTopup({ req, transaction }) {
   const result = await adapter.collect(payload);
 
   return {
+    /** Voir `executeCardPayout` : le verdict du prestataire doit remonter. */
+    ok: result?.ok !== false,
+    /**
+     * `mock` remonte du bloc simulé de l'adapter (`raw.mock`). Sans lui,
+     * une référence prestataire FABRIQUÉE est indiscernable d'une vraie
+     * sur le document de transaction — même champ, même index. Un
+     * booléen normalisé ne porte aucune donnée personnelle : il a sa
+     * place dans la liste blanche de `sanitizeExecutionResult`.
+     */
+    mock: result?.raw?.mock === true || result?.mock === true,
+    errorCode: result?.errorCode || null,
+    errorMessage: result?.errorMessage || result?.message || null,
+
     providerStatus:
       result?.externalStatus ||
       result?.status ||

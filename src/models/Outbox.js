@@ -45,6 +45,33 @@ const outboxSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * PRIORITÉ DE TRAITEMENT — le champ manquait, et son absence INVERSAIT la file.
+     *
+     * Cette collection (`outboxes`, base des utilisateurs) est écrite par DEUX
+     * services avec DEUX schémas : celui-ci depuis Tx Core, et
+     * `paynoval-backend/models/Outbox.js` depuis le backend. Le worker qui la
+     * draine (`services/outboxPublisher.js`) trie par `{ priority: 1,
+     * createdAt: 1 }`.
+     *
+     * Or en BSON, un champ ABSENT trie comme `null`, et `null` passe AVANT tout
+     * nombre en ordre croissant. Les notifications écrites ici — sans
+     * `priority` — se plaçaient donc systématiquement devant les alertes de
+     * sécurité `CRITICAL` (priorité 0), alors que le code du backend promet
+     * l'inverse en toutes lettres.
+     *
+     * Le barème est celui de `paynoval-backend/services/notifications/priority.js`
+     * et doit le rester : 0 CRITICAL, 2 HIGH, 5 NORMAL, 8 BULK. Plus le nombre
+     * est BAS, plus l'envoi passe devant.
+     */
+    priority: {
+      type: Number,
+      default: 5,
+      min: 0,
+      max: 9,
+      required: true,
+    },
+
     attempts: {
       type: Number,
       default: 0,
@@ -98,7 +125,8 @@ const outboxSchema = new mongoose.Schema(
        * côté de l'index unique partiel déclaré plus bas. Deux index sur la même
        * clé : l'un porte la garantie, l'autre ne porte rien — et c'est le
        * second qui existe en base aujourd'hui, le premier n'ayant jamais été
-       * créé (`autoIndex` est désactivé en production).
+       * créé (`autoIndex` est coupé — `config/db.js:47` — pour TOUTES les
+       * connexions du service, pas seulement en production).
        *
        * Le code, lui, s'appuie sur l'unicité : `referralEventOutbox` compte sur
        * un E11000 pour reconnaître un événement déjà en file. Sans l'index

@@ -140,6 +140,36 @@ const reconciliationRunSchema = new mongoose.Schema(
       settlementTimeoutSkipped: { type: Boolean, default: false },
     },
 
+    /**
+     * ═══ LE POINT DE REPRISE DU BALAYAGE PORTEFEUILLE ↔ GRAND LIVRE ═══════
+     *
+     * Ce bloc est ce qui rend la couverture COMPLÈTE. Le troisième axe ne peut
+     * pas regarder tous les portefeuilles à chaque tour ; il en balaie une
+     * tranche et note où il s'est arrêté. Le tour suivant repart de là.
+     *
+     * ⚠️ Sans persistance, la pagination par clé repart de `null` à chaque
+     * exécution : le balayage rebalaie indéfiniment les mêmes `limit` premiers
+     * portefeuilles et le reste n'est JAMAIS vérifié. C'était le cas jusqu'au
+     * 2026-09-03 — 5 000 sur 20 000, toujours les mêmes, sur le seul contrôle
+     * qui vérifie l'invariant 2 de bout en bout.
+     *
+     * `lastSeen` à `null` avec `rotationCompleted: true` signifie « on vient de
+     * finir un tour complet » : le suivant repart du début. Le distinguer d'un
+     * « jamais démarré » est le rôle de `sweepsSinceRotation`.
+     */
+    walletLedgerSweep: {
+      /** Dernier `_id` de portefeuille examiné. `null` = repartir du début. */
+      lastSeen: { type: String, default: null },
+      /** Vrai si ce tour a atteint la fin de la population. */
+      rotationCompleted: { type: Boolean, default: false },
+      /** Population entière au moment du tour — pour lire la couverture. */
+      population: { type: Number, default: null },
+      /** Tours effectués depuis la dernière rotation complète. */
+      sweepsSinceRotation: { type: Number, default: 0 },
+      /** Date de la dernière rotation complète. `null` = aucune à ce jour. */
+      lastRotationAt: { type: Date, default: null },
+    },
+
     healthy: { type: Boolean, default: null, index: true },
 
     /** Compte EXACT, indépendant de l'échantillon stocké. */

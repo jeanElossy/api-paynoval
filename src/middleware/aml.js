@@ -20,6 +20,7 @@ const {
 const {
   getDailyLimit,
   getSingleTxLimit,
+  AmlLimitUnavailableError,
 } = require("../tools/amlLimits");
 
 /**
@@ -1033,11 +1034,33 @@ module.exports = async function amlMiddleware(req, res, next) {
     try {
       stats = await getUserTransactionsStats(userId, provider, currencyCode);
     } catch (err) {
-      logger.warn("[AML] stats indisponibles", {
-        error: err?.message || String(err),
-        provider,
-        userId,
-      });
+      /**
+       * ⚠️ REPLI OUVERT ASSUMÉ, ET DÉSORMAIS NOMMÉ.
+       *
+       * `stats` reste `null`, donc `dailyTotal` vaut 0 quelques lignes plus
+       * bas, donc le plafond JOURNALIER ne s'applique plus — et les contrôles
+       * de volume et de fractionnement sont sautés avec lui. Une panne
+       * d'agrégation Mongo lève ainsi une frontière de conformité en silence.
+       *
+       * Le choix est un arbitrage de DISPONIBILITÉ : refuser tout paiement dès
+       * le premier hoquet de la base est l'autre extrême. Il n'a jamais été
+       * tranché explicitement — il est ici nommé, avec sa conséquence, pour
+       * qu'il puisse l'être (règle B.6) plutôt que de rester la retombée
+       * involontaire d'un `catch`.
+       *
+       * Le plafond PAR ENVOI, lui, s'applique toujours : il ne dépend d'aucune
+       * lecture en base.
+       */
+      logger.warn(
+        "[AML] Cumul journalier NON VÉRIFIÉ — statistiques indisponibles, " +
+          "le plafond journalier et les contrôles de fractionnement sont SAUTÉS",
+        {
+          error: err?.message || String(err),
+          provider,
+          userId,
+          dailyLimit,
+        }
+      );
     }
 
     const dailyTotal = Number.isFinite(Number(stats?.dailyTotal))
@@ -1227,8 +1250,16 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
+    /**
+     * Cette règle visait le rail `stripe`, retiré du périmètre le 2026-09-08.
+     * Elle est conservée en la RECIBLANT sur le rail carte : la contrainte de
+     * devise vient du réseau, pas du prestataire, et elle survit donc au
+     * changement de partenaire. La liste `ALLOWED_STRIPE_CURRENCY_CODES` garde
+     * son nom pour l'instant — la renommer est une tâche de nommage, pas de
+     * sécurité, et la mêler à ce correctif brouillerait la relecture.
+     */
     if (
-      provider === "stripe" &&
+      ["visa_direct", "card"].includes(provider) &&
       currencyCode &&
       !ALLOWED_STRIPE_CURRENCY_CODES.includes(currencyCode)
     ) {
@@ -1433,6 +1464,44 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     return next();
   } catch (e) {
+    /**
+     * Un plafond introuvable est un REFUS DE POLITIQUE, pas une panne.
+     *
+     * Sans cette branche le refus sortait en « AML_SYSTEM_ERROR / 500 », ce qui
+     * est un mensonge de journal (règle B.6) : l'exploitation cherche une panne
+     * qui n'existe pas, pendant que la vraie cause — un rail ou une devise hors
+     * politique — reste invisible. Le blocage était correct ; c'est sa
+     * DÉSIGNATION qui ne l'était pas.
+     */
+    if (e instanceof AmlLimitUnavailableError || String(e?.code || "").startsWith("AML_")) {
+      logger.warn("[AML] Plafond indéterminable — transaction REFUSÉE", {
+        provider,
+        currency: currencyCode,
+        code: e?.code,
+      });
+
+      try {
+        await logTransaction({
+          userId: getUserId(user) || null,
+          type: "initiate",
+          provider,
+          amount,
+          currency: currencyCode,
+          toEmail,
+          details: maskSensitive(body),
+          flagged: true,
+          flagReason: `Plafond indéterminable (${e?.code || "AML_LIMIT_UNAVAILABLE"})`,
+          ip: req.ip,
+        });
+      } catch {}
+
+      return res.status(403).json({
+        success: false,
+        error: "Ce moyen de paiement n'est pas disponible pour cette devise.",
+        code: e?.code || "AML_LIMIT_UNAVAILABLE",
+      });
+    }
+
     logger.error("[AML] Exception", {
       err: e?.message || e,
       user: user?.email,

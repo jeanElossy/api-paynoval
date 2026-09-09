@@ -80,13 +80,19 @@ function ledgerSchema() {
 test("l'index de déduplication est déclaré, unique ET partiel", () => {
   /**
    * Il est cherché dans `scripts/ensure-ledger-indexes.js`, pas au schéma, et
-   * ce n'est pas un détail : `autoIndex` n'est pas désactivé sur cette
-   * connexion, donc une déclaration au schéma se construirait toute seule au
-   * prochain démarrage — sur la première instance qui démarre, à un moment que
-   * personne n'a choisi. Si cette construction échoue, elle échoue en silence
-   * sur un événement de connexion que personne ne lit, et le schéma affiche
-   * alors une garantie que la base ne porte pas. C'est la politique déjà
-   * retenue pour les quatre autres index de `ledgerentries`.
+   * ce n'est pas un détail.
+   *
+   * ⚠️ La justification de ce choix a été corrigée le 2026-08-28 : elle
+   * invoquait un `autoIndex` actif, coupé depuis `src/config/db.js`. La
+   * décision, elle, reste bonne. La vraie raison : cet index vit avec les trois
+   * autres index hors schéma de `ledgerentries` dans un script qu'on lance
+   * **quand on le décide**, en heure creuse, en suivant la construction. Et
+   * cela vaut doublement pour un index UNIQUE — si sa construction échoue, elle
+   * échoue en silence sur un événement de connexion que personne ne lit, et le
+   * schéma affiche alors une garantie que la base ne porte pas.
+   *
+   * ⚠️ Il ne se pose PAS par `npm run indexes:apply` mais par
+   * `npm run indexes:ledger`. Voir `BENCHMARKS.md` §8.2.
    *
    * Ce test lit donc le SCRIPT — c'est-à-dire ce qui existera réellement en
    * production.

@@ -21,7 +21,9 @@
  *
  * POURQUOI UN SEUL POINT D'INSTRUMENTATION
  * ----------------------------------------
- * Les appels prestataires partent de sept adapters, appelés depuis cinq
+ * Les appels prestataires partent de SIX adapters (le septième était le rail
+ * bancaire, retiré le 2026-08-26 — cf. `providers/providerConfigReport.js`),
+ * appelés depuis cinq
  * exécuteurs, eux-mêmes atteints par plusieurs chemins (confirmation, webhook,
  * relance administrative). Instrumenter chaque site d'appel garantirait d'en
  * oublier un — et un chemin non mesuré est pire qu'aucune mesure, parce qu'il
@@ -38,8 +40,8 @@
  *
  * CARDINALITÉ
  * -----------
- * Les étiquettes sont fermées par construction : sept prestataires, trois
- * rails, deux opérations, trois issues. Le produit est borné à ~126 séries,
+ * Les étiquettes sont fermées par construction : SIX prestataires, trois
+ * rails, deux opérations, trois issues. Le produit est borné à ~108 séries,
  * connu à l'avance. C'est le contraire d'une étiquette par identifiant de
  * transaction, qui ferait tomber Prometheus (voir l'en-tête de `metrics.js`).
  */

@@ -10,6 +10,7 @@ try {
 } catch {}
 
 const runtime = require("./transactions/shared/runtime");
+const { WORKERS, declareWorker } = require("./workerMetrics");
 const TxWalletBalanceFactory = require("../models/TxWalletBalance");
 
 const {
@@ -675,6 +676,12 @@ function startTransactionAutoCancelWorker({
   intervalMs = AUTO_CANCEL_INTERVAL_MS,
   batchSize = AUTO_CANCEL_BATCH_SIZE,
   workerId,
+  /**
+   * Travail d'un tour. Injectable pour que le test de câblage exerce le VRAI
+   * `startTransactionAutoCancelWorker` sans ouvrir de connexion Mongo (règle
+   * B.5 : les suites restent pures et rapides).
+   */
+  runOnce = processExpiredTransactions,
 } = {}) {
   const enabled =
     String(process.env.TX_AUTO_CANCEL_ENABLED || "true").toLowerCase() !==
@@ -683,11 +690,22 @@ function startTransactionAutoCancelWorker({
   if (!enabled) {
     logger.warn?.("[TX AUTO CANCEL] worker désactivé par env");
 
+    /**
+     * Déclaré MÊME ÉTEINT : sans déclaration, il n'y a aucune série sur
+     * /metrics, et une série absente ne déclenche aucune alerte. Éteint se lit
+     * alors `worker_enabled=0`, ce qui n'est pas la même chose que « n'a jamais
+     * démarré » (`-1`). Voir `services/workerMetrics.js`.
+     */
+    declareWorker(WORKERS.TX_AUTO_CANCEL, { enabled: false, logger });
+
     return {
       workerId: workerId || "",
+      async tick() {},
       stop() {},
     };
   }
+
+  const metrics = declareWorker(WORKERS.TX_AUTO_CANCEL, { logger });
 
   const wid = workerId || buildWorkerId();
 
@@ -698,14 +716,22 @@ function startTransactionAutoCancelWorker({
     autoCancelAfterDays: getAutoCancelAfterDays(),
   });
 
+  /**
+   * ⚠️ `metrics.record` est À L'INTÉRIEUR du try/catch qui journalise, pas
+   * autour : il doit voir l'erreur AVANT qu'elle soit absorbée. Il la compte
+   * (`worker_failures`) puis la relaie telle quelle — le journal existant ne
+   * change pas de comportement.
+   */
   const run = async () => {
     try {
-      const result = await processExpiredTransactions({
-        limit: batchSize,
-        workerId: wid,
-      });
+      const result = await metrics.record(() =>
+        runOnce({
+          limit: batchSize,
+          workerId: wid,
+        })
+      );
 
-      if (result.cancelled || result.failed) {
+      if (result?.cancelled || result?.failed) {
         logger.info?.("[TX AUTO CANCEL] résultat", result);
       }
     } catch (err) {
@@ -727,6 +753,9 @@ function startTransactionAutoCancelWorker({
 
   return {
     workerId: wid,
+
+    /** Un tour, à la demande. Exposé pour le test de câblage. */
+    tick: run,
 
     stop() {
       clearInterval(timer);

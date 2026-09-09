@@ -28,7 +28,38 @@ const internalLimiter = rateLimit({
 
 // Toutes les routes ici sont internes
 router.use(internalLimiter);
-router.use(requireInternalAuth);
+
+/**
+ * ============================================================================
+ * ⚠️ `requireInternalAuth` EST UNE FABRIQUE — ELLE S'APPELLE
+ * ============================================================================
+ *
+ * Cette ligne était `router.use(requireInternalAuth)` : on montait la FABRIQUE
+ * au lieu de l'intergiciel qu'elle produit.
+ *
+ * Express appelle alors `requireInternalAuth(req, res, next)`. La fabrique
+ * s'exécute avec `scope = req`, **rend une fonction**, et n'appelle jamais
+ * `next()`. Deux conséquences, et la seconde est pire que la première :
+ *
+ *   1. **TOUTE requête sur cette route pend indéfiniment.** Mesuré le
+ *      2026-08-28 : GET, POST, avec ou sans corps, avec ou sans jeton — aucune
+ *      réponse, jusqu'à l'abandon du client. Une autre route `/api/v1`
+ *      inexistante répondait 404 en 22 ms.
+ *   2. **L'authentification interne n'était jamais appliquée.** Le jour où la
+ *      première faute aurait été corrigée sans voir la seconde, la route se
+ *      serait ouverte SANS contrôle de jeton.
+ *
+ * C'est l'endpoint où aboutit `POST /api/v1/pay` du backend principal, via
+ * `transactionsService.createInternalPayment`. Le backend réessaie **trois
+ * fois** : chaque tentative attendait le délai complet.
+ *
+ * ⚠️ `internalReferralRoutes.js` l'appelle correctement —
+ * `requireInternalAuth("principal")`. Deux usages du même module, un correct et
+ * un non : c'est le mode de défaillance propre aux fabriques d'intergiciels,
+ * qu'aucun outil ne signale parce que les deux formes sont du JavaScript
+ * valide. Le garde-fou est `test/middlewareFactoryMount.test.js`.
+ */
+router.use(requireInternalAuth('any'));
 
 /**
  * POST /api/v1/internal-payments

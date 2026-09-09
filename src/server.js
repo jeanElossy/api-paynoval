@@ -73,6 +73,9 @@ const {
   neutralizeScriptLoadRejections,
 } = require("./services/redisStoreSafety");
 const { createMetrics } = require("./services/metrics");
+const { registerRedisMetrics } = require("./services/redisMetrics");
+const { registerMongoPoolMetrics } = require("./services/mongoPoolMetrics");
+const { registerWorkerMetrics } = require("./services/workerMetrics");
 const {
   createTxMetrics,
   setTxMetrics,
@@ -248,6 +251,23 @@ setTxMetrics(
  * Monté TÔT, pour englober le temps passé dans les autres intergiciels et pas
  * seulement dans le contrôleur.
  */
+/**
+ * ⚠️ MONTÉ AVANT LES MÉTRIQUES, ET C'EST L'ORDRE QUI COMPTE.
+ *
+ * Tout ce qui journalise ensuite — un rejet 429, une erreur de validation, un
+ * refus d'idempotence — doit disposer du MÊME identifiant. Monté plus bas, la
+ * moitié des lignes qui décrivent un échec n'en auraient pas : exactement
+ * celles qu'on cherche quand on remonte un incident.
+ *
+ * `utils/idempotency.js`, `providerHttpClient.js` et
+ * `internalPaymentsController.js` lisaient déjà `req.headers["x-request-id"]`
+ * avec un repli sur chaîne vide. Ils reçoivent désormais une valeur toujours
+ * présente et toujours inoffensive, sans qu'aucun d'eux ait à changer.
+ */
+const { requestIdMiddleware } = require("./utils/requestId");
+
+app.use(requestIdMiddleware);
+
 app.use(metrics.httpMiddleware);
 
 // ─────────────────────────────────────────────────────────────
@@ -377,12 +397,9 @@ app.use(
       "x-moov-signature",
       "x-moov-timestamp",
 
-      "x-bank-signature",
-      "x-bank-timestamp",
-
-      "stripe-signature",
-      "x-stripe-signature",
-
+      // `x-bank-*` et `stripe-signature` retirés le 2026-09-08 : ces rails
+      // n'existent plus, donc aucun rappel ne peut légitimement les porter.
+      // Un en-tête accepté pour un rail mort élargit la surface sans usage.
       "x-visa-signature",
       "x-visa-timestamp",
     ],
@@ -814,6 +831,45 @@ if (redisConn.url && RedisStore && Redis) {
   }
 }
 
+/**
+ * ─────────────────────────────────────────────────────────────
+ * MÉTRIQUES DES DÉPENDANCES : REDIS (§37) ET POOL MONGO (§41)
+ * ─────────────────────────────────────────────────────────────
+ *
+ * ⚠️ ICI, ET PAS PLUS HAUT : `redisClient` n'existe qu'après le bloc
+ * ci-dessus. Le brancher avant enregistrerait les jauges avec un client
+ * `undefined`, donc rien du tout — et le journal de démarrage annoncerait
+ * une absence de Redis qui n'en est pas une.
+ *
+ * On PASSE le client déjà ouvert (`getClient`), on n'en construit aucun :
+ * invariant 8 — aucune requête HTTP ne crée de connexion Redis. La scrutation
+ * `/metrics` réutilise la connexion de la limitation de débit.
+ *
+ * Les jauges de pool Mongo s'enregistrent maintenant, alors qu'aucune connexion
+ * n'est encore ouverte (`bootstrap()` s'en charge plus tard) : elles parcourent
+ * le registre de pools AU MOMENT de la scrutation, donc un pool connecté ensuite
+ * apparaît de lui-même. Voir `services/mongoPoolMetrics.js`.
+ */
+registerRedisMetrics(metrics, {
+  getClient: () => redisClient || null,
+  logger,
+});
+
+registerMongoPoolMetrics(metrics, { logger });
+
+/**
+ * MÉTRIQUES DES TRAVAILLEURS DE FOND.
+ *
+ * Même raison d'être ici que pour les pools Mongo : les jauges s'enregistrent
+ * MAINTENANT, alors qu'aucun worker n'a démarré (`bootstrap()` s'en charge plus
+ * loin). Elles parcourent le registre de workers AU MOMENT de la scrutation,
+ * donc un worker déclaré ensuite apparaît de lui-même — et un worker qui ne se
+ * déclare JAMAIS sort en `worker_enabled=-1`, ce qui est précisément le signal
+ * qu'on n'avait pas : jusqu'ici, un worker mort laissait `/metrics` muet et
+ * `/readyz` vert. Voir `services/workerMetrics.js`.
+ */
+registerWorkerMetrics(metrics, { logger });
+
 // Debug interne temporaire.
 app.use((req, _res, next) => {
   if (
@@ -957,6 +1013,29 @@ function startAutoCancelWorker() {
 
 async function bootstrap() {
   try {
+    /**
+     * Sur quelles données travaille-t-on ? (règle B.6, défaut A1)
+     *
+     * Tx Core est le moteur qui déplace l'argent : une erreur de base y est la
+     * plus coûteuse des trois services. La garde annonce cluster et base, et
+     * refuse un démarrage dont NODE_ENV contredit ce qu'elle voit.
+     */
+    try {
+      const { assertDatabaseEnvironment } = require("./utils/dbEnvironmentGuard");
+
+      for (const [label, uri] of [
+        ["base Users", process.env.MONGO_URI_USERS],
+        ["base Transactions", process.env.MONGO_URI_TRANSACTIONS],
+      ]) {
+        if (uri) assertDatabaseEnvironment(uri, { label, logger });
+      }
+    } catch (err) {
+      logger.error(
+        `❌ Démarrage refusé — garde d'environnement de base : ${err?.message}`
+      );
+      process.exit(1);
+    }
+
     await connectTransactionsDB();
     readiness.markStarted();
 
@@ -1115,6 +1194,30 @@ async function bootstrap() {
      * l'a oublié — un rail qui accepte les ordres sans jamais payer.
      */
     getTxMetricsInstance().setRailModes(providerReport);
+
+    /**
+     * GATEWAY_URL — annoncée au démarrage, pas découverte au premier devis.
+     *
+     * Tx Core NE calcule pas les prix : il demande un devis à la passerelle
+     * (`services/transactions/shared/pricing.js`). Sans `GATEWAY_URL`, aucune
+     * transaction tarifée ne peut aboutir.
+     *
+     * Jusqu'au 2026-09-02, `getGatewayBase()` retombait en silence sur l'URL de
+     * la passerelle de PRODUCTION. Le repli est retiré : la fonction lève
+     * désormais un 503 (règle B.2). Ce contrôle est l'autre moitié du
+     * correctif — la règle B.6 veut qu'un service démarré sans une dépendance
+     * essentielle le DISE, avec sa conséquence, plutôt que de le laisser
+     * découvrir par un utilisateur dont le virement échoue.
+     */
+    if (!String(process.env.GATEWAY_URL || "").trim()) {
+      logger.error(
+        "❌ GATEWAY_URL absente — CONSÉQUENCE : toute transaction nécessitant " +
+          "un devis échouera en 503. Aucun repli n'est appliqué (règle B.2). " +
+          "Le service démarre : les chemins qui ne tarifient pas restent servis."
+      );
+    } else {
+      logger.info(`✅ Tarification : devis demandés à ${process.env.GATEWAY_URL}`);
+    }
 
     const providerWebhookRoutes = require("./routes/providerWebhookRoutes");
     const transactionRoutes = require("./routes/transactionsRoutes");

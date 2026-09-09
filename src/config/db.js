@@ -71,6 +71,31 @@ function attachConnLogs(conn, name = "mongo") {
   });
 }
 
+/**
+ * Instrumente le pool de connexions d'une connexion Mongoose (§41).
+ *
+ * ⚠️ APPELÉ APRÈS LA CONNEXION, JAMAIS AVANT : `conn.getClient()` rend
+ * `undefined` tant que le pilote n'a pas construit son `MongoClient`, et
+ * s'abonner à rien produirait des jauges plates qu'on prendrait pour un pool au
+ * repos. `trackPool` le dit explicitement si le client manque.
+ *
+ * Les deux connexions partagent souvent le même client (`useDb`) : `trackPool`
+ * dédoublonne par identité de client, sinon chaque événement serait compté deux
+ * fois.
+ */
+function attachPoolMetrics(conn, name) {
+  try {
+    require("../services/mongoPoolMetrics").trackPool(conn?.getClient?.(), name, {
+      logger: console,
+    });
+  } catch (err) {
+    // Une métrique ne doit jamais empêcher une connexion à la base.
+    console.warn(
+      `⚠️ [metrics] pool Mongo « ${name} » non instrumenté : ${err?.message || err}`
+    );
+  }
+}
+
 function registerUsersModels(conn) {
   require("../models/User")(conn);
   require("../models/Device")(conn);
@@ -110,13 +135,29 @@ function registerTransactionModels(conn) {
   require("../models/ReconciliationRun")(conn);
   require("../models/CronLock")(conn);
 
-  try {
-    require("../models/TxSystemBalance")(conn);
-  } catch {}
-
-  try {
-    require("../models/TreasuryLedgerEntry")(conn);
-  } catch {}
+  /**
+   * ⚠️ Ces deux modèles étaient chargés dans des `try {} catch {}` VIDES.
+   * Corrigé le 2026-09-02.
+   *
+   * `TxSystemBalance` existe : son `require` est désormais direct, comme les
+   * autres. S'il casse un jour, on veut que le démarrage le dise — un modèle
+   * absent doit crier, pas disparaître (règle B.1).
+   *
+   * `TreasuryLedgerEntry` a été RETIRÉ : `src/models/TreasuryLedgerEntry.js`
+   * n'existe pas. Son `require` échouait donc à CHAQUE démarrage, et le
+   * `catch {}` rendait cet échec parfaitement silencieux.
+   *
+   * Pourquoi cela comptait : cette fonction est exportée (voir plus bas)
+   * précisément pour donner à `scripts/ensureIndexes.js` et à
+   * `services/indexAudit.js` la liste EXACTE des modèles portés par la
+   * connexion transactions. Un modèle qui disparaît en silence de cette liste
+   * disparaît aussi de l'audit d'index et de la pose d'index — c'est-à-dire du
+   * seul filet qui reste depuis `autoIndex: false`.
+   *
+   * Si un jour `TreasuryLedgerEntry` est créé, sa ligne se rajoute ici comme
+   * les autres : un `require` nu, sans filet.
+   */
+  require("../models/TxSystemBalance")(conn);
 }
 
 async function connectUsersDB(uriUsers, opts) {
@@ -267,6 +308,8 @@ async function connectTransactionsDB() {
 
   await connectUsersDB(uriUsers, opts);
 
+  attachPoolMetrics(mongoose.connection, "users");
+
   if (txConn && txConn.readyState === 1) {
     registerTransactionModels(txConn);
   } else if (canShareMongoClient(uriUsers, uriTx)) {
@@ -281,6 +324,8 @@ async function connectTransactionsDB() {
   } else {
     await connectTxDB(uriTx, opts);
   }
+
+  attachPoolMetrics(txConn, "transactions");
 
   logSessionMode();
 

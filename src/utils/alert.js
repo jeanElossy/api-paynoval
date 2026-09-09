@@ -2,7 +2,7 @@
 "use strict";
 
 const axios = require("axios");
-const nodemailer = require("nodemailer");
+const sgMail = require("@sendgrid/mail");
 const logger = require("../logger");
 
 const ALERT_EMAIL = process.env.FRAUD_ALERT_EMAIL;
@@ -121,36 +121,58 @@ function renderAmlAlertHtml(payload = {}) {
   });
 }
 
-/* ---------------- SMTP Transport (singleton) ---------------- */
+/* ---------------- Transport e-mail — SENDGRID ---------------- */
 
-let cachedTransport = null;
+/**
+ * ⚠️ LA VOIE SMTP A ÉTÉ RETIRÉE LE 2026-09-02, ET CE N'ÉTAIT PAS DU MÉNAGE.
+ *
+ * Ce fichier construisait un transport `nodemailer` à partir de `SMTP_HOST`,
+ * `SMTP_USER` et `SMTP_PASS`. **PayNoval n'envoie pas par SMTP** — la
+ * production envoie par SendGrid (`utils/sendEmail.js` du backend principal a
+ * déjà retiré sa voie SMTP pour la même raison). Ces variables n'existent donc
+ * pas en production.
+ *
+ * Conséquence, jusqu'à aujourd'hui : `getSmtpTransport()` ne les trouvait pas,
+ * journalisait un `warn` et rendait `null` — et **l'alerte de fraude AML ne
+ * partait jamais par e-mail**. Le seul canal qui fonctionnait était le webhook,
+ * s'il était configuré. Une alerte de conformité qui ne part pas est pire
+ * qu'une absence d'alerte : on croit être averti.
+ *
+ * ⚠️ NE PAS REMETTRE DE VOIE SMTP ICI. Si un jour un second fournisseur est
+ * nécessaire, il se choisit explicitement par variable d'environnement, avec un
+ * démarrage qui ANNONCE lequel est actif — jamais par un repli silencieux.
+ */
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
+const ALERT_FROM =
+  process.env.ALERT_EMAIL_FROM ||
+  process.env.SENDGRID_FROM ||
+  process.env.EMAIL_FROM ||
+  "";
 
-function getSmtpTransport() {
-  if (cachedTransport) return cachedTransport;
+let sendgridPret = false;
 
-  const host = process.env.SMTP_HOST;
-  const port = parseInt(process.env.SMTP_PORT || "587", 10);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+function preparerSendGrid() {
+  if (sendgridPret) return true;
 
-  if (!host || !user || !pass) {
-    logger.warn("[AML-FRAUD-ALERT][email] SMTP env missing (SMTP_HOST/SMTP_USER/SMTP_PASS)");
-    return null;
+  if (!SENDGRID_API_KEY || !ALERT_FROM) {
+    /**
+     * B.6 : on dit la CONSÉQUENCE, pas seulement le manque. Une ligne
+     * « SENDGRID_API_KEY absente » sans sa conséquence se lit comme un détail
+     * de configuration ; celle-ci se lit comme ce qu'elle est.
+     */
+    logger.error(
+      "[AML-FRAUD-ALERT][email] SENDGRID_API_KEY ou expéditeur absent — " +
+        "AUCUNE alerte de fraude ne partira par e-mail. Seul le webhook, s'il " +
+        "est configuré, reste. Renseigner SENDGRID_API_KEY et ALERT_EMAIL_FROM."
+    );
+
+    return false;
   }
 
-  const secure = port === 465;
+  sgMail.setApiKey(SENDGRID_API_KEY);
+  sendgridPret = true;
 
-  cachedTransport = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: 7000,
-    greetingTimeout: 7000,
-    socketTimeout: 10000,
-  });
-
-  return cachedTransport;
+  return true;
 }
 
 /* ---------------- ALERTE ENVOI ---------------- */
@@ -177,13 +199,10 @@ async function sendFraudAlert(payload = {}) {
   // Email (admin/compliance)
   if (ALERT_EMAIL) {
     try {
-      const transport = getSmtpTransport();
-      if (!transport) return;
+      if (!preparerSendGrid()) return;
 
-      const fromUser = process.env.SMTP_USER;
-
-      await transport.sendMail({
-        from: `"PayNoval AML" <${fromUser}>`,
+      await sgMail.send({
+        from: { email: ALERT_FROM, name: "PayNoval AML" },
         to: ALERT_EMAIL,
         subject: "[PayNoval AML ALERT] Transaction Suspect",
         html: renderAmlAlertHtml(payload),

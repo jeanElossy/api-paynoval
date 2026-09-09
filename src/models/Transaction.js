@@ -30,16 +30,12 @@ const FLOWS = [
   null,
 ];
 
-const RAILS = [
-  "paynoval",
-  "stripe",
-  "mobilemoney",
-  "visa_direct",
-  "stripe2momo",
-  "cashin",
-  "cashout",
-  null,
-];
+// Périmètre arrêté le 2026-09-08 : trois rails, et rien d'autre.
+// `stripe`, `bank`, `stripe2momo`, `flutterwave`, `cashin` et `cashout` en ont
+// été retirés — les quatre premiers ne sont plus au périmètre produit,
+// `flutterwave` est un OPÉRATEUR du rail mobile money (pas un rail), et
+// cashin/cashout n'ont jamais été routés nulle part. Voir `tools/amlLimits.js`.
+const RAILS = ["paynoval", "mobilemoney", "visa_direct", null];
 
 const STATUSES = [
   "created",
@@ -103,7 +99,12 @@ const transactionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ userId: 1, createdAt: -1 }`, dont `userId` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     internalImported: {
@@ -148,7 +149,12 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       enum: FLOWS,
       default: "PAYNOVAL_INTERNAL_TRANSFER",
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ flow: 1, status: 1, createdAt: -1 }`, dont `flow` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     operationKind: {
@@ -168,7 +174,12 @@ const transactionSchema = new mongoose.Schema(
     context: {
       type: String,
       default: null,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ context: 1, status: 1, createdAt: -1 }`, dont `context` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     contextId: {
@@ -184,7 +195,12 @@ const transactionSchema = new mongoose.Schema(
         return !this.internalImported && requiresLocalSender(this.flow);
       },
       default: null,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ sender: 1, createdAt: -1 }`, dont `sender` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     receiver: {
@@ -194,7 +210,12 @@ const transactionSchema = new mongoose.Schema(
         return !this.internalImported && requiresLocalReceiver(this.flow);
       },
       default: null,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ receiver: 1, createdAt: -1 }`, dont `receiver` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     senderName: {
@@ -246,7 +267,12 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       default: null,
       trim: true,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ provider: 1, providerStatus: 1, createdAt: -1 }`, dont `provider` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     operator: {
@@ -403,7 +429,12 @@ const transactionSchema = new mongoose.Schema(
     treasuryRevenueCredited: {
       type: Boolean,
       default: false,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ treasuryRevenueCredited: 1, createdAt: -1 }`, dont `treasuryRevenueCredited` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     treasuryRevenueCreditedAt: {
@@ -415,7 +446,12 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       default: null,
       trim: true,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ treasuryUserId: 1, treasurySystemType: 1, createdAt: -1 }`, dont `treasuryUserId` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     treasurySystemType: {
@@ -575,7 +611,12 @@ const transactionSchema = new mongoose.Schema(
       type: String,
       enum: STATUSES,
       default: "pending",
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ status: 1, createdAt: -1 }`, dont `status` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     confirmedAt: {
@@ -621,7 +662,12 @@ const transactionSchema = new mongoose.Schema(
     archived: {
       type: Boolean,
       default: false,
-      index: true,
+      // A5.3 — PAS d'index simple ici : couvert par le composé
+      // `{ archived: 1, createdAt: -1 }`, dont `archived` est le PRÉFIXE.
+      // Le remettre recréerait l'index retiré par
+      // `scripts/dropRedundantTransactionIndexes.js` au prochain
+      // `npm run indexes:apply`, et le retrait serait annulé sans
+      // que personne ne le voie.
     },
 
     archivedAt: {
@@ -835,7 +881,8 @@ transactionSchema.index(
        * `$ne` est INTERDIT dans un partialFilterExpression : MongoDB rejette la
        * création avec « Expression not supported in partial index ». L'index
        * n'était donc pas seulement absent de la base — il était INCRÉABLE, et
-       * `autoIndex` étant désactivé en production, rien ne le signalait.
+       * `autoIndex` étant coupé (`config/db.js:47`, sur toutes les
+       * connexions), rien ne le signalait.
        * `$type` exprime la même intention (présent ET du bon type, donc ni
        * absent ni null) avec un opérateur autorisé.
        */

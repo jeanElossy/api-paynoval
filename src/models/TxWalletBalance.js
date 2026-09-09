@@ -2,19 +2,45 @@
 
 "use strict";
 
+const { normalizeAccountCurrency } = require("../utils/currency");
+
 const mongoose = require("mongoose");
 const logger = require("../utils/logger");
 
+/**
+ * ============================================================================
+ * UNE DEVISE ILLISIBLE ARRÊTE L'OPÉRATION — ELLE NE VAUT PLUS « CAD »
+ * ============================================================================
+ *
+ * Cette fonction rendait `"CAD"` quand la devise était vide ou absente. Elle est
+ * appelée **en tête de chaque opération de portefeuille** — réserver, capturer,
+ * libérer, créditer, débiter (voir les appels plus bas dans ce fichier). Un
+ * appelant qui passait une devise vide voyait donc son opération s'exécuter
+ * **sur le portefeuille CAD**, sans erreur, sans trace, sans que rien ne le
+ * distingue d'une opération légitime.
+ *
+ * Ce n'est pas un défaut d'affichage : c'est un mouvement d'argent sur le
+ * mauvais compte.
+ *
+ * La règle B.2 est explicite : *une donnée financière absente, illisible ou
+ * incohérente ARRÊTE l'opération avec une erreur explicite ; elle ne prend
+ * jamais de valeur par défaut.* Et ce dépôt le faisait déjà ailleurs —
+ * `services/ledgerService.js` (`normalizeCurrency`) et `services/transactions.js`
+ * **lèvent** tous les deux sur le même cas. Ce fichier était l'exception.
+ *
+ * ⚠️ Les ALIAS restent : `FCFA`/`CFA` → `XOF`, `$CAD` → `CAD`. Ce sont des
+ * écritures différentes d'une devise **connue**, pas des valeurs manquantes.
+ * Les normaliser est correct ; en inventer une ne l'est pas.
+ *
+ * ⚠️ Les valeurs par défaut des HELPERS (`currencyDecimals(currency = "CAD")`,
+ * `roundCurrencyAmount(amount, currency = "CAD")`) sont conservées : elles
+ * servent à formater un nombre, pas à désigner un compte. Ne pas confondre les
+ * deux — c'est précisément la confusion qui a produit ce défaut.
+ */
 function normCurrency(v) {
-  const s = String(v || "").trim().toUpperCase();
-
-  if (!s) return "CAD";
-  if (s === "FCFA" || s === "CFA") return "XOF";
-  if (s === "$CAD") return "CAD";
-  if (s === "$USD") return "USD";
-
-  return s;
+  return normalizeAccountCurrency(v);
 }
+
 
 function currencyDecimals(currency = "CAD") {
   return ["XOF", "XAF", "JPY"].includes(normCurrency(currency)) ? 0 : 2;

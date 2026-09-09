@@ -5,6 +5,8 @@ const createError = require("http-errors");
 const runtime = require("../shared/runtime");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
+const { resolvePersistedIdempotencyKey } = require("../../../utils/idempotencyKeys");
+const logger = require("../../../utils/logger");
 
 const {
   sanitize,
@@ -619,7 +621,16 @@ async function initiateInternal(req, res, next) {
     const feeSourceStd = round2(fee);
     const netFromStd = round2(netFrom);
     const amountTargetStd = round2(netTo);
-    const rateUsed = Number(pricingSnapshot?.result?.appliedRate || 1);
+    /**
+     * Pas de `|| 1` ici. Il y en avait un jusqu'au 2026-09-03, et il rendait la
+     * garde de la ligne suivante INCAPABLE d'attraper ce qu'elle prétend
+     * attraper : un `appliedRate` absent, nul ou `NaN` devenait 1 — un taux
+     * 1:1 parfaitement fini et positif, qui franchit le contrôle. Sur une paire
+     * XOF→EUR, cela transforme une panne de tarification en perte silencieuse
+     * de trois ordres de grandeur (règle B.2 : le chemin de l'argent échoue en
+     * FERMETURE, il ne prend pas de valeur par défaut).
+     */
+    const rateUsed = Number(pricingSnapshot?.result?.appliedRate);
 
     if (!Number.isFinite(rateUsed) || rateUsed <= 0) {
       throw createError(500, "Taux appliqué invalide");
@@ -686,10 +697,9 @@ async function initiateInternal(req, res, next) {
       contextId: null,
 
       reference,
-      idempotencyKey:
-        typeof body.idempotencyKey === "string" && body.idempotencyKey.trim()
-          ? body.idempotencyKey.trim()
-          : undefined,
+      // En-tête OU corps : le mobile n'envoie que l'en-tête, et sans cette
+      // résolution les index uniques partiels ne mordaient sur rien.
+      idempotencyKey: resolvePersistedIdempotencyKey(req, body),
 
       sender: senderUser._id,
       receiver: receiver._id,
@@ -872,7 +882,41 @@ async function initiateInternal(req, res, next) {
       flagReason: "",
       transactionId: tx._id,
       ip: req.ip,
-    }).catch(() => {});
+    })
+      .then((resultat) => {
+        /**
+         * `logTransaction` ne LÈVE pas : elle rend `{ ok: false, error }` — voir
+         * son en-tête. Sans cette lecture, le `.catch()` ci-dessous ne pourrait
+         * jamais se déclencher, et le correctif serait inerte.
+         */
+        if (resultat && resultat.ok === false) {
+          logger?.error?.("[initiateInternal] journal d'audit NON écrit", {
+            marqueur: "AUDIT_LOG_LOST",
+            transactionId: String(tx._id),
+            reference: tx.reference,
+            message: resultat.error,
+            consequence:
+              "mouvement d'argent sans entrée au journal d'audit (invariant 4)",
+          });
+        }
+      })
+      .catch((err) => {
+      /**
+       * L'invariant 4 exige que toute écriture financière soit AUDITABLE. Le
+       * `.catch(() => {})` d'avant le 2026-09-03 rendait l'absence d'audit
+       * indiscernable de sa présence : personne n'aurait su qu'il manquait.
+       *
+       * On ne relève PAS l'erreur : l'audit est posté APRÈS le commit, la
+       * transaction est acquise, et la faire échouer ici rendrait un 500 pour
+       * un virement réussi — ce qui pousserait le client à rejouer. On la rend
+       * VISIBLE, ce qui est la seule chose utile à ce stade.
+       */
+      logger?.error?.("[initiateInternal] écriture du journal d'audit ÉCHOUÉE", {
+        transactionId: String(tx._id),
+        reference: tx.reference,
+        message: err?.message || String(err),
+      });
+    });
 
     return res.status(201).json({
       success: true,

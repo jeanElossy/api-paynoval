@@ -11,11 +11,19 @@
  * seul au démarrage, sur une instance et à un moment que personne n'a choisis.
  *
  * Pourquoi un script séparé plutôt qu'une déclaration au schéma :
- * `ledgerentries` contient déjà des données de production et `autoIndex` n'est
- * désactivé nulle part. Déclarer ces index dans `models/LedgerEntry.js` les
- * ferait construire automatiquement au prochain démarrage, sans qu'on choisisse
- * ni le moment ni l'instance. Ce script laisse la main : on le lance en heure
- * creuse et on suit la construction.
+ * `ledgerentries` contient déjà des données de production, et une construction
+ * d'index sur une grosse collection est une opération lourde qu'on veut
+ * DÉCLENCHER, pas subir. Ce script laisse la main : on le lance en heure creuse
+ * et on suit la construction.
+ *
+ * ⚠️ Ce paragraphe affirmait « `autoIndex` n'est désactivé nulle part ».
+ * **C'était faux**, et corrigé le 2026-08-28 : `config/db.js:47` le coupe pour
+ * toutes les connexions. La justification a changé, la décision reste la même.
+ *
+ * ⚠️ Ce script n'est PAS couvert par `npm run indexes:apply`, qui ne pose que
+ * les index déclarés aux schémas. Il se lance par **`npm run indexes:ledger`**.
+ * Sans lui, la base ne porte ni l'unicité du grand livre (invariant 3) ni celle
+ * des rappels prestataires (invariant 10). Voir `BENCHMARKS.md` §8.2.
  *
  * Les index visés sont ceux qu'utilisent les agrégations d'analytique de
  * trésorerie (`internalTreasuryAnalytics.controller.js`), qui filtrent toutes

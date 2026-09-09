@@ -69,7 +69,10 @@ const DEFAULT_RESTRICTED_CURRENCIES = ["XOF", "XAF"];
 /** Rails refusés à un compte de la zone ci-dessus, en débit comme en réception. */
 // « bank » retiré le 2026-08-26 : le rail bancaire n'existe plus (§1), il n'y
 // a donc plus rien à restreindre de ce côté.
-const DEFAULT_RESTRICTED_RAILS = ["stripe"];
+// « stripe » retiré le 2026-09-08 : le rail n'existe plus, il n'y a donc plus
+// rien à restreindre de ce côté — exactement comme « bank » avant lui. La liste
+// est vide par défaut et reste pilotable par `RAIL_POLICY_RESTRICTED_RAILS`.
+const DEFAULT_RESTRICTED_RAILS = [];
 
 /**
  * Rails non encore ouverts, quel que soit le pays — le pendant serveur du
