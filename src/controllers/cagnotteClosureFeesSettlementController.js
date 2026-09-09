@@ -282,10 +282,15 @@ const { getTxConn } = require("../config/db");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
 const { runWithTransaction } = require("../utils/transactionRunner");
+const { canUseSharedSession } = require("../utils/sharedSession");
+const { getUsersConn } = require("../config/db");
 const {
   resolveTreasuryFromSystemType,
   normalizeTreasurySystemType,
+  settlementObjectIdFromReference,
+  postCagnotteClosureFeeEntries,
 } = require("../services/ledgerService");
+const logger = require("../utils/logger");
 
 const CAGNOTTE_TREASURY_SYSTEM_TYPE = "CAGNOTTE_FEES_TREASURY";
 const CAGNOTTE_TREASURY_LABEL = "Cagnotte Fees Treasury";
@@ -432,6 +437,35 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
     });
   }
 
+  /**
+   * ⚠️ REFUS EN FERMETURE QUAND AUCUNE TRANSACTION N'EST DISPONIBLE — voir la
+   * justification détaillée dans `cagnotteSettlementController.js`.
+   */
+  if (!canUseSharedSession(getUsersConn, getTxConn)) {
+    logger.error(
+      "[cagnotte][closure-fees] REFUS : session atomique indisponible",
+      {
+        reference: ref,
+        consequence:
+          "le grand livre s'écrirait hors transaction ; aucun mouvement n'a eu lieu",
+      }
+    );
+
+    return res.status(503).json({
+      success: false,
+      code: "ATOMIC_SESSION_UNAVAILABLE",
+      error:
+        "Règlement des frais de clôture refusé : les deux bases ne partagent " +
+        "pas de session Mongo, le crédit de trésorerie et l'écriture au grand " +
+        "livre ne peuvent donc pas être atomiques. Vérifier MONGO_SHARE_CLIENT.",
+    });
+  }
+
+  const settlementId = settlementObjectIdFromReference(
+    ref,
+    "cagnotte.closureFee"
+  );
+
   const existingByReference =
     await CagnotteVaultWithdrawalSettlement.findOne({ reference: ref }).lean();
 
@@ -498,6 +532,7 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
       const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
         [
           {
+            _id: settlementId,
             reference: ref,
             idempotencyKey: idem,
             userId: initiatorId,
@@ -534,6 +569,31 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
         ],
         { session }
       );
+
+      /**
+       * ⚠️ LE GRAND LIVRE, DANS LA MÊME TRANSACTION.
+       *
+       * Jusqu'au 2026-09-09, ce contrôleur créditait la trésorerie cagnotte sans
+       * poser une seule `LedgerEntry` (invariants 2 et 4). Les frais de clôture
+       * sont prélevés SUR LE COFFRE : la compensation cagnotte est donc débitée,
+       * exactement comme pour les frais de participation.
+       */
+      await postCagnotteClosureFeeEntries({
+        settlementId: settlementDocs[0]._id,
+        reference: ref,
+        feeCredit: {
+          treasuryUserId: treasuryMeta.treasuryUserId,
+          treasurySystemType: treasuryMeta.treasurySystemType,
+          amount: feeAmount,
+          currency: feeCurrency,
+        },
+        metadata: {
+          settlementKind: "cagnotte_closure_fee_credit",
+          cagnotteId: cId,
+          vaultId: vId,
+        },
+        session,
+      });
 
       return settlementDocs[0];
     });

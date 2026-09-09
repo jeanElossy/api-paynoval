@@ -7,10 +7,15 @@ const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteSettlementModel = require("../models/CagnotteSettlement");
 const { runWithTransaction } = require("../utils/transactionRunner");
+const { canUseSharedSession } = require("../utils/sharedSession");
+const { getUsersConn } = require("../config/db");
 const {
   resolveTreasuryFromSystemType,
   normalizeTreasurySystemType,
+  settlementObjectIdFromReference,
+  postCagnotteParticipationEntries,
 } = require("../services/ledgerService");
+const logger = require("../utils/logger");
 
 const CAGNOTTE_TREASURY_SYSTEM_TYPE = "CAGNOTTE_FEES_TREASURY";
 const CAGNOTTE_TREASURY_LABEL = "Cagnotte Fees Treasury";
@@ -207,6 +212,51 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
     });
   }
 
+  /**
+   * ⚠️ REFUS EN FERMETURE QUAND AUCUNE TRANSACTION N'EST DISPONIBLE.
+   *
+   * `postDoubleEntry` ne transmet la session au grand livre que si
+   * `canUseSharedSession()` est vrai (`maybeSessionOpts`). Sans elle, les
+   * écritures comptables partiraient HORS de la transaction qui porte le
+   * mouvement de portefeuille : une annulation laisserait des écritures
+   * fantômes dans le grand livre, en face d'un solde qui, lui, aurait été
+   * remis en état. Un grand livre faux est pire qu'un grand livre absent — on
+   * lui fait confiance.
+   *
+   * On refuse donc AVANT tout mouvement, comme le fait déjà
+   * `internalPaymentsController.js` (règle B.2). En configuration normale les
+   * deux bases partagent le client Mongo et ce refus ne se déclenche jamais.
+   */
+  if (!canUseSharedSession(getUsersConn, getTxConn)) {
+    logger.error(
+      "[cagnotte][participation] REFUS : session atomique indisponible",
+      {
+        reference: ref,
+        consequence:
+          "le grand livre s'écrirait hors transaction ; aucun mouvement n'a eu lieu",
+      }
+    );
+
+    return res.status(503).json({
+      success: false,
+      code: "ATOMIC_SESSION_UNAVAILABLE",
+      error:
+        "Règlement de cagnotte refusé : les deux bases ne partagent pas de " +
+        "session Mongo, le mouvement de portefeuille et l'écriture au grand " +
+        "livre ne peuvent donc pas être atomiques. Vérifier MONGO_SHARE_CLIENT.",
+    });
+  }
+
+  /**
+   * Identifiant DÉTERMINISTE, dérivé de la référence : un rejeu réinsère le
+   * même `_id` et se heurte à la contrainte, et surtout `dedupKey` reste stable
+   * pour les écritures du grand livre. Voir `ledgerService`.
+   */
+  const settlementId = settlementObjectIdFromReference(
+    ref,
+    "cagnotte.participation"
+  );
+
   const existing = await CagnotteSettlement.findOne({ reference: ref }).lean();
   if (existing) {
     return res.status(200).json({
@@ -338,6 +388,7 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
         const settlementDocs = await CagnotteSettlement.create(
           [
             {
+              _id: settlementId,
               reference: ref,
               idempotencyKey: idem,
               userId: payerId,
@@ -379,6 +430,43 @@ exports.settleCagnotteParticipation = asyncHandler(async (req, res) => {
         );
 
         const settlement = settlementDocs[0];
+
+        /**
+         * ⚠️ LE GRAND LIVRE, DANS LA MÊME TRANSACTION.
+         *
+         * Jusqu'au 2026-09-09, ce contrôleur s'arrêtait à la ligne précédente :
+         * il débitait un portefeuille, créditait une trésorerie, écrivait un
+         * règlement `confirmed` — et pas une seule `LedgerEntry`. Les invariants
+         * 2 et 4 tombaient ensemble.
+         *
+         * Poser l'écriture après la transaction ne vaudrait pas mieux : un échec
+         * entre les deux laisserait le solde déplacé sans contrepartie, ce que
+         * ce correctif existe précisément pour empêcher.
+         */
+        await postCagnotteParticipationEntries({
+          settlementId: settlement._id,
+          reference: ref,
+          payer: {
+            userId: payerId,
+            amount: payerAmount,
+            currency: payerCurrency,
+          },
+          feeCredit:
+            feeAmount > 0
+              ? {
+                  treasuryUserId: treasuryMeta.treasuryUserId,
+                  treasurySystemType: treasuryMeta.treasurySystemType,
+                  amount: feeAmount,
+                  currency: feeCurrency,
+                }
+              : null,
+          metadata: {
+            settlementKind: "cagnotte_participation_settlement",
+            cagnotteId: meta?.cagnotteId || null,
+            vaultId: meta?.vaultId || null,
+          },
+          session,
+        });
 
         return {
           statusCode: 201,

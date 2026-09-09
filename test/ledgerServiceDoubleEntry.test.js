@@ -130,6 +130,15 @@ function loadLedgerService() {
 process.env.FEES_TREASURY_USER_ID =
   process.env.FEES_TREASURY_USER_ID || "ffffffffffffffffffffffff";
 
+/**
+ * ⚠️ POSÉE AVANT `loadLedgerService()`, et ce n'est pas un détail de style :
+ * `TREASURY_ENV_BY_SYSTEM_TYPE` est figée au chargement du module. Renseignée
+ * après, elle ne serait jamais lue et la résolution de trésorerie échouerait
+ * dans les tests de cagnotte.
+ */
+process.env.CAGNOTTE_FEES_TREASURY_USER_ID =
+  process.env.CAGNOTTE_FEES_TREASURY_USER_ID || "cccccccccccccccccccccccc";
+
 const ledger = loadLedgerService();
 
 const TX = {
@@ -422,4 +431,280 @@ test("toutes les jambes partent en UN SEUL appel — pas de lot partiel", async 
 
   assert.equal(written.length, 1, "un seul appel à create()");
   assert.equal(written[0].length, 2, "portant les deux jambes");
+});
+
+/* -------------------------------------------------------------------------- */
+/* CAGNOTTES — les trois chemins qui n'écrivaient rien avant le 2026-09-09     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ============================================================================
+ * POURQUOI CES TESTS EXISTENT
+ * ============================================================================
+ *
+ * Les trois points de terminaison de règlement de cagnotte déplaçaient de
+ * l'argent sans écrire une seule `LedgerEntry`. Ils ont échappé au correctif du
+ * chemin voisin (`internalPaymentsController`) parce qu'ils écrivaient par
+ * `findOneAndUpdate({ $inc })` et `TxSystemBalance.credit()` plutôt que par
+ * `TxWalletBalance.debit|credit` — la forme que cherchait le garde-fou.
+ *
+ * Ces tests-ci vérifient que les primitives produisent des lots ÉQUILIBRÉS.
+ * `test/cagnotteLedger.test.js` vérifie qu'elles sont réellement APPELÉES, dans
+ * la transaction. Les deux sont nécessaires : une primitive correcte que
+ * personne n'appelle ne protège de rien.
+ */
+
+const CAGNOTTE_TREASURY = "cccccccccccccccccccccccc";
+const PAYEUR = "dddddddddddddddddddddddd";
+const BENEFICIAIRE = "eeeeeeeeeeeeeeeeeeeeeeee";
+const REGLEMENT = "2b2b2b2b2b2b2b2b2b2b2b2b";
+
+test("participation sans frais : payeur → compensation cagnotte", async () => {
+  const batch = await expectBalancedPair("participation", () =>
+    ledger.postCagnotteParticipationEntries({
+      settlementId: REGLEMENT,
+      reference: "CAGPART-TEST-001",
+      payer: { userId: PAYEUR, amount: 5000, currency: "XOF" },
+      feeCredit: null,
+    })
+  );
+
+  assert.equal(batch.length, 2, "un débit, une contrepartie");
+
+  const debit = batch.find((d) => d.direction === "DEBIT");
+  const credit = batch.find((d) => d.direction === "CREDIT");
+
+  assert.equal(debit.accountType, "USER_WALLET");
+  assert.ok(debit.accountId.includes(PAYEUR), "le débit porte le payeur");
+
+  /**
+   * ⚠️ La contrepartie va sur la compensation CAGNOTTE, pas sur la compensation
+   * générale. Le solde de `system_clearing:<devise>` sert à détecter des fonds
+   * bloqués en transit et doit revenir à zéro ; l'encours d'une cagnotte
+   * ouverte est légitimement non nul et durable. Les mélanger rendrait le seul
+   * indicateur de fonds bloqués illisible.
+   */
+  assert.equal(credit.accountType, "SYSTEM_CLEARING");
+  assert.equal(
+    credit.accountId,
+    "system_clearing:CAGNOTTE_VAULT:XOF",
+    "la compensation cagnotte doit rester distincte de la compensation générale"
+  );
+});
+
+test("participation avec frais : deux lots, équilibrés CHACUN par devise", async () => {
+  written.length = 0;
+
+  await ledger.postCagnotteParticipationEntries({
+    settlementId: REGLEMENT,
+    reference: "CAGPART-TEST-002",
+    payer: { userId: PAYEUR, amount: 5000, currency: "XOF" },
+    feeCredit: {
+      treasuryUserId: CAGNOTTE_TREASURY,
+      treasurySystemType: "CAGNOTTE_FEES_TREASURY",
+      amount: 1.25,
+      currency: "CAD",
+    },
+  });
+
+  assert.equal(written.length, 2, "le débit et les frais sont deux lots distincts");
+
+  /**
+   * ⚠️ DEUX LOTS, ET C'EST LA RAISON D'ÊTRE DU DÉCOUPAGE.
+   *
+   * Le payeur paie en XOF, la trésorerie encaisse en CAD. Fondus en un seul
+   * lot, l'équilibre par devise serait impossible à satisfaire — et le refus
+   * de `checkBalanced` porterait sur une écriture pourtant légitime.
+   */
+  for (const [i, lot] of written.entries()) {
+    const verdict = checkBalanced(asLegs(lot));
+    assert.equal(verdict.ok, true, `lot ${i} déséquilibré : ${verdict.detail}`);
+  }
+
+  const fraisLot = written[1];
+  const debitFrais = fraisLot.find((d) => d.direction === "DEBIT");
+  const creditFrais = fraisLot.find((d) => d.direction === "CREDIT");
+
+  assert.equal(
+    debitFrais.accountId,
+    "system_clearing:CAGNOTTE_VAULT:CAD",
+    "les frais se prélèvent SUR LE COFFRE, pas sur le payeur une seconde fois"
+  );
+  assert.equal(creditFrais.accountType, "TREASURY");
+  assert.ok(
+    creditFrais.accountId.includes("CAGNOTTE_FEES_TREASURY"),
+    "les frais de cagnotte vont à la trésorerie cagnotte"
+  );
+});
+
+test("participation à frais nuls : AUCUN lot de frais, et pas un lot à zéro", async () => {
+  /**
+   * Le créateur qui participe à sa propre cagnotte ne paie pas de frais : le
+   * backend envoie `amount: 0`. Un lot à zéro serait refusé par `checkBalanced`
+   * (`bad-amount`) et ferait échouer une participation légitime.
+   */
+  written.length = 0;
+
+  await ledger.postCagnotteParticipationEntries({
+    settlementId: REGLEMENT,
+    reference: "CAGPART-TEST-003",
+    payer: { userId: PAYEUR, amount: 5000, currency: "XOF" },
+    feeCredit: {
+      treasuryUserId: CAGNOTTE_TREASURY,
+      treasurySystemType: "CAGNOTTE_FEES_TREASURY",
+      amount: 0,
+      currency: "CAD",
+    },
+  });
+
+  assert.equal(written.length, 1, "un seul lot : le débit du payeur");
+});
+
+test("retrait de coffre : compensation cagnotte → bénéficiaire", async () => {
+  const batch = await expectBalancedPair("retrait", () =>
+    ledger.postCagnotteVaultWithdrawalEntries({
+      settlementId: REGLEMENT,
+      reference: "CAGVLT-TEST-001",
+      beneficiary: { userId: BENEFICIAIRE, amount: 4500, currency: "XOF" },
+    })
+  );
+
+  const debit = batch.find((d) => d.direction === "DEBIT");
+  const credit = batch.find((d) => d.direction === "CREDIT");
+
+  /**
+   * C'est la jambe de RETOUR de la participation : elle vide la compensation
+   * cagnotte que la participation avait remplie. Sans elle, le solde de ce
+   * compte ne redescendrait jamais.
+   */
+  assert.equal(debit.accountId, "system_clearing:CAGNOTTE_VAULT:XOF");
+  assert.equal(credit.accountType, "USER_WALLET");
+  assert.ok(credit.accountId.includes(BENEFICIAIRE));
+});
+
+test("frais de clôture : prélevés sur le coffre, versés à la trésorerie", async () => {
+  const batch = await expectBalancedPair("clôture", () =>
+    ledger.postCagnotteClosureFeeEntries({
+      settlementId: REGLEMENT,
+      reference: "CAGCLO-TEST-001",
+      feeCredit: {
+        treasuryUserId: CAGNOTTE_TREASURY,
+        treasurySystemType: "CAGNOTTE_FEES_TREASURY",
+        amount: 3.5,
+        currency: "CAD",
+      },
+    })
+  );
+
+  assert.equal(
+    batch.find((d) => d.direction === "DEBIT").accountId,
+    "system_clearing:CAGNOTTE_VAULT:CAD"
+  );
+  assert.equal(batch.find((d) => d.direction === "CREDIT").accountType, "TREASURY");
+});
+
+test("une écriture de cagnotte REFUSE une autre trésorerie", async () => {
+  /**
+   * Sans cette garde, une erreur d'appel enverrait les frais de cagnotte sur
+   * FEES_TREASURY : la balance resterait équilibrée — donc aucun contrôle ne
+   * verrait rien — et l'analytique de trésorerie serait fausse.
+   */
+  written.length = 0;
+
+  await assert.rejects(
+    () =>
+      ledger.postCagnotteClosureFeeEntries({
+        settlementId: REGLEMENT,
+        reference: "CAGCLO-TEST-002",
+        feeCredit: {
+          treasuryUserId: "ffffffffffffffffffffffff",
+          treasurySystemType: "FEES_TREASURY",
+          amount: 3.5,
+          currency: "CAD",
+        },
+      }),
+    /Trésorerie de cagnotte attendue/
+  );
+
+  assert.equal(written.length, 0, "AUCUNE écriture ne doit avoir été tentée");
+});
+
+test("les primitives de cagnotte échouent en FERMETURE, jamais par défaut", async () => {
+  written.length = 0;
+
+  // Montant absent : refus, pas une écriture à zéro.
+  await assert.rejects(() =>
+    ledger.postCagnotteParticipationEntries({
+      settlementId: REGLEMENT,
+      reference: "CAGPART-TEST-004",
+      payer: { userId: PAYEUR, amount: null, currency: "XOF" },
+    })
+  );
+
+  // Identifiant de règlement absent : refus.
+  await assert.rejects(
+    () =>
+      ledger.postCagnotteVaultWithdrawalEntries({
+        settlementId: null,
+        reference: "CAGVLT-TEST-002",
+        beneficiary: { userId: BENEFICIAIRE, amount: 100, currency: "XOF" },
+      }),
+    /settlementId requis/
+  );
+
+  // Frais de clôture à zéro : ce point de terminaison n'existe QUE pour des
+  // frais. Zéro n'est pas un cas limite, c'est un appel qui n'a rien à faire.
+  await assert.rejects(
+    () =>
+      ledger.postCagnotteClosureFeeEntries({
+        settlementId: REGLEMENT,
+        reference: "CAGCLO-TEST-003",
+        feeCredit: {
+          treasuryUserId: CAGNOTTE_TREASURY,
+          treasurySystemType: "CAGNOTTE_FEES_TREASURY",
+          amount: 0,
+          currency: "CAD",
+        },
+      }),
+    /absent ou nul/
+  );
+
+  assert.equal(written.length, 0, "aucun refus ne doit avoir laissé d'écriture");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Identifiant de règlement déterministe                                      */
+/* -------------------------------------------------------------------------- */
+
+test("l'identifiant de règlement est dérivé de la référence, donc rejouable", () => {
+  const a = ledger.settlementObjectIdFromReference("CAGPART-XYZ", "cagnotte.participation");
+  const b = ledger.settlementObjectIdFromReference("CAGPART-XYZ", "cagnotte.participation");
+
+  assert.equal(String(a), String(b), "deux tentatives du même règlement, un seul identifiant");
+
+  /**
+   * ⚠️ C'EST CE QUI REND LE GRAND LIVRE IDEMPOTENT SANS TRANSACTION.
+   *
+   * `dedupKey` vaut `transactionId|scope|legIndex`. Avec un identifiant tiré au
+   * hasard à chaque tentative, un rejeu produirait une clé neuve : l'index
+   * unique partiel ne verrait pas le doublon, et l'idempotence ne tiendrait plus
+   * que par la transaction MongoDB. On ne fait pas reposer un invariant
+   * financier sur la disponibilité d'un jeu de réplicas.
+   */
+  const autrePortee = ledger.settlementObjectIdFromReference(
+    "CAGPART-XYZ",
+    "cagnotte.closureFee"
+  );
+  assert.notEqual(
+    String(a),
+    String(autrePortee),
+    "deux familles de règlement ne doivent pas se heurter sur une même référence"
+  );
+
+  assert.throws(
+    () => ledger.settlementObjectIdFromReference("", "cagnotte.participation"),
+    /référence absente/,
+    "une référence absente doit LEVER — un identifiant aléatoire rendrait " +
+      "l'opération non idempotente sans qu'aucune erreur ne le signale"
+  );
 });

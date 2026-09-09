@@ -11,6 +11,7 @@
  * --------------------------------------------------------------------------
  */
 
+const crypto = require("node:crypto");
 const mongoose = require("mongoose");
 const { normalizeAccountCurrency } = require("../utils/currency");
 const {
@@ -30,6 +31,7 @@ const {
   transferLegs,
   systemReserveAccountId,
   systemClearingAccountId,
+  cagnotteVaultClearingAccountId,
   /**
    * ⚠️ Importés depuis `doubleEntry` depuis le 2026-09-03. Ce fichier en
    * portait ses propres copies, dont la normalisation de devise DIVERGEAIT de
@@ -1537,6 +1539,356 @@ async function postInternalPaymentEntries({
   }
 }
 
+/**
+ * ============================================================================
+ * CAGNOTTES — LES TROIS ÉCRITURES COMPTABLES QUI MANQUAIENT
+ * ============================================================================
+ *
+ * ── Le défaut ────────────────────────────────────────────────────────────────
+ * TX Core exposait TROIS points de terminaison de règlement de cagnotte, tous
+ * montés et annoncés au démarrage (`src/server.js`), tous déplaçant réellement
+ * de l'argent, et **aucun n'écrivait une seule ligne au grand livre** :
+ *
+ *   POST /api/v1/cagnotte/participation/settle
+ *        débite `tx_wallet_balances` du payeur, crédite la trésorerie cagnotte
+ *   POST /api/v1/cagnotte/vault-withdrawals/settle
+ *        crédite `tx_wallet_balances` du bénéficiaire
+ *   POST /api/v1/cagnotte/closure-fees/settle
+ *        crédite la trésorerie cagnotte
+ *
+ * Chacun écrivait un document de règlement en `status: "confirmed"` — donc une
+ * trace, mais une trace qui n'entre dans aucune balance et que la réconciliation
+ * portefeuille ↔ grand livre ne peut pas rapprocher. Les invariants 2 (le grand
+ * livre fait foi) et 4 (toute écriture financière est auditable) tombaient
+ * ensemble, exactement comme sur `internalPaymentsController.js` avant le
+ * 2026-09-03.
+ *
+ * ⚠️ Ces trois chemins échappaient AUSSI au filet de
+ * `test/noLedgerlessMoneyPath.test.js`, qui cherchait
+ * `TxWalletBalance.debit|credit(` — or ils écrivaient par
+ * `findOneAndUpdate({ $inc })` et `TxSystemBalance.credit()`. Le garde-fou a été
+ * élargi le 2026-09-09 : ce n'est pas un détail de test, c'est la raison pour
+ * laquelle le défaut a survécu au correctif du chemin voisin.
+ *
+ * ── La forme des écritures ──────────────────────────────────────────────────
+ * Un coffre de cagnotte vit dans le BACKEND PRINCIPAL, pas ici. Vu de TX Core,
+ * l'argent d'une participation quitte un portefeuille et n'atterrit sur aucun
+ * compte connu — il revient au retrait. C'est du transit, et il passe par
+ * `system_clearing:CAGNOTTE_VAULT:<devise>` (voir `doubleEntry.js` pour la
+ * raison du compte séparé).
+ *
+ *   participation   DEBIT  user_wallet:<payeur>     montant payeur
+ *                   CREDIT clearing cagnotte        montant payeur
+ *                   DEBIT  clearing cagnotte        frais            ┐ si frais
+ *                   CREDIT treasury CAGNOTTE_FEES   frais            ┘
+ *
+ *   retrait coffre  DEBIT  clearing cagnotte        montant crédité
+ *                   CREDIT user_wallet:<bénéf.>     montant crédité
+ *
+ *   frais clôture   DEBIT  clearing cagnotte        frais
+ *                   CREDIT treasury CAGNOTTE_FEES   frais
+ *
+ * Chaque lot est équilibré SEUL et PAR DEVISE. Le lot « frais » de la
+ * participation est séparé du lot « débit » précisément parce que les deux
+ * peuvent porter des devises différentes : le payeur paie en XOF, la trésorerie
+ * encaisse en CAD. Les fondre en un seul lot rendrait l'équilibre par devise
+ * impossible à satisfaire — et l'écart entre les deux devises sur le compte de
+ * compensation EST la position de change, qui devient ainsi mesurable.
+ *
+ * ── Idempotence ─────────────────────────────────────────────────────────────
+ * `transactionId` est l'identifiant du document de règlement, et cet identifiant
+ * est DÉRIVÉ DE LA RÉFÉRENCE (`settlementObjectIdFromReference`). Deux
+ * conséquences voulues :
+ *   · le règlement lui-même se rejoue sans doubler — la seconde insertion entre
+ *     en collision sur `_id`, en plus des index uniques sur `reference` et
+ *     `{userId, idempotencyKey}` ;
+ *   · `dedupKey` (`transactionId|scope|legIndex`) est STABLE d'une tentative à
+ *     l'autre, donc l'index unique partiel du grand livre refuse le doublon même
+ *     lorsque la transaction MongoDB n'est pas disponible.
+ *
+ * Sans dérivation, un rejeu produirait un `_id` neuf, donc un `dedupKey` neuf,
+ * donc des écritures en double : l'idempotence ne tiendrait plus que par la
+ * transaction. On ne fait pas reposer un invariant financier sur la disponibilité
+ * d'un jeu de réplicas.
+ *
+ * ⚠️ À APPELER DANS LA MÊME SESSION que les mouvements de portefeuille.
+ */
+
+/**
+ * Identifiant de document DÉTERMINISTE, dérivé de la référence du règlement.
+ *
+ * 96 bits de SHA-256 (la largeur d'un ObjectId). Le préfixe de portée évite
+ * qu'une même référence produise le même identifiant sur deux familles de
+ * règlement différentes.
+ *
+ * ⚠️ LÈVE sur une référence absente (règle B.2). Un repli sur un identifiant
+ * aléatoire rendrait l'opération non idempotente sans qu'aucune erreur ne le
+ * signale — c'est-à-dire exactement le défaut qu'on ferme ici.
+ */
+function settlementObjectIdFromReference(reference, scope) {
+  const ref = String(reference || "").trim();
+  const sc = String(scope || "").trim();
+
+  if (!ref) {
+    throw new Error(
+      "settlementObjectIdFromReference : référence absente — un règlement sans " +
+        "référence ne peut pas être idempotent."
+    );
+  }
+
+  if (!sc) {
+    throw new Error("settlementObjectIdFromReference : portée absente.");
+  }
+
+  const hex = crypto
+    .createHash("sha256")
+    .update(`${sc}|${ref}`)
+    .digest("hex")
+    .slice(0, 24);
+
+  return new mongoose.Types.ObjectId(hex);
+}
+
+/** Trésorerie cagnotte, résolue et validée en un seul endroit. */
+function resolveCagnotteTreasury({ treasuryUserId, treasurySystemType }) {
+  const systemType = normalizeTreasurySystemType(
+    treasurySystemType || "CAGNOTTE_FEES_TREASURY"
+  );
+
+  if (systemType !== "CAGNOTTE_FEES_TREASURY") {
+    throw new Error(
+      `Trésorerie de cagnotte attendue, reçu ${systemType} — une écriture de ` +
+        "cagnotte ne se pose pas sur une autre trésorerie."
+    );
+  }
+
+  return {
+    treasuryUserId: treasuryUserId
+      ? normalizeObjectIdLike(treasuryUserId, "treasuryUserId")
+      : resolveTreasuryFromSystemType(systemType),
+    treasurySystemType: systemType,
+  };
+}
+
+/**
+ * Lot « frais de cagnotte » : compensation cagnotte → trésorerie cagnotte.
+ * Partagé par la participation et la clôture, qui posent la MÊME écriture.
+ */
+async function postCagnotteFeeLegs({
+  settlementId,
+  reference,
+  treasuryUserId,
+  treasurySystemType,
+  amount,
+  currency,
+  metadata = null,
+  session = null,
+  scope,
+}) {
+  const cur = normalizeCurrency(currency);
+  const amt = normalizePositiveAmount(amount, cur);
+  const treasury = resolveCagnotteTreasury({ treasuryUserId, treasurySystemType });
+
+  return postDoubleEntry({
+    transactionId: settlementId,
+    reference: reference || null,
+    entryType: "FEE_REVENUE",
+    context: scope,
+    dedupScope: scope,
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: cagnotteVaultClearingAccountId(cur),
+        userId: null,
+      },
+      to: {
+        accountType: "TREASURY",
+        accountId: treasuryAccountId({
+          treasuryUserId: treasury.treasuryUserId,
+          treasurySystemType: treasury.treasurySystemType,
+          currency: cur,
+        }),
+        userId: treasury.treasuryUserId,
+      },
+      amount: amt,
+      currency: cur,
+    }),
+    metadata: {
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+      treasurySystemType: treasury.treasurySystemType,
+    },
+    session,
+  });
+}
+
+/**
+ * Participation à une cagnotte : le payeur est débité, la trésorerie encaisse
+ * ses frais, le reste part en compensation cagnotte (le coffre).
+ */
+async function postCagnotteParticipationEntries({
+  settlementId,
+  reference,
+  payer,
+  feeCredit = null,
+  metadata = null,
+  session = null,
+}) {
+  if (!settlementId) {
+    throw new Error("postCagnotteParticipationEntries : settlementId requis.");
+  }
+
+  if (!payer) {
+    throw new Error(
+      "postCagnotteParticipationEntries : aucun payeur. Une participation sans " +
+        "débit n'existe pas — appeler cette fonction pour rien masquerait un " +
+        "chemin qui ne book rien."
+    );
+  }
+
+  const cur = normalizeCurrency(payer.currency);
+  const amt = normalizePositiveAmount(payer.amount, cur);
+  const payerId = normalizeObjectIdLike(payer.userId, "payer.userId");
+
+  await postDoubleEntry({
+    transactionId: settlementId,
+    reference: reference || null,
+    entryType: "USER_DEBIT",
+    context: "cagnotte.participation.debit",
+    dedupScope: "cagnotte.participation.debit",
+    legs: transferLegs({
+      from: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(payerId, cur),
+        userId: payerId,
+      },
+      to: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: cagnotteVaultClearingAccountId(cur),
+        userId: null,
+      },
+      amount: amt,
+      currency: cur,
+    }),
+    metadata: {
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+      stage: "cagnotte-participation",
+    },
+    session,
+  });
+
+  /**
+   * Frais facultatifs : ils le sont réellement. Le créateur qui participe à sa
+   * propre cagnotte n'en paie pas, et le backend envoie alors `amount: 0`.
+   * Un lot à zéro serait refusé par `checkBalanced` — on n'en pose pas.
+   */
+  if (feeCredit && Number(feeCredit.amount) > 0) {
+    await postCagnotteFeeLegs({
+      settlementId,
+      reference,
+      treasuryUserId: feeCredit.treasuryUserId,
+      treasurySystemType: feeCredit.treasurySystemType,
+      amount: feeCredit.amount,
+      currency: feeCredit.currency,
+      metadata: {
+        ...(metadata && typeof metadata === "object" ? metadata : {}),
+        stage: "cagnotte-participation-fee",
+      },
+      session,
+      scope: "cagnotte.participation.fee",
+    });
+  }
+}
+
+/**
+ * Retrait du coffre d'une cagnotte : la compensation cagnotte se vide vers le
+ * portefeuille du bénéficiaire. C'est la jambe de retour de la participation.
+ */
+async function postCagnotteVaultWithdrawalEntries({
+  settlementId,
+  reference,
+  beneficiary,
+  metadata = null,
+  session = null,
+}) {
+  if (!settlementId) {
+    throw new Error("postCagnotteVaultWithdrawalEntries : settlementId requis.");
+  }
+
+  if (!beneficiary) {
+    throw new Error(
+      "postCagnotteVaultWithdrawalEntries : aucun bénéficiaire. Un retrait sans " +
+        "crédit n'existe pas."
+    );
+  }
+
+  const cur = normalizeCurrency(beneficiary.currency);
+  const amt = normalizePositiveAmount(beneficiary.amount, cur);
+  const to = normalizeObjectIdLike(beneficiary.userId, "beneficiary.userId");
+
+  await postDoubleEntry({
+    transactionId: settlementId,
+    reference: reference || null,
+    entryType: "USER_CREDIT",
+    context: "cagnotte.vaultWithdrawal.credit",
+    dedupScope: "cagnotte.vaultWithdrawal.credit",
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: cagnotteVaultClearingAccountId(cur),
+        userId: null,
+      },
+      to: {
+        accountType: "USER_WALLET",
+        accountId: userWalletAccountId(to, cur),
+        userId: to,
+      },
+      amount: amt,
+      currency: cur,
+    }),
+    metadata: {
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+      stage: "cagnotte-vault-withdrawal",
+    },
+    session,
+  });
+}
+
+/** Frais de clôture d'une cagnotte : prélevés sur le coffre. */
+async function postCagnotteClosureFeeEntries({
+  settlementId,
+  reference,
+  feeCredit,
+  metadata = null,
+  session = null,
+}) {
+  if (!settlementId) {
+    throw new Error("postCagnotteClosureFeeEntries : settlementId requis.");
+  }
+
+  if (!feeCredit || !(Number(feeCredit.amount) > 0)) {
+    throw new Error(
+      "postCagnotteClosureFeeEntries : montant de frais absent ou nul. Ce point " +
+        "de terminaison n'existe que pour encaisser des frais — sans montant, " +
+        "il n'a rien à comptabiliser."
+    );
+  }
+
+  await postCagnotteFeeLegs({
+    settlementId,
+    reference,
+    treasuryUserId: feeCredit.treasuryUserId,
+    treasurySystemType: feeCredit.treasurySystemType,
+    amount: feeCredit.amount,
+    currency: feeCredit.currency,
+    metadata: {
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+      stage: "cagnotte-closure-fee",
+    },
+    session,
+    scope: "cagnotte.closureFee.credit",
+  });
+}
+
 module.exports = {
   postDoubleEntry,
   TREASURY_SYSTEM_TYPES,
@@ -1558,4 +1910,8 @@ module.exports = {
   createLedgerEntry,
   filtreRelectureDedup,
   postInternalPaymentEntries,
+  settlementObjectIdFromReference,
+  postCagnotteParticipationEntries,
+  postCagnotteVaultWithdrawalEntries,
+  postCagnotteClosureFeeEntries,
 };

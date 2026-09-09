@@ -190,6 +190,83 @@ test("aucun module de src/ n'importe les primitives retirées", () => {
 /* 5. Le filet : personne d'autre ne prend le raccourci                       */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * ============================================================================
+ * ⚠️ LE FILET AVAIT UNE MAILLE À LA TAILLE DU DÉFAUT SUIVANT
+ * ============================================================================
+ *
+ * Ce garde-fou ne cherchait que `TxWalletBalance.debit|credit(`. Le 2026-09-09,
+ * l'audit de `settlement.md` a trouvé les TROIS contrôleurs de règlement de
+ * cagnotte déplaçant de l'argent sans une seule `LedgerEntry` — exactement le
+ * défaut que ce fichier existe pour empêcher de revenir. Ils écrivaient par
+ * `findOneAndUpdate({ $inc: { amount, availableAmount } })` et par
+ * `TxSystemBalance.credit()` : la même faute, sous deux formes que le motif ne
+ * voyait pas.
+ *
+ * La leçon n'est pas « ajouter deux motifs ». C'est qu'une LISTE BLANCHE DE
+ * FICHIERS est le mauvais outil : elle se contourne en créant un fichier. La
+ * règle est maintenant une IMPLICATION, vérifiée sur tout `src/` :
+ *
+ *     un fichier qui écrit un solde DOIT référencer le grand livre
+ *
+ * Seules les définitions de modèles en sont exemptées — ce sont elles qui
+ * fournissent la primitive, elles ne l'utilisent pas.
+ */
+const MOTIFS_ECRITURE_SOLDE = [
+  { nom: "TxWalletBalance.debit|credit", motif: /TxWalletBalance\.(debit|credit)\s*\(/ },
+  { nom: "TxSystemBalance.debit|credit", motif: /TxSystemBalance\.(debit|credit)\s*\(/ },
+  /**
+   * `$inc` sur un champ de solde. C'est la forme qui a permis aux règlements de
+   * cagnotte de passer sous le motif précédent : ils n'appelaient aucune
+   * primitive du modèle, ils incrémentaient le document en direct.
+   */
+  { nom: "$inc sur amount/availableAmount", motif: /\$inc\s*:\s*\{[^}]*\b(availableAmount|amount)\s*:/ },
+];
+
+/** Une référence au grand livre, sous l'une quelconque de ses formes. */
+const MOTIF_GRAND_LIVRE =
+  /(postDoubleEntry|postInternalPaymentEntries|postCagnotte\w+Entries|createLedgerEntry|LedgerEntry)/;
+
+/**
+ * Exemptés : ce sont les DÉFINITIONS de la primitive d'écriture de solde. Leur
+ * demander d'écrire le grand livre n'aurait pas de sens — c'est leur appelant
+ * qui le doit.
+ */
+const DEFINITIONS_DE_MODELE = new Set([
+  "src/models/TxWalletBalance.js",
+  "src/models/TxSystemBalance.js",
+]);
+
+test("tout fichier qui écrit un solde référence le grand livre", () => {
+  const coupables = [];
+
+  for (const abs of fichiersSource()) {
+    const rel = path.relative(RACINE, abs).split(path.sep).join("/");
+    if (DEFINITIONS_DE_MODELE.has(rel)) continue;
+
+    // Hors commentaires : plusieurs de ces fichiers DÉCRIVENT le défaut corrigé
+    // et citent les formes fautives pour expliquer pourquoi elles ont disparu.
+    const src = sansCommentaires(fs.readFileSync(abs, "utf8"));
+
+    const formes = MOTIFS_ECRITURE_SOLDE.filter((m) => m.motif.test(src)).map(
+      (m) => m.nom
+    );
+
+    if (!formes.length) continue;
+    if (MOTIF_GRAND_LIVRE.test(src)) continue;
+
+    coupables.push(`${rel} (${formes.join(", ")})`);
+  }
+
+  assert.deepEqual(
+    coupables,
+    [],
+    "ces fichiers déplacent un solde sans référencer le grand livre. La " +
+      "question n'est pas « comment faire passer le test » : c'est « où est " +
+      "l'écriture comptable ? » (invariants 2 et 4)."
+  );
+});
+
 test("les écritures directes de solde restent cantonnées aux chemins connus", () => {
   /**
    * `TxWalletBalance.debit/credit` déplacent des fonds. Chaque fichier qui les
@@ -218,6 +295,14 @@ test("les écritures directes de solde restent cantonnées aux chemins connus", 
     "src/services/adminAdjustmentExecutionService.js",
     // 10 références au grand livre ; transferts de parrainage.
     "src/services/internalReferralTransferService.js",
+
+    // Vérifiés le 2026-09-09 : chacun pose désormais ses écritures via
+    // `postCagnotte*Entries` (ledgerService), DANS `runWithTransaction`, et
+    // refuse en 503 quand aucune transaction réelle n'est disponible.
+    // Verrouillé par `test/cagnotteLedger.test.js`.
+    "src/controllers/cagnotteSettlementController.js",
+    "src/controllers/cagnotteVaultWithdrawalSettlementController.js",
+    "src/controllers/cagnotteClosureFeesSettlementController.js",
   ]);
 
   const motif = /TxWalletBalance\.(debit|credit)\s*\(/;

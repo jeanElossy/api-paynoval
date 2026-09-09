@@ -344,6 +344,13 @@ const { getTxConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
 const buildCagnotteVaultWithdrawalSettlementModel = require("../models/CagnotteVaultWithdrawalSettlement");
 const { runWithTransaction } = require("../utils/transactionRunner");
+const { canUseSharedSession } = require("../utils/sharedSession");
+const { getUsersConn } = require("../config/db");
+const {
+  settlementObjectIdFromReference,
+  postCagnotteVaultWithdrawalEntries,
+} = require("../services/ledgerService");
+const logger = require("../utils/logger");
 
 function normalizeCurrencyCode(raw) {
   const s = String(raw || "").trim().toUpperCase();
@@ -472,6 +479,37 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
     });
   }
 
+  /**
+   * ⚠️ REFUS EN FERMETURE QUAND AUCUNE TRANSACTION N'EST DISPONIBLE — voir la
+   * justification détaillée dans `cagnotteSettlementController.js`. Sans session
+   * partagée, l'écriture au grand livre sortirait de la transaction qui porte le
+   * crédit du portefeuille.
+   */
+  if (!canUseSharedSession(getUsersConn, getTxConn)) {
+    logger.error(
+      "[cagnotte][vault-withdrawal] REFUS : session atomique indisponible",
+      {
+        reference: ref,
+        consequence:
+          "le grand livre s'écrirait hors transaction ; aucun mouvement n'a eu lieu",
+      }
+    );
+
+    return res.status(503).json({
+      success: false,
+      code: "ATOMIC_SESSION_UNAVAILABLE",
+      error:
+        "Retrait de coffre refusé : les deux bases ne partagent pas de session " +
+        "Mongo, le crédit du portefeuille et l'écriture au grand livre ne " +
+        "peuvent donc pas être atomiques. Vérifier MONGO_SHARE_CLIENT.",
+    });
+  }
+
+  const settlementId = settlementObjectIdFromReference(
+    ref,
+    "cagnotte.vaultWithdrawal"
+  );
+
   const existingByReference =
     await CagnotteVaultWithdrawalSettlement.findOne({ reference: ref }).lean();
 
@@ -550,6 +588,7 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
       const settlementDocs = await CagnotteVaultWithdrawalSettlement.create(
         [
           {
+            _id: settlementId,
             reference: ref,
             idempotencyKey: idem,
             userId: beneficiaryUserId,
@@ -589,6 +628,31 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
         ],
         { session }
       );
+
+      /**
+       * ⚠️ LE GRAND LIVRE, DANS LA MÊME TRANSACTION.
+       *
+       * Jusqu'au 2026-09-09, ce contrôleur créditait un portefeuille et écrivait
+       * un règlement `confirmed` sans poser une seule `LedgerEntry` (invariants
+       * 2 et 4). C'est la jambe de RETOUR de la participation : elle vide la
+       * compensation cagnotte que la participation avait remplie.
+       */
+      await postCagnotteVaultWithdrawalEntries({
+        settlementId: settlementDocs[0]._id,
+        reference: ref,
+        beneficiary: {
+          userId: beneficiaryUserId,
+          amount: creditAmount,
+          currency: creditCurrency,
+        },
+        metadata: {
+          settlementKind: "cagnotte_vault_withdrawal",
+          cagnotteId: cId,
+          vaultId: vId,
+          mode: m,
+        },
+        session,
+      });
 
       return settlementDocs[0];
     });

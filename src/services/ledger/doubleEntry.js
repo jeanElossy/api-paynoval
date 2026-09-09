@@ -182,6 +182,39 @@ function systemClearingAccountId(currency) {
   return `system_clearing:${normCurrency(currency)}`;
 }
 
+/**
+ * ============================================================================
+ * COMPENSATION DÉDIÉE AUX CAGNOTTES — POURQUOI PAS LE CLEARING GÉNÉRAL
+ * ============================================================================
+ *
+ * Une cagnotte tient ses fonds dans un `Vault`, et ce coffre vit dans le
+ * BACKEND PRINCIPAL, pas dans TX Core. Vu d'ici, l'argent d'une participation
+ * quitte le portefeuille du payeur et n'atterrit sur aucun compte que TX Core
+ * connaisse — il revient plus tard, au retrait du coffre, sur le portefeuille
+ * du bénéficiaire.
+ *
+ * C'est exactement la définition d'un compte de compensation : des fonds en
+ * transit. Mais les faire transiter par `system_clearing:<devise>` détruirait
+ * l'information que ce compte porte. Son solde par devise sert à répondre à
+ * « des fonds sont-ils restés bloqués en transit ? » : il doit revenir à zéro.
+ * Or l'encours des cagnottes est LÉGITIMEMENT non nul, et durablement — une
+ * cagnotte ouverte six mois, ce sont six mois d'encours. Le mélange donnerait au
+ * clearing général un plancher permanent, et le seul indicateur capable de
+ * signaler un virement bloqué deviendrait illisible.
+ *
+ * D'où un compte distinct. Même TYPE (`SYSTEM_CLEARING` — aucun changement
+ * d'énumération, aucune migration), identifiant distinct. Et son solde devient
+ * une grandeur vérifiable en soi :
+ *
+ *     solde de `system_clearing:CAGNOTTE_VAULT:<devise>`
+ *       ==  somme des coffres de cagnottes non encore retirés, dans cette devise
+ *
+ * Un écart entre les deux est un défaut de règlement, et il devient mesurable.
+ */
+function cagnotteVaultClearingAccountId(currency) {
+  return `system_clearing:CAGNOTTE_VAULT:${normCurrency(currency)}`;
+}
+
 function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
   return `treasury:${String(treasurySystemType || "").trim().toUpperCase()}:${normId(
     treasuryUserId
@@ -526,6 +559,7 @@ module.exports = {
   userWalletAccountId,
   systemReserveAccountId,
   systemClearingAccountId,
+  cagnotteVaultClearingAccountId,
   treasuryAccountId,
 
   summarizeLegs,
