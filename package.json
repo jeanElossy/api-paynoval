@@ -41,7 +41,7 @@
     "http-errors": "^2.0.0",
     "ioredis": "^5.8.1",
     "joi": "^17.13.3",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.3.2",
     "jsonwebtoken": "^9.0.0",
     "lru-cache": "^11.1.0",
     "mongoose": "^7.8.7",
