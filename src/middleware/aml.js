@@ -691,6 +691,104 @@ async function safeSendFraudAlert(payload) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Criblage sanctions / PEP / listes de surveillance                          */
+/* -------------------------------------------------------------------------- */
+
+const {
+  screenTransactionCounterparties,
+} = require("../services/risk/sanctionsScreening");
+
+/**
+ * ============================================================================
+ * LE CRIBLAGE VIT ICI, PAS AU BORD — ET IL ÉCHOUE EN FERMETURE
+ * ============================================================================
+ *
+ * ── D'où il vient ───────────────────────────────────────────────────────────
+ *
+ * Ce contrôle a vécu jusqu'au 2026-09-10 dans `middlewares/aml.js` de la
+ * passerelle, qui en était le SEUL porteur : Tx-Core n'avait aucun criblage.
+ * Il existait donc deux AML — 1 530 lignes au bord, 1 533 ici, 1 234 lignes de
+ * divergence — que chaque virement traversait tous les deux, et un seul des
+ * deux criblait.
+ *
+ * Un contrôle de conformité au bord protège ce qui passe par le bord. Ici, il
+ * est adjacent au grand livre : aucun chemin ne déplace d'argent sans l'avoir
+ * traversé (invariant A12).
+ *
+ * ── Pourquoi cette enveloppe existe ─────────────────────────────────────────
+ *
+ * `screenTransactionCounterparties` gère lui-même l'indisponibilité de son
+ * fournisseur, en honorant `SANCTIONS_SCREENING_FAIL_CLOSED`. Ce qu'il ne gère
+ * pas, c'est SA PROPRE exception — un défaut de code, une réponse inattendue,
+ * un `undefined` déréférencé.
+ *
+ * La version du bord répondait à ce cas par `blocked: false, reviewRequired:
+ * true` : autrement dit, une panne du criblage laissait passer l'opération.
+ * C'est un repli silencieux sur le chemin de l'argent (règles B.1 et B.2). Ici
+ * la posture d'exception suit la MÊME variable que la posture d'indisponibilité :
+ * si l'exploitant a demandé la fermeture, une exception ferme.
+ */
+function screeningFailClosed() {
+  const brut = process.env.SANCTIONS_SCREENING_FAIL_CLOSED;
+
+  /**
+   * Défaut `false` — identique à celui du service lui-même. Le relever ici
+   * ferait diverger deux réponses à la même question, ce qui est précisément
+   * le défaut qu'on referme. La conséquence d'un défaut à `false` est annoncée
+   * au démarrage par `server.js`.
+   */
+  if (brut === undefined || String(brut).trim() === "") return false;
+
+  return ["1", "true", "yes", "on"].includes(String(brut).trim().toLowerCase());
+}
+
+async function runSanctionsScreening({
+  user,
+  body,
+  provider,
+  amount,
+  currencyCode,
+  toEmail,
+  iban,
+  phoneNumber,
+  destinationCountryISO,
+  names,
+}) {
+  try {
+    return await screenTransactionCounterparties({
+      user,
+      body,
+      provider,
+      amount,
+      currencyCode,
+      toEmail,
+      iban,
+      phoneNumber,
+      destinationCountryISO,
+      names,
+    });
+  } catch (err) {
+    const ferme = screeningFailClosed();
+
+    logger.error("[AML] Criblage sanctions — exception", {
+      provider,
+      userId: getUserId(user),
+      failClosed: ferme,
+      error: err?.message || String(err),
+    });
+
+    return {
+      enabled: false,
+      checked: false,
+      blocked: ferme,
+      reviewRequired: true,
+      reason: "SANCTIONS_SCREENING_EXCEPTION",
+      hits: [],
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Middleware AML                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -900,6 +998,115 @@ module.exports = async function amlMiddleware(req, res, next) {
         error:
           "Impossible d’effectuer la transaction : bénéficiaire sur liste de surveillance.",
         code: "PEP_SANCTIONED",
+      });
+    }
+
+    /**
+     * Le criblage se place APRÈS la porte PEP interne et AVANT la liste noire :
+     * l'ordre du bord, conservé tel quel. Le déplacer changerait le code
+     * d'erreur rendu à un utilisateur qui déclenche plusieurs portes à la fois
+     * — ce que le back-office de conformité lit pour trier ses dossiers.
+     */
+    const sanctionsScreening = await runSanctionsScreening({
+      user,
+      body,
+      provider,
+      amount,
+      currencyCode,
+      toEmail,
+      iban,
+      phoneNumber,
+      destinationCountryISO,
+      names,
+    });
+
+    req.sanctionsScreening = sanctionsScreening;
+
+    if (sanctionsScreening.blocked) {
+      logger.warn("[AML] Criblage sanctions bloquant", {
+        provider,
+        userId,
+        reason: sanctionsScreening.reason,
+        maxScore: sanctionsScreening.maxScore,
+      });
+
+      await logTransaction({
+        userId,
+        type: "initiate",
+        provider,
+        amount,
+        currency: currencyCode,
+        toEmail,
+        details: maskSensitive({
+          ...body,
+          sanctionsScreening: {
+            reason: sanctionsScreening.reason,
+            maxScore: sanctionsScreening.maxScore,
+            hits: sanctionsScreening.hits?.slice?.(0, 5) || [],
+          },
+        }),
+        flagged: true,
+        flagReason: `Sanctions screening: ${sanctionsScreening.reason}`,
+        ip: req.ip,
+      });
+
+      await safeSendFraudAlert({
+        user,
+        type: "sanctions_screening_blocked",
+        provider,
+        reason: sanctionsScreening.reason,
+        hits: sanctionsScreening.hits?.slice?.(0, 3) || [],
+      });
+
+      return res.status(403).json({
+        success: false,
+        error:
+          "Transaction bloquée pour vérification conformité. Veuillez contacter le support.",
+        code: "SANCTIONS_SCREENING_BLOCKED",
+      });
+    }
+
+    if (sanctionsScreening.reviewRequired) {
+      logger.warn("[AML] Criblage sanctions — revue manuelle requise", {
+        provider,
+        userId,
+        reason: sanctionsScreening.reason,
+        maxScore: sanctionsScreening.maxScore,
+      });
+
+      await logTransaction({
+        userId,
+        type: "initiate",
+        provider,
+        amount,
+        currency: currencyCode,
+        toEmail,
+        details: maskSensitive({
+          ...body,
+          sanctionsScreening: {
+            reason: sanctionsScreening.reason,
+            maxScore: sanctionsScreening.maxScore,
+            hits: sanctionsScreening.hits?.slice?.(0, 5) || [],
+          },
+        }),
+        flagged: true,
+        flagReason: `Revue conformité requise: ${sanctionsScreening.reason}`,
+        ip: req.ip,
+      });
+
+      await safeSendFraudAlert({
+        user,
+        type: "sanctions_screening_review",
+        provider,
+        reason: sanctionsScreening.reason,
+        hits: sanctionsScreening.hits?.slice?.(0, 3) || [],
+      });
+
+      return res.status(428).json({
+        success: false,
+        error:
+          "Transaction mise en attente pour revue conformité. Notre équipe vérifiera votre opération.",
+        code: "COMPLIANCE_REVIEW_REQUIRED",
       });
     }
 

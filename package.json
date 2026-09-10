@@ -17,7 +17,12 @@
     "indexes:apply": "node scripts/ensureIndexes.js --apply",
     "indexes:ledger": "node scripts/ensure-ledger-indexes.js --apply",
     "indexes:prune": "node scripts/dropRedundantTransactionIndexes.js",
-    "indexes:prune:webhooks": "node scripts/dropRedundantWebhookIndexes.js"
+    "indexes:prune:webhooks": "node scripts/dropRedundantWebhookIndexes.js",
+    "worker:risk": "node workers/riskMonitor.js",
+    "worker:settlement": "node workers/settlementMonitor.js",
+    "worker:referral": "node workers/referralAward.js",
+    "worker:notifications": "node workers/notificationDispatch.js",
+    "workers:all": "node workers/all.js"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

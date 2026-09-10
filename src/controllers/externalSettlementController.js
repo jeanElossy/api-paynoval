@@ -17,6 +17,7 @@
 
 const createError = require("http-errors");
 
+const { publishDomainEvent } = require("../services/events/publisher");
 const runtime = require("../services/transactions/shared/runtime");
 const { canTransition } = require("../services/transactionStateMachine");
 const logger = require("../utils/logger");
@@ -43,10 +44,6 @@ const {
   isOutboundExternalFlow,
   isInboundExternalFlow,
 } = require("../services/transactions/handlers/flowHelpers");
-
-const {
-  enqueueReferralActivityEvent,
-} = require("../services/referral/referralEventOutbox");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
 const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
@@ -356,19 +353,50 @@ async function abortAndEnd(session) {
 }
 
 /**
- * Met l'evenement de parrainage en file, dans le regime de session de
- * l'appelant.
+ * Publie l'événement de parrainage, dans le régime de session de l'appelant.
  *
- * Remplace l'appel HTTP en ligne au backend principal, qui n'avait ni file ni
- * reprise : une indisponibilite momentanee du principal faisait perdre
- * l'evenement definitivement.
+ * ── Historique ──────────────────────────────────────────────────────────────
+ *
+ * 1. Appel HTTP en ligne au backend principal — ni file ni reprise : une
+ *    indisponibilité momentanée du principal perdait l'événement DÉFINITIVEMENT.
+ * 2. Outbox transactionnel privé (`outboxes`, `service: "referral"`).
+ * 3. Bus d'événements partagé, depuis le 2026-09-10.
+ *
+ * ⚠️ Le passage de 2 à 3 change le TRANSPORT, pas la garantie : l'écriture
+ * reste dans la session de l'appelant, donc dans la même transaction que le
+ * règlement. L'équivalence « règlement acquis ⟺ événement existe » tient.
+ *
+ * ⚠️ `sessionOpts` est de la forme `{ session }` (ou `{}` hors transaction) ;
+ * `publishDomainEvent` attend la SESSION elle-même. Passer l'objet entier ferait
+ * sortir l'écriture de la transaction — en silence, car Mongoose ignorerait un
+ * second argument qu'il ne reconnaît pas.
  */
 async function runReferralSync(tx, sessionOpts = {}) {
   try {
-    return await enqueueReferralActivityEvent({
-      transaction: tx,
-      sessionOpts,
-    });
+    const refereeId = String(tx?.userId || tx?.sender || "").trim();
+
+    if (!refereeId) {
+      return { enqueued: false, reason: "MISSING_IDENTIFIERS" };
+    }
+
+    await publishDomainEvent(
+      {
+        name: "referral.activity.confirmed.v1",
+        aggregateId: String(tx._id),
+        occurredAt: tx.confirmedAt || new Date(),
+        payload: {
+          refereeId,
+          triggerTxId: String(tx._id),
+          reference: String(tx.reference || ""),
+          flow: String(tx.flow || ""),
+          confirmedAt: (tx.confirmedAt || new Date()).toISOString(),
+          correlationId: `referral-${String(tx._id)}`,
+        },
+      },
+      sessionOpts?.session || null
+    );
+
+    return { enqueued: true, transport: "event-bus" };
   } catch (err) {
     return buildReferralSyncError(err);
   }
@@ -462,7 +490,8 @@ async function settleOutboundSuccess({
   await notifyParties(tx, "confirmed", session, notifyCurrency);
 
   // Mise en file AVANT le commit : l'evenement de parrainage est solidaire de
-  // la confirmation. Voir referralEventOutbox pour le detail du motif.
+  // la confirmation. Motif « outbox transactionnel » : voir l'en-tete de
+  // services/events/publisher.js, qui porte desormais cette garantie.
   const referralSync = await runReferralSync(tx, sessOpts);
 
   return {
@@ -548,7 +577,8 @@ async function settleInboundSuccess({
   await notifyParties(tx, "confirmed", session, notifyCurrency);
 
   // Mise en file AVANT le commit : l'evenement de parrainage est solidaire de
-  // la confirmation. Voir referralEventOutbox pour le detail du motif.
+  // la confirmation. Motif « outbox transactionnel » : voir l'en-tete de
+  // services/events/publisher.js, qui porte desormais cette garantie.
   const referralSync = await runReferralSync(tx, sessOpts);
 
   return {

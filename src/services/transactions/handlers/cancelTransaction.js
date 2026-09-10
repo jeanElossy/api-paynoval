@@ -15,6 +15,7 @@ const { logTransaction, releaseSenderReserve, chargeCancellationFee, convertAmou
 const { Transaction } = runtime.lazyModels(["Transaction"]);
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
+const { publishDomainEvent } = require("../../events/publisher");
 const { sanitize, toFloat, round2 } = require("../shared/helpers");
 
 const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
@@ -647,6 +648,30 @@ async function cancelController(req, res, next) {
        * émise en direct — c'est le worker qui draine l'Outbox après le commit.
        */
       await notifyTransactionEvent(tx, "cancelled", sess, sourceCurrency);
+
+      /**
+       * Événement de domaine, sous la même session. Une annulation LIBÈRE DES
+       * FONDS RÉSERVÉS : c'est un mouvement d'argent, et la surveillance doit
+       * le voir au même titre qu'une initiation — un compte qui initie puis
+       * annule en série est un motif à part entière.
+       */
+      await publishDomainEvent(
+        {
+          name: "transaction.cancelled.v1",
+          aggregateId: String(tx._id),
+          occurredAt: new Date(),
+          payload: {
+            transactionId: String(tx._id),
+            reference: tx.reference || "",
+            senderId: String(tx.sender || ""),
+            amount: Number(grossSource ?? 0),
+            currency: String(sourceCurrency || ""),
+            reason: String(tx.cancelReason || tx.providerStatus || "CANCELLED"),
+            cancelledAt: new Date().toISOString(),
+          },
+        },
+        sess
+      );
 
       return {
         success: true,

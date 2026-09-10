@@ -41,142 +41,21 @@ const {
 
 const { WORKERS, declareWorker } = require("../workerMetrics");
 
-function normalizeBaseUrl(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\/+$/, "");
-}
-
-function pickFirstEnv(...keys) {
-  for (const key of keys) {
-    const value = process.env[key];
-    if (String(value || "").trim()) return String(value).trim();
-  }
-  return "";
-}
-
-function getPrincipalBaseUrl() {
-  return normalizeBaseUrl(
-    pickFirstEnv(
-      "PRINCIPAL_REFERRAL_BASE_URL",
-      "PRINCIPAL_API_BASE_URL",
-      "PRINCIPAL_BASE_URL",
-      "MAIN_BACKEND_BASE_URL"
-    )
-  );
-}
-
-function getPrincipalInternalToken() {
-  return pickFirstEnv(
-    "PRINCIPAL_INTERNAL_TOKEN",
-    "INTERNAL_REFERRAL_TOKEN",
-    "INTERNAL_TOKEN"
-  );
-}
-
-function getRequestTimeoutMs() {
-  const raw = Number(
-    pickFirstEnv("REFERRAL_OUTBOX_HTTP_TIMEOUT_MS", "INTERNAL_HTTP_TIMEOUT_MS") ||
-      15000
-  );
-  return Number.isFinite(raw) && raw > 0 ? raw : 15000;
-}
-
-function buildUrl(baseUrl, path) {
-  const base = normalizeBaseUrl(baseUrl);
-
-  if (/\/api\/v1$/i.test(base) && /^\/api\/v1\//i.test(path)) {
-    return `${base.replace(/\/api\/v1$/i, "")}${path}`;
-  }
-
-  return `${base}${path}`;
-}
-
-async function readJsonSafe(response) {
-  const text = await response.text();
-  if (!text) return null;
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text.slice(0, 2000) };
-  }
-}
-
 /**
- * Livre un événement au backend principal.
+ * ⚠️ LA LIVRAISON A ÉTÉ EXTRAITE — 2026-09-10.
  *
- * LE CORPS NE CONTIENT NI MONTANT NI STATISTIQUE. Uniquement l'identité du
- * filleul, la transaction déclenchante et l'identifiant de corrélation. C'est la
- * traduction concrète du zero-trust : même si ce transport était détourné,
- * l'attaquant ne pourrait rien choisir d'autre que « réévalue ce filleul » — ce
- * que le principal fait de toute façon à partir de ses propres données.
+ * Elle vit dans `referralDelivery.js` parce que DEUX transports l'appellent
+ * pendant la migration vers le bus : ce worker, qui draine le reliquat de
+ * l'outbox, et `referralConsumer.js`, qui lit le flux. La recopier aurait
+ * produit deux politiques de délai et deux traitements du 4xx.
  */
-async function deliverItem(item) {
-  const baseUrl = getPrincipalBaseUrl();
-  const token = getPrincipalInternalToken();
-
-  if (!baseUrl) {
-    throw Object.assign(new Error("PRINCIPAL_BASE_URL_MISSING"), {
-      code: "PRINCIPAL_BASE_URL_MISSING",
-    });
-  }
-
-  if (!token) {
-    throw Object.assign(new Error("PRINCIPAL_INTERNAL_TOKEN_MISSING"), {
-      code: "PRINCIPAL_INTERNAL_TOKEN_MISSING",
-    });
-  }
-
-  const payload = item?.payload || {};
-  const correlationId = String(payload.correlationId || "");
-
-  const url = buildUrl(baseUrl, "/api/v1/internal/referral/award-bonus");
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), getRequestTimeoutMs());
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-internal-token": token,
-        "x-correlation-id": correlationId,
-      },
-      body: JSON.stringify({
-        refereeId: String(payload.refereeId || ""),
-        triggerTxId: String(payload.triggerTxId || ""),
-        correlationId,
-      }),
-      signal: controller.signal,
-    });
-
-    const data = await readJsonSafe(response);
-
-    if (!response.ok) {
-      /**
-       * Un 4xx ne se rejoue pas : la demande est malformée ou refusée sur le
-       * fond, la répéter à l'identique donnerait le même résultat. On abandonne
-       * immédiatement plutôt que d'épuiser dix tentatives pour rien.
-       */
-      const permanent = response.status >= 400 && response.status < 500;
-
-      throw Object.assign(
-        new Error(
-          `PRINCIPAL_HTTP_${response.status}:${
-            data?.code || data?.error || "UNKNOWN"
-          }`
-        ),
-        { code: `PRINCIPAL_HTTP_${response.status}`, permanent }
-      );
-    }
-
-    return { ok: true, data };
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const {
+  deliverItem,
+  getPrincipalBaseUrl,
+  getPrincipalInternalToken,
+  getRequestTimeoutMs,
+  buildUrl,
+} = require("./referralDelivery");
 
 /**
  * Traite un lot d'événements en attente.

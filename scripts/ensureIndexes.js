@@ -26,12 +26,27 @@
  * fait rien.
  *
  * ── Usage ─────────────────────────────────────────────────────────────────
- *   node scripts/ensureIndexes.js              # SIMULATION (défaut)
- *   node scripts/ensureIndexes.js --apply      # pose réellement
+ *   node scripts/ensureIndexes.js                        # SIMULATION (défaut)
+ *   node scripts/ensureIndexes.js --apply                # pose TOUT
+ *   node scripts/ensureIndexes.js --only=DomainEvent,ProcessedEvent --apply
  *
  * Le défaut est la simulation, et c'est délibéré : sur une grosse collection,
  * une construction d'index lancée par mégarde se paie en latence de production.
  * Ce qui coûte cher ne doit pas être le comportement par défaut.
+ *
+ * ── Pourquoi `--only` existe ──────────────────────────────────────────────
+ *
+ * L'en-tête de ce script dit « en heure creuse, on suit la construction, on
+ * l'interrompt si elle pèse ». Cela suppose de pouvoir poser PAR TRANCHES —
+ * or il n'y avait que « tout ou rien », et 56 index à poser au 2026-09-10.
+ *
+ * Concrètement : quelqu'un qui veut poser les cinq index d'un sous-système
+ * qu'il vient d'ajouter n'a pas à décider en même temps du sort de cinquante et
+ * un index sur des collections qu'il n'a pas regardées. Un outil qui force à
+ * tout faire d'un coup ne se lance pas — et les index restent absents.
+ *
+ * ⚠️ `--only` FILTRE, il n'INVENTE rien : un nom de modèle inconnu fait échouer
+ * le script au lieu de poser zéro index en annonçant un succès.
  */
 
 const mongoose = require("mongoose");
@@ -39,6 +54,25 @@ const config = require("../src/config");
 const { comparerIndex, empreinteIndex } = require("../src/services/indexAudit");
 
 const APPLIQUER = process.argv.includes("--apply");
+
+/** `--only=A,B` → Set(["A","B"]) ; absent → `null` (aucun filtre). */
+const SEULEMENT = (() => {
+  const arg = process.argv.find((a) => a.startsWith("--only="));
+  if (!arg) return null;
+
+  const noms = arg
+    .slice("--only=".length)
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean);
+
+  if (!noms.length) {
+    console.error("⛔ `--only=` est vide. Rien n'est tenté.");
+    process.exit(1);
+  }
+
+  return new Set(noms);
+})();
 
 async function main() {
   config.load({ strict: false });
@@ -67,7 +101,35 @@ async function main() {
   let poses = 0;
   let echecs = 0;
 
+  if (SEULEMENT) {
+    /**
+     * ⚠️ ON VÉRIFIE QUE CHAQUE NOM DEMANDÉ EXISTE, ET ON S'ARRÊTE SINON.
+     *
+     * Une faute de frappe — « DomainEvents » au lieu de « DomainEvent » — ferait
+     * sinon poser zéro index et afficher « 0 à poser », c'est-à-dire un succès
+     * apparent. L'exploitant conclurait que les index sont en place. C'est la
+     * classe de panne la plus chère : celle qui a l'air d'avoir marché.
+     */
+    const connus = new Set(Object.keys(conn.models));
+    const inconnus = [...SEULEMENT].filter((n) => !connus.has(n));
+
+    if (inconnus.length) {
+      console.error(
+        `\n  ⛔ Modèle(s) inconnu(s) : ${inconnus.join(", ")}` +
+          `\n     Modèles disponibles : ${[...connus].sort().join(", ")}\n`
+      );
+
+      await conn.close();
+      process.exit(1);
+    }
+
+    console.log(`  Filtre --only : ${[...SEULEMENT].join(", ")}`);
+    console.log("  " + "─".repeat(60));
+  }
+
   for (const nom of Object.keys(conn.models)) {
+    if (SEULEMENT && !SEULEMENT.has(nom)) continue;
+
     const modele = conn.models[nom];
     const declares = modele.schema.indexes();
     if (!declares.length) continue;

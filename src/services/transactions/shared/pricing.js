@@ -1,13 +1,17 @@
 "use strict";
 
-const axios = require("axios");
 const createError = require("http-errors");
 
 const runtime = require("./runtime");
 
 const logger = runtime.logger;
-const INTERNAL_TOKEN = runtime.INTERNAL_TOKEN;
-const GATEWAY_URL = runtime.GATEWAY_URL;
+/*
+ * `axios`, `INTERNAL_TOKEN`, `GATEWAY_URL` et `getGatewayBase` ne sont plus
+ * importés : ce module ne parle plus à la passerelle. Le devis se calcule dans
+ * le processus depuis le 2026-09-10 — c'est la disparition de ces quatre
+ * symboles qui MESURE le correctif. Tant qu'ils étaient là, l'inversion de
+ * dépendance pouvait revenir en une ligne.
+ */
 const normalizePricingSnapshot = runtime.normalizePricingSnapshot;
 const buildTreasuryRevenueBreakdown = runtime.buildTreasuryRevenueBreakdown;
 
@@ -20,7 +24,6 @@ if (typeof buildTreasuryRevenueBreakdown !== "function") {
 const {
   toFloat,
   roundMoney,
-  getGatewayBase,
   normalizeTxTypeValue,
   inferMethodValue,
   pickCurrency,
@@ -76,55 +79,99 @@ function pickBodyPricingInput(reqBody = {}) {
   };
 }
 
+/**
+ * ============================================================================
+ * LE DEVIS EST UN APPEL DE FONCTION, PLUS UN APPEL RÉSEAU
+ * ============================================================================
+ *
+ * ── Ce que cette fonction faisait ───────────────────────────────────────────
+ *
+ * Elle postait sur `${GATEWAY_URL}/pricing/quote` — c'est-à-dire que **le
+ * moteur d'argent appelait le bord** :
+ *
+ *     Mobile ──► Gateway ──► Tx-Core ──► Gateway ──► base tarification
+ *                                          ▲
+ *                                  dépendance qui REMONTE
+ *
+ * Quatre conséquences, toutes constatées :
+ *
+ *   1. une panne de la passerelle arrêtait les virements DEPUIS L'INTÉRIEUR du
+ *      moteur — ce service l'annonçait lui-même au démarrage : « GATEWAY_URL
+ *      absente ⇒ toute transaction nécessitant un devis échouera en 503 » ;
+ *   2. la passerelle ne pouvait plus être redéployée ni redémarrée seule ;
+ *   3. un saut réseau de 12 s de délai maximal était posé au milieu du chemin
+ *      de l'argent, pour une lecture ;
+ *   4. la base de tarification vivait sur la surface la plus exposée
+ *      d'Internet.
+ *
+ * ── Ce qui la remplace ──────────────────────────────────────────────────────
+ *
+ * Le domaine des prix appartient désormais à Tx-Core
+ * (`services/pricing/`, base `MONGO_URI_PRICING`). Le devis se calcule dans le
+ * processus. Plus de réseau, plus de jeton à porter, plus de délai d'attente,
+ * et plus d'inversion de dépendance : bord → services → moteur, jamais
+ * l'inverse — la règle que tiennent Stripe, PayPal et Adyen.
+ *
+ * ── Ce qui NE change pas, et c'est important ────────────────────────────────
+ *
+ * La signature, le contrat de retour et surtout `extractPricingBundle`, qui
+ * VALIDE le devis avant de s'en servir. Un devis calculé sur place n'est pas
+ * plus digne de confiance qu'un devis reçu par le réseau : un barème absent ou
+ * un taux indisponible doivent toujours arrêter l'opération, jamais produire un
+ * prix de zéro (règle B.2).
+ *
+ * `authHeader` reste accepté et ignoré : les appelants le passent encore, et
+ * changer leur signature dans le même mouvement aurait mêlé deux corrections.
+ */
 async function fetchPricingQuoteFromGateway({ authHeader, pricingInput }) {
-  const gatewayBase = getGatewayBase(GATEWAY_URL);
-  const url = `${gatewayBase}/pricing/quote`;
-
-  const headers = {
-    "Content-Type": "application/json",
-    ...(authHeader ? { Authorization: authHeader } : {}),
-    ...(INTERNAL_TOKEN ? { "x-internal-token": INTERNAL_TOKEN } : {}),
-  };
-
-  logger?.info?.("[TX-CORE][PRICING_CALL]", {
-    url,
-    hasAuthHeader: !!authHeader,
-    hasInternalToken: !!INTERNAL_TOKEN,
-    pricingInput,
-  });
+  const {
+    buildRequest,
+    validateRequest,
+    computeFullQuote,
+    buildQuoteResponsePayload,
+  } = require("../../pricing/quoteService");
 
   try {
-    const response = await axios.post(url, pricingInput, {
-      headers,
-      timeout: 12000,
-    });
+    const request = buildRequest(pricingInput || {});
+    const erreurDeForme = validateRequest(request);
 
-    const payload = response?.data || {};
-    if (payload.ok === false || payload.success === false) {
-      throw createError(
-        502,
-        payload.error || payload.message || "Erreur pricing gateway"
-      );
+    if (erreurDeForme) {
+      throw createError(400, erreurDeForme);
     }
 
-    return payload;
-  } catch (err) {
-    const status = err?.response?.status;
-    const payloadMessage =
-      err?.response?.data?.error ||
-      err?.response?.data?.message ||
-      err?.message ||
-      "Erreur pricing gateway";
+    const devis = await computeFullQuote({
+      request,
+      requestId: String(pricingInput?.requestId || ""),
+    });
 
-    logger?.error?.("[TX-CORE][PRICING_CALL][ERROR]", {
+    /**
+     * On rend la MÊME forme que l'ancienne réponse HTTP. `extractPricingBundle`
+     * en aval lit `request`, `result`, `ruleApplied`, `fxRuleApplied` et
+     * `debug` : changer la forme ici aurait obligé à toucher la validation dans
+     * le même mouvement, et une correction d'architecture ne se mêle pas à une
+     * correction de contrat.
+     */
+    return buildQuoteResponsePayload({ quote: devis });
+  } catch (err) {
+    /**
+     * Les erreurs du service de devis portent déjà un `status` (404 corridor
+     * non couvert, 503 taux indisponible). On le préserve : le remplacer par un
+     * 502 générique ferait perdre l'information qui permet à l'appelant de
+     * distinguer « ce corridor n'est pas tarifé » de « le service de change est
+     * en panne ».
+     */
+    const status =
+      err?.status || err?.statusCode || (err?.expose ? err.status : null);
+
+    logger?.error?.("[TX-CORE][PRICING][ERREUR]", {
       status: status || 502,
-      message: payloadMessage,
-      responseData: err?.response?.data || null,
+      message: err?.message,
+      pricingInput,
     });
 
     throw createError(
       status && status >= 400 && status < 600 ? status : 502,
-      payloadMessage
+      err?.message || "Calcul de tarification impossible"
     );
   }
 }

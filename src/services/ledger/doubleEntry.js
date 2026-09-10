@@ -215,6 +215,62 @@ function cagnotteVaultClearingAccountId(currency) {
   return `system_clearing:CAGNOTTE_VAULT:${normCurrency(currency)}`;
 }
 
+/**
+ * ============================================================================
+ * ENTRÉE PRESTATAIRE — LA CONTREPARTIE D'UN ENCAISSEMENT EXTERNE
+ * ============================================================================
+ *
+ * Quand de l'argent ENTRE dans PayNoval depuis l'extérieur — un dépôt mobile
+ * money, un encaissement par carte, une participation à une cagnotte par lien
+ * public — aucun portefeuille interne n'est débité : les fonds viennent d'un
+ * tiers. Il faut pourtant une contrepartie, sans quoi le lot d'écritures ne
+ * s'équilibre pas et `assertBalanced` le refuse.
+ *
+ * Ce compte EST cette contrepartie. Il représente ce que le prestataire nous
+ * doit, ou nous a versé sans que ce soit encore réglé.
+ *
+ * ── Pourquoi un compte SÉPARÉ, par rail ─────────────────────────────────────
+ *
+ * Exactement le raisonnement de `cagnotteVaultClearingAccountId` ci-dessus.
+ * Le solde de `system_clearing:<devise>` sert à répondre à « des fonds
+ * sont-ils restés bloqués en transit ? » : il doit revenir à zéro. Or l'encours
+ * d'un prestataire est LÉGITIMEMENT non nul entre l'encaissement et le
+ * versement de règlement — c'est le flottant, et il peut durer des jours.
+ * Les mélanger donnerait au clearing général un plancher permanent, et
+ * l'indicateur le plus utile du système deviendrait illisible.
+ *
+ * La ventilation PAR RAIL n'est pas cosmétique non plus : le rapprochement se
+ * fait prestataire par prestataire (`providerReconciliationService`), et un
+ * solde global ne se rapproche de rien. Avec un compte par rail :
+ *
+ *     solde de `system_clearing:PROVIDER_INBOUND:<RAIL>:<devise>`
+ *       ==  ce que ce rail a encaissé pour nous et pas encore reversé
+ *
+ * Un écart entre ce solde et le relevé du prestataire est un défaut de
+ * règlement, et il devient mesurable au lieu d'être noyé.
+ *
+ * ⚠️ Même TYPE (`SYSTEM_CLEARING`) : aucun changement d'énumération, aucune
+ * migration. Seul l'identifiant est distinct — c'est le motif déjà retenu pour
+ * les cagnottes, et il n'y a aucune raison d'en inventer un second.
+ */
+function providerInboundClearingAccountId(rail, currency) {
+  const r = String(rail || "").trim().toUpperCase();
+
+  if (!r) {
+    /**
+     * Règle B.2 : une écriture financière sans rail identifié ne prend pas de
+     * valeur par défaut. Un `PROVIDER_INBOUND::XOF` se rapprocherait de rien et
+     * polluerait le rapprochement de tous les rails à la fois.
+     */
+    throw new Error(
+      "providerInboundClearingAccountId : rail absent. Un encaissement externe " +
+        "sans rail identifié ne peut être rapproché d'aucun relevé prestataire."
+    );
+  }
+
+  return `system_clearing:PROVIDER_INBOUND:${r}:${normCurrency(currency)}`;
+}
+
 function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
   return `treasury:${String(treasurySystemType || "").trim().toUpperCase()}:${normId(
     treasuryUserId
@@ -560,6 +616,7 @@ module.exports = {
   systemReserveAccountId,
   systemClearingAccountId,
   cagnotteVaultClearingAccountId,
+  providerInboundClearingAccountId,
   treasuryAccountId,
 
   summarizeLegs,

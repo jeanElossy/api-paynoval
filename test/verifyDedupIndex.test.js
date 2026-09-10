@@ -92,7 +92,7 @@ test("le message d'absence dit POURQUOI c'est grave", () => {
 });
 
 /* ==========================================================================
- * LE CONTRÔLE GÉNÉRALISÉ — DEUX CONTRAINTES D'INTÉGRITÉ, PAS UNE
+ * LE CONTRÔLE GÉNÉRALISÉ — CINQ CONTRAINTES D'INTÉGRITÉ, PAS UNE
  * ======================================================================== */
 
 const {
@@ -101,7 +101,7 @@ const {
   formatCriticalIndexesReport,
 } = require("../src/services/ledger/verifyDedupIndex");
 
-test("les trois contraintes d'intégrité sont surveillées", () => {
+test("les cinq contraintes d'intégrité sont surveillées", () => {
   /**
    * Elles partagent la même propriété redoutable : leur absence ne se voit pas.
    * Le code continue de fonctionner, il se comporte simplement comme s'il avait
@@ -114,6 +114,30 @@ test("les trois contraintes d'intégrité sont surveillées", () => {
    * repose sur le `E11000` qu'il produit — sans lui, ce `E11000` ne survient
    * jamais et le dédoublonnage est muet.
    *
+   * `processed_events.uniq_processed_event` a rejoint la liste le 2026-09-10,
+   * avec le bus d'événements. Même famille exactement : `services/events/consumer.js`
+   * refuse de démarrer un consommateur sans stratégie de dédoublonnage, mais
+   * cette stratégie est un « lire puis écrire » — et entre les deux il y a une
+   * fenêtre. Deux instances du même groupe qui réclament le même message
+   * abandonné au même instant passent toutes deux la lecture. C'est l'index
+   * UNIQUE qui referme la fenêtre, par le E11000 qu'il produit.
+   *
+   * Sans lui, tout continue de fonctionner : le dédoublonnage attrape le cas
+   * courant (relivraison séquentielle) et manque le cas concurrent — celui d'un
+   * redéploiement ou d'une montée en charge.
+   *
+   * `trusted_deposit_numbers.uniq_trusted_deposit_number` a rejoint la liste le
+   * 2026-09-10, en descendant la confiance des numéros de dépôt depuis le bord.
+   * Encore la même famille : `/start` crée le document par `upsert` sur
+   * `{ userId, phoneE164 }`, et deux appels concurrents — un double appui — en
+   * produiraient DEUX si rien ne l'interdit. Le compteur d'envois se
+   * répartirait entre les deux documents, et le plafond de 5 SMS par fenêtre en
+   * autoriserait 10.
+   *
+   * Rien ne le signalerait : les deux documents sont valides, les deux comptent,
+   * et la lecture n'en voit qu'un. Un anti-abus qui paraît tenir et ne tient
+   * plus.
+   *
    * Cette liste est une frontière : y ajouter une entrée est une décision, et
    * ce test la rend explicite plutôt que tacite.
    */
@@ -122,7 +146,9 @@ test("les trois contraintes d'intégrité sont surveillées", () => {
   assert.deepEqual(noms.sort(), [
     "ledgerentries.dedupKey_unique_partial",
     "outboxes.uniq_outbox_idempotency_key",
+    "processed_events.uniq_processed_event",
     "provider_webhook_events.uniq_webhook_provider_event",
+    "trusted_deposit_numbers.uniq_trusted_deposit_number",
   ]);
 });
 

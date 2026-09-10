@@ -169,6 +169,54 @@ async function collect(input = {}) {
     });
   }
 
+  /**
+   * ══════════════════════════════════════════════════════════════════════════
+   * ⚠️ UN JETON, JAMAIS UN NUMÉRO DE CARTE
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * Cette fonction construisait `source: { pan, expiryMonth, expiryYear }` à
+   * partir de `input.pan`. Le numéro de carte en clair traversait donc Tx-Core,
+   * après avoir traversé la passerelle, depuis un formulaire public qui le
+   * postait tel quel.
+   *
+   * Rien n'était STOCKÉ — et ce n'est pas la question. Un PAN qui transite met
+   * le serveur qu'il traverse dans le périmètre PCI-DSS : l'attestation
+   * applicable passe de SAQ A à SAQ D, c'est-à-dire d'une trentaine de
+   * contrôles à plus de trois cents, avec analyse de vulnérabilités
+   * trimestrielle et test d'intrusion annuel. Et un PAN qui transite finit dans
+   * un journal d'accès, une trace d'erreur ou un corps de requête capturé par
+   * un intermédiaire réseau — c'est une question de temps, pas de rigueur.
+   *
+   * Stripe, Adyen et Checkout.com procèdent tous de la même façon : le
+   * navigateur du payeur envoie la carte DIRECTEMENT au prestataire, qui rend
+   * un jeton opaque à usage unique. Le serveur du marchand ne manipule que ce
+   * jeton. C'est la voie retenue le 2026-09-10.
+   *
+   * Le refus est EXPLICITE et non silencieux : ignorer `input.pan` laisserait
+   * l'appelant continuer de l'envoyer sans jamais l'apprendre.
+   */
+  if (input?.pan || input?.sender?.pan || input?.cardNumber) {
+    return failResult({
+      errorCode: "RAW_CARD_DATA_REFUSED",
+      errorMessage:
+        "Numéro de carte en clair refusé : Visa Direct n'est appelé qu'avec un " +
+        "jeton opaque obtenu depuis le navigateur du payeur.",
+      raw: {},
+    });
+  }
+
+  const cardToken = norm(input.cardToken || input.token || input.sender?.token);
+
+  if (!cardToken) {
+    return failResult({
+      errorCode: "CARD_TOKEN_REQUIRED",
+      errorMessage:
+        "Jeton de carte absent. L'encaissement par carte exige un jeton émis " +
+        "par le prestataire depuis le navigateur du payeur.",
+      raw: {},
+    });
+  }
+
   const payload = {
     reference:
       input.txReference ||
@@ -177,12 +225,12 @@ async function collect(input = {}) {
       buildRef("PNV_VISA_IN"),
     amount: Number(input.amount || 0),
     currency: upper(input.currency || "USD"),
-    source: {
-      pan: input.sender?.pan || input.pan || null,
-      expiryMonth: input.sender?.expiryMonth || input.expiryMonth || null,
-      expiryYear: input.sender?.expiryYear || input.expiryYear || null,
-      name: input.sender?.name || input.cardHolderName || null,
-    },
+    /**
+     * Le jeton porte à lui seul l'instrument de paiement. Ni nom porteur, ni
+     * date d'expiration : le prestataire les détient déjà, les redemander
+     * n'ajouterait qu'une copie à protéger.
+     */
+    source: { token: cardToken },
     description: input.description || "PayNoval Visa Direct collect",
     metadata: input.metadata || {},
   };

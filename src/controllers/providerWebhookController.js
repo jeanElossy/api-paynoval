@@ -623,6 +623,106 @@ const {
   markFailed,
 } = require("../services/webhooks/webhookEventStore");
 
+const { getTransactionsConnection } = require("../config/db");
+const {
+  confirmCollection,
+  markCollectionSettled,
+} = require("../services/collections/collectionService");
+const {
+  notifyCagnotteParticipation,
+} = require("../services/collections/collectionNotifier");
+
+/**
+ * ============================================================================
+ * UN RAPPEL D'ENCAISSEMENT N'EST PAS UN RAPPEL DE VIREMENT
+ * ============================================================================
+ *
+ * `settleExternalTransaction` cherche une `Transaction` — un mouvement SORTANT,
+ * initié par un titulaire de compte PayNoval. Un encaissement entrant n'en a
+ * aucune : le payeur n'a pas de compte, il n'y a rien à débiter, aucune machine
+ * à états de transfert à traverser.
+ *
+ * Sans cette branche, le rappel confirmant un encaissement tombait sur
+ * « transaction introuvable », rendait une erreur, et le prestataire
+ * réémettait indéfiniment — l'argent encaissé chez lui, jamais crédité chez
+ * nous, et rien dans les journaux pour dire que c'était le mauvais aiguillage.
+ *
+ * ⚠️ La branche est prise sur l'EXISTENCE d'une intention d'encaissement
+ * portant cette référence, pas sur un champ que le prestataire renseignerait.
+ * Un aiguillage confié à la charge utile d'un tiers est un aiguillage qu'un
+ * tiers contrôle.
+ *
+ * Rend `null` quand ce n'est pas un encaissement : l'appelant poursuit alors
+ * son chemin habituel.
+ */
+async function traiterCommeEncaissement(charge) {
+  const conn = await getTransactionsConnection();
+
+  const confirmation = await confirmCollection(conn, {
+    reference: charge.reference,
+    providerReference: charge.providerReference,
+    providerStatus: charge.providerStatus,
+  });
+
+  if (!confirmation) return null;
+
+  const { intent, outcome } = confirmation;
+
+  if (outcome === "pending") {
+    /**
+     * Un statut intermédiaire est un accusé, pas une confirmation. On rend 200
+     * pour que le prestataire cesse de réémettre CET événement-là — le suivant
+     * portera le statut définitif.
+     */
+    return {
+      statusCode: 200,
+      body: { success: true, collection: intent.reference, status: "pending" },
+    };
+  }
+
+  if (outcome === "failed") {
+    return {
+      statusCode: 200,
+      body: { success: true, collection: intent.reference, status: "failed" },
+    };
+  }
+
+  if (outcome === "replay") {
+    return {
+      statusCode: 200,
+      body: { success: true, replayed: true, collection: intent.reference },
+    };
+  }
+
+  /* outcome === "succeeded" — l'argent est chez le prestataire. */
+
+  if (intent.purpose !== "cagnotte_participation") {
+    /**
+     * Table CLOSE. Un motif inconnu ne se devine pas : on ne saurait pas QUI
+     * prévenir, et l'encaissement resterait confirmé sans destinataire. Mieux
+     * vaut une erreur bruyante qu'un encaissement orphelin silencieux.
+     */
+    throw createError(
+      500,
+      `Encaissement confirmé de motif inconnu : ${intent.purpose}`
+    );
+  }
+
+  const annonce = await notifyCagnotteParticipation(intent);
+
+  await markCollectionSettled(conn, intent.reference, annonce.reference || "");
+
+  return {
+    statusCode: 200,
+    body: {
+      success: true,
+      collection: intent.reference,
+      status: "succeeded",
+      alreadyProcessed: annonce.alreadyProcessed,
+    },
+  };
+}
+
 async function providerWebhookController(req, res, next) {
   try {
     const provider = pickProvider(req);
@@ -788,7 +888,16 @@ async function providerWebhookController(req, res, next) {
     let result;
 
     try {
-      result = await settleExternalTransaction(req.body);
+      /**
+       * ⚠️ L'ENCAISSEMENT D'ABORD. Un rappel entrant n'a pas de `Transaction` :
+       * le laisser aller à `settleExternalTransaction` produirait
+       * « transaction introuvable » et une réémission sans fin.
+       */
+      result = await traiterCommeEncaissement(req.body);
+
+      if (!result) {
+        result = await settleExternalTransaction(req.body);
+      }
     } catch (err) {
       await markFailed(claim.key, provider, err).catch((e) =>
         logger.error("[providerWebhook] clôture du registre impossible", {

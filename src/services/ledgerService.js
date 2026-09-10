@@ -32,6 +32,7 @@ const {
   systemReserveAccountId,
   systemClearingAccountId,
   cagnotteVaultClearingAccountId,
+  providerInboundClearingAccountId,
   /**
    * ⚠️ Importés depuis `doubleEntry` depuis le 2026-09-03. Ce fichier en
    * portait ses propres copies, dont la normalisation de devise DIVERGEAIT de
@@ -1800,6 +1801,128 @@ async function postCagnotteParticipationEntries({
 }
 
 /**
+ * ============================================================================
+ * PARTICIPATION PAR LIEN PUBLIC — LE PAYEUR N'A PAS DE PORTEFEUILLE
+ * ============================================================================
+ *
+ * `postCagnotteParticipationEntries` ci-dessus débite un `USER_WALLET`. C'est
+ * juste pour un utilisateur PayNoval qui participe depuis l'application. Ça ne
+ * l'est pas pour quelqu'un qui reçoit un lien de cagnotte, n'a pas de compte,
+ * et paie par mobile money ou par carte : **il n'y a aucun portefeuille à
+ * débiter.** L'argent vient d'un tiers.
+ *
+ * ── Le défaut que cette fonction ferme (trouvé le 2026-09-09) ───────────────
+ *
+ * Faute de cette contrepartie, le chemin public ne bookait RIEN. Le rappel
+ * prestataire (`cagnotteController.externalPaymentCallback`, backend
+ * principal) créditait le coffre par un `$inc: { balance }` nu — aucun appel à
+ * TX Core, aucune `LedgerEntry`. Les invariants 2 (le grand livre fait foi) et
+ * 4 (toute écriture financière est auditable) tombaient ensemble.
+ *
+ * C'est EXACTEMENT le défaut corrigé le 2026-09-09 sur le chemin authentifié.
+ * Le chemin externe vit 2 400 lignes plus bas dans le même contrôleur et avait
+ * été manqué. À retenir : deux chemins qui font la même chose métier doivent
+ * appeler la même primitive comptable, sinon l'un des deux dérive.
+ *
+ * ── Les écritures ───────────────────────────────────────────────────────────
+ *
+ *   participation   DEBIT  clearing PROVIDER_INBOUND:<RAIL>   montant encaissé
+ *   par lien        CREDIT clearing CAGNOTTE_VAULT            montant encaissé
+ *                   DEBIT  clearing CAGNOTTE_VAULT   frais            ┐ si frais
+ *                   CREDIT treasury CAGNOTTE_FEES    frais            ┘
+ *
+ * La jambe de retour ne change pas : le retrait du coffre
+ * (`postCagnotteVaultWithdrawalEntries`) vide la compensation cagnotte vers le
+ * portefeuille du bénéficiaire, qu'il ait été alimenté par un utilisateur ou
+ * par un inconnu. C'est la propriété qui rend ce découpage correct — le coffre
+ * ne sait pas d'où vient l'argent, et n'a pas à le savoir.
+ *
+ * ⚠️ `rail` EST OBLIGATOIRE et ne prend aucune valeur par défaut. C'est lui qui
+ * décide de quel relevé prestataire cette écriture devra être rapprochée ; s'en
+ * passer rendrait le rapprochement impossible sans qu'aucune erreur ne le dise.
+ *
+ * ⚠️ À APPELER DANS LA MÊME SESSION que la mise à jour du règlement, comme les
+ * trois autres primitives cagnotte.
+ */
+async function postCagnotteExternalParticipationEntries({
+  settlementId,
+  reference,
+  rail,
+  amount,
+  currency,
+  feeCredit = null,
+  metadata = null,
+  session = null,
+}) {
+  if (!settlementId) {
+    throw new Error(
+      "postCagnotteExternalParticipationEntries : settlementId requis."
+    );
+  }
+
+  const cur = normalizeCurrency(currency);
+  const amt = normalizePositiveAmount(amount, cur);
+
+  /**
+   * `providerInboundClearingAccountId` lève sur un rail absent — on le laisse
+   * lever plutôt que de pré-valider ici : une seule autorité sur ce que vaut un
+   * identifiant de compte, comme pour la devise.
+   */
+  const compteEntree = providerInboundClearingAccountId(rail, cur);
+
+  await postDoubleEntry({
+    transactionId: settlementId,
+    reference: reference || null,
+    entryType: "SYSTEM_TRANSFER",
+    context: "cagnotte.participation.external.debit",
+    dedupScope: "cagnotte.participation.external.debit",
+    legs: transferLegs({
+      from: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: compteEntree,
+        userId: null,
+      },
+      to: {
+        accountType: "SYSTEM_CLEARING",
+        accountId: cagnotteVaultClearingAccountId(cur),
+        userId: null,
+      },
+      amount: amt,
+      currency: cur,
+    }),
+    metadata: {
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+      stage: "cagnotte-participation-external",
+      rail: String(rail).trim().toUpperCase(),
+    },
+    session,
+  });
+
+  /**
+   * Frais : même primitive que la participation interne, même portée distincte.
+   * Le lot « frais » est SÉPARÉ du lot « débit » parce que les deux peuvent
+   * porter des devises différentes — le participant paie en XOF, la trésorerie
+   * encaisse en CAD — et que l'équilibre se vérifie PAR DEVISE.
+   */
+  if (feeCredit && Number(feeCredit.amount) > 0) {
+    await postCagnotteFeeLegs({
+      settlementId,
+      reference,
+      treasuryUserId: feeCredit.treasuryUserId,
+      treasurySystemType: feeCredit.treasurySystemType,
+      amount: feeCredit.amount,
+      currency: feeCredit.currency,
+      metadata: {
+        ...(metadata && typeof metadata === "object" ? metadata : {}),
+        stage: "cagnotte-participation-external-fee",
+      },
+      session,
+      scope: "cagnotte.participation.external.fee",
+    });
+  }
+}
+
+/**
  * Retrait du coffre d'une cagnotte : la compensation cagnotte se vide vers le
  * portefeuille du bénéficiaire. C'est la jambe de retour de la participation.
  */
@@ -1912,6 +2035,7 @@ module.exports = {
   postInternalPaymentEntries,
   settlementObjectIdFromReference,
   postCagnotteParticipationEntries,
+  postCagnotteExternalParticipationEntries,
   postCagnotteVaultWithdrawalEntries,
   postCagnotteClosureFeeEntries,
 };

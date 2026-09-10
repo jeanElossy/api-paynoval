@@ -15,10 +15,7 @@ const { captureSenderReserve, creditReceiverFunds, creditTreasuryRevenue, resolv
 const { User, Transaction } = runtime.lazyModels(["User", "Transaction"]);
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
-const {
-  enqueueReferralActivityEvent,
-} = require("../../referral/referralEventOutbox");
-
+const { publishDomainEvent } = require("../../events/publisher");
 const {
   sanitize,
   toFloat,
@@ -1031,6 +1028,33 @@ async function confirmController(req, res, next) {
         await notifyTransactionEvent(tx, "confirmed", sess, sourceCurrency);
 
         /**
+         * Événement de domaine, SOUS LA MÊME SESSION que la confirmation.
+         * Voir l'en-tête de `services/events/publisher.js` : publier après le
+         * commit rétablirait la double écriture, et un virement confirmé
+         * pourrait échapper définitivement à la surveillance.
+         */
+        await publishDomainEvent(
+          {
+            name: "transaction.confirmed.v1",
+            aggregateId: String(tx._id),
+            occurredAt: tx.confirmedAt || new Date(),
+            payload: {
+              transactionId: String(tx._id),
+              reference: tx.reference || "",
+              flow: tx.flow || "",
+              rail: String(tx.rail || tx.provider || "paynoval"),
+              provider: String(tx.provider || "paynoval"),
+              senderId: String(tx.sender || ""),
+              receiverId: String(tx.receiver || ""),
+              amount: Number(tx.amountSource ?? tx.amount ?? 0),
+              currency: String(sourceCurrency || tx.currencySource || ""),
+              confirmedAt: (tx.confirmedAt || new Date()).toISOString(),
+            },
+          },
+          sess
+        );
+
+        /**
          * PARRAINAGE — mise en file dans LA MÊME transaction que la
          * confirmation. L'événement est donc solidaire du mouvement : s'il est
          * annulé, l'événement disparaît avec lui ; s'il est validé,
@@ -1046,10 +1070,62 @@ async function confirmController(req, res, next) {
         let referralSync = null;
 
         try {
-          referralSync = await enqueueReferralActivityEvent({
-            transaction: tx,
-            sessionOpts: sessOpts,
-          });
+          /**
+           * ══════════════════════════════════════════════════════════════════
+           * LE PARRAINAGE PASSE PAR LE BUS DEPUIS LE 2026-09-10
+           * ══════════════════════════════════════════════════════════════════
+           *
+           * `enqueueReferralActivityEvent` écrivait dans `outboxes` avec
+           * `service: "referral"`, file privée drainée par
+           * `referralOutboxWorker`. L'événement passe désormais par le bus
+           * partagé, consommé par `services/referral/referralConsumer.js`.
+           *
+           * ⚠️ LA GARANTIE EST IDENTIQUE, ET C'EST LE POINT : l'écriture reste
+           * SOUS `sess`, donc dans la même transaction que la confirmation
+           * financière. L'équivalence tient toujours —
+           *
+           *     la transaction est confirmée  ⟺  l'événement existe
+           *
+           * — et la livraison reste au moins une fois, l'exactitude étant
+           * portée par le registre d'idempotence du principal
+           * (`ReferralPayout`), pas par le transport.
+           *
+           * ⚠️ L'ANCIEN WORKER TOURNE TOUJOURS, et il le doit : il draine le
+           * reliquat de l'outbox. Cesser de PRODUIRE dans une file n'autorise
+           * pas à cesser de la CONSOMMER — les entrées déjà en attente
+           * seraient perdues, et chacune est un bonus dû à quelqu'un. Il sera
+           * retiré quand la file sera vide et le sera restée.
+           */
+          const refereeId = String(tx?.userId || tx?.sender || "").trim();
+
+          if (refereeId) {
+            await publishDomainEvent(
+              {
+                name: "referral.activity.confirmed.v1",
+                aggregateId: String(tx._id),
+                occurredAt: tx.confirmedAt || new Date(),
+                payload: {
+                  refereeId,
+                  triggerTxId: String(tx._id),
+                  reference: String(tx.reference || ""),
+                  flow: String(tx.flow || ""),
+                  confirmedAt: (tx.confirmedAt || new Date()).toISOString(),
+                  /**
+                   * Corrélation bout en bout (invariant 11). Dérivée de
+                   * l'identifiant de transaction : STABLE d'un rejeu à l'autre,
+                   * là où un aléatoire produirait une corrélation différente
+                   * pour le même fait.
+                   */
+                  correlationId: `referral-${String(tx._id)}`,
+                },
+              },
+              sess
+            );
+
+            referralSync = { enqueued: true, transport: "event-bus" };
+          } else {
+            referralSync = { enqueued: false, reason: "MISSING_IDENTIFIERS" };
+          }
         } catch (refErr) {
           /**
            * Le rejeu impose la prudence : si l'on avale l'erreur ici alors que

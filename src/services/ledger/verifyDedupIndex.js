@@ -74,6 +74,59 @@ const CRITICAL_INDEXES = Object.freeze([
       "index : sans lui il ne se produit jamais, et un même événement de " +
       "parrainage peut être versé deux fois",
   },
+  {
+    collection: "trusted_deposit_numbers",
+    name: "uniq_trusted_deposit_number",
+    /**
+     * Ajouté le 2026-09-10 en descendant la confiance des numéros de dépôt
+     * depuis le bord.
+     *
+     * ⚠️ SANS LUI, LE QUOTA ANTI-ABUS DEVIENT SILENCIEUSEMENT PLUS PERMISSIF.
+     *
+     * `/start` crée le document par `upsert` sur `{ userId, phoneE164 }`. Deux
+     * appels concurrents — un double appui suffit — produiraient DEUX documents
+     * pour le même couple si rien ne l'interdit. Le compteur d'envois se
+     * répartirait entre les deux, et le plafond de 5 SMS par fenêtre en
+     * autoriserait 10.
+     *
+     * Rien ne le signalerait : les deux documents sont valides, les deux
+     * comptent, et la lecture n'en voit qu'un. C'est un contrôle qui paraît
+     * tenir et qui ne tient plus.
+     */
+    protects:
+      "le quota d'envois de SMS repose sur l'unicité de { userId, phoneE164 } : " +
+      "sans elle, des appels concurrents créent plusieurs compteurs pour le " +
+      "même numéro et le plafond anti-abus est doublé sans que rien ne le dise",
+  },
+  {
+    collection: "processed_events",
+    name: "uniq_processed_event",
+    /**
+     * Ajouté le 2026-09-10 avec le bus d'événements.
+     *
+     * ⚠️ CET INDEX EST LA MOITIÉ MANQUANTE DU DÉDOUBLONNAGE DES CONSOMMATEURS.
+     *
+     * `services/events/consumer.js` refuse de démarrer un consommateur qui ne
+     * déclare pas comment il dédoublonne — mais la stratégie déclarée est un
+     * « lire puis écrire ». Entre les deux, il y a une fenêtre : deux instances
+     * du même groupe qui réclament le même message abandonné au même instant
+     * passent toutes deux la lecture.
+     *
+     * C'est l'index UNIQUE qui referme cette fenêtre : la seconde écriture lève
+     * un E11000, et le consommateur sait qu'il a perdu la course — sans verrou
+     * et sans coordination.
+     *
+     * Sans lui, tout continue de fonctionner. Le dédoublonnage attrape le cas
+     * courant (relivraison séquentielle) et manque le cas concurrent, qui est
+     * précisément celui d'un redéploiement ou d'une montée en charge. Un
+     * dossier de conformité ouvert en double n'est pas une catastrophe ; un
+     * consommateur futur qui verserait une prime le serait.
+     */
+    protects:
+      "le dédoublonnage des consommateurs du bus repose sur cet index en cas " +
+      "de traitement CONCURRENT : sans lui, deux instances du même groupe " +
+      "peuvent traiter le même événement — le cas exact d'un redéploiement",
+  },
 ]);
 
 /**

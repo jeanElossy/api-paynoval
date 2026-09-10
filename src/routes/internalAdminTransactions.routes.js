@@ -2,9 +2,15 @@
 
 "use strict";
 
-const crypto = require("crypto");
 const express = require("express");
 const createError = require("http-errors");
+
+const {
+  extractInternalToken,
+  matchesAnyToken,
+  expectedInternalTokens,
+  NOMS_JETON_INTERNE,
+} = require("../utils/internalTokens");
 
 const {
   listInternalAdminTransactions,
@@ -24,78 +30,64 @@ const {
   executeInternalAdminAdjustment,
 } = require("../controllers/internalAdminAdjustments.controller");
 
+const {
+  listComplianceCases,
+} = require("../controllers/internalAdminCompliance.controller");
+
+const { listAmlLogs } = require("../controllers/internalAdminAmlLogs.controller");
+
 const router = express.Router();
 
-function getExpectedInternalToken() {
-  return String(
-    process.env.TX_CORE_INTERNAL_TOKEN ||
-      process.env.INTERNAL_API_TOKEN ||
-      process.env.PAYNOVAL_INTERNAL_TOKEN ||
-      ""
-  ).trim();
-}
-
-function safeCompare(a, b) {
-  const left = Buffer.from(String(a || ""));
-  const right = Buffer.from(String(b || ""));
-
-  if (left.length !== right.length) return false;
-
-  return crypto.timingSafeEqual(left, right);
-}
-
+/**
+ * ⚠️ CE FICHIER A EU SA PROPRE RÉPONSE À « CE JETON EST-IL VALIDE ? ».
+ *
+ * Elle lisait `TX_CORE_INTERNAL_TOKEN → INTERNAL_API_TOKEN →
+ * PAYNOVAL_INTERNAL_TOKEN`. Aucune des trois n'est posée : la seule variable
+ * configurée, et celle que la passerelle envoie, est `INTERNAL_TOKEN`. Toutes
+ * les routes de ce fichier — tableau de bord, trésorerie, transactions,
+ * statistiques utilisateur, ajustements — rendaient donc **500** sur chaque
+ * appel, avec un message accusant une variable d'environnement plutôt que la
+ * divergence qui l'avait produit.
+ *
+ * La comparaison passe désormais par `utils/internalTokens`, seule
+ * implémentation du dépôt. Ne pas en réintroduire une sixième ici.
+ *
+ * Les journaux de vérification ont disparu avec elle : ils imprimaient
+ * `expectedTokenLength` et `receivedTokenLength` à chaque appel. La longueur
+ * d'un secret n'est pas le secret, mais elle le rétrécit — et une trace par
+ * requête sur une route admin n'apporte rien qu'un compteur d'échecs ne dise
+ * mieux (règle B.4).
+ */
 function requireInternalToken(req, _res, next) {
-  const expectedToken = getExpectedInternalToken();
+  const attendus = expectedInternalTokens();
 
-  const receivedToken = String(
-    req.headers["x-internal-token"] ||
-      req.headers["x-paynoval-internal-token"] ||
-      req.headers["authorization"]?.replace(/^Bearer\s+/i, "") ||
-      ""
-  ).trim();
-
-  console.log(
-    "[TX-CORE][INTERNAL ADMIN TX][AUTH] Vérification token",
-    JSON.stringify({
-      path: req.originalUrl,
-      method: req.method,
-      expectedTokenPresent: !!expectedToken,
-      expectedTokenLength: expectedToken.length,
-      receivedTokenPresent: !!receivedToken,
-      receivedTokenLength: receivedToken.length,
-    })
-  );
-
-  if (!expectedToken) {
+  if (!attendus.length) {
     return next(
       createError(
         500,
-        "TX_CORE_INTERNAL_TOKEN manquant dans la configuration tx-core"
+        "Aucun jeton interne configuré (" +
+          NOMS_JETON_INTERNE.join(", ") +
+          ") — les routes internes ne peuvent pas authentifier l'appelant."
       )
     );
   }
 
-  if (!receivedToken || !safeCompare(receivedToken, expectedToken)) {
-    console.warn(
-      "[TX-CORE][INTERNAL ADMIN TX][AUTH] Token interne invalide",
-      JSON.stringify({
-        path: req.originalUrl,
-        method: req.method,
-        receivedTokenPresent: !!receivedToken,
-        receivedTokenLength: receivedToken.length,
-      })
-    );
+  /**
+   * `Authorization: Bearer` reste accepté : le backend principal l'utilise sur
+   * certains appels hérités. `extractInternalToken` ne lit que
+   * `x-internal-token`, on complète donc ici plutôt que d'élargir l'utilitaire
+   * pour tout le monde.
+   */
+  const presente =
+    extractInternalToken(req) ||
+    String(req.headers["x-paynoval-internal-token"] || "").trim() ||
+    String(req.headers["authorization"] || "")
+      .replace(/^Bearer\s+/i, "")
+      .trim();
 
+  if (!matchesAnyToken(presente, attendus)) {
     return next(createError(401, "Token interne invalide"));
   }
-
-  console.log(
-    "[TX-CORE][INTERNAL ADMIN TX][AUTH] Token interne OK",
-    JSON.stringify({
-      path: req.originalUrl,
-      method: req.method,
-    })
-  );
 
   return next();
 }
@@ -166,5 +158,30 @@ router.post(
   requireInternalToken,
   executeInternalAdminAdjustment
 );
+
+/* -------------------------------------------------------------------------- */
+/* Conformité — back-office                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Ces deux routes remplacent des surfaces qui vivaient dans la passerelle :
+ *
+ *   · `controllers/adminCompliance.controller.js` — qui appelait ici une route
+ *     inexistante, prenait un 404, et se repliait en silence sur un filtrage
+ *     en mémoire des 500 dernières transactions ;
+ *   · `routes/aml.js` — qui lisait un `AMLLog` de la base de la passerelle,
+ *     lequel cesse d'être alimenté maintenant que l'AML vit ici.
+ *
+ * Elles sont dans Tx-Core parce que c'est lui qui écrit le journal. Une surface
+ * de lecture séparée du service qui produit la donnée finit toujours par lire
+ * autre chose que ce qui a été écrit.
+ */
+router.get(
+  "/internal/admin/compliance/transactions",
+  requireInternalToken,
+  listComplianceCases
+);
+
+router.get("/internal/admin/aml/logs", requireInternalToken, listAmlLogs);
 
 module.exports = router;

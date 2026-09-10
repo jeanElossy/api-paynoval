@@ -41,6 +41,7 @@
 // const { protect } = require("../middleware/authMiddleware");
 // const amlMiddleware = require("../middleware/aml");
 // const requireRole = require("../middleware/requireRole");
+const requireTrustedDepositPhone = require("../middleware/requireTrustedDepositPhone");
 // const requestValidator = require("../middleware/requestValidator");
 
 // const router = express.Router();
@@ -1339,6 +1340,17 @@ router.post(
   requireTransactionEligibility,
   requireAllowedRail,
   amlMiddleware,
+
+  /**
+   * ⚠️ DESCENDU DU BORD LE 2026-09-10.
+   *
+   * Un encaissement mobile money doit partir d'un numéro que l'utilisateur a
+   * PROUVÉ contrôler. Le contrôle vivait dans la passerelle, qui interrogeait
+   * son état par un appel HTTP vers une route qu'elle ne montait pas : 404,
+   * traduit en « non vérifié » par un `catch`. Il tenait par accident.
+   */
+  requireTrustedDepositPhone,
+
   asyncHandler(initiateByFlow)
 );
 

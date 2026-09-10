@@ -3,6 +3,7 @@
 
 const createError = require("http-errors");
 const runtime = require("../shared/runtime");
+const { publishDomainEvent } = require("../../events/publisher");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
 const { resolvePersistedIdempotencyKey } = require("../../../utils/idempotencyKeys");
@@ -843,6 +844,46 @@ async function initiateInternal(req, res, next) {
 
       /** Outbox sous la même session : annulée avec elle le cas échéant. */
       await notifyTransactionEvent(tx, "initiated", sess, currencySourceISO);
+
+      /**
+       * ⚠️ ÉVÉNEMENT DE DOMAINE — DANS LA TRANSACTION, ET C'EST TOUT L'INTÉRÊT.
+       *
+       * Publier après le commit rétablirait la double écriture : le processus
+       * meurt entre les deux, l'argent est réservé et AUCUN consommateur n'en
+       * saura jamais rien. La surveillance de conformité ne verrait pas
+       * l'opération — et rien ne le signalerait.
+       *
+       * Ici, l'événement et la réservation tiennent ou tombent ensemble. Le
+       * relais (`services/events/relay.js`) publie ensuite sur le bus, à son
+       * rythme, et peut le faire deux fois : les consommateurs dédoublonnent
+       * sur `eventId`.
+       *
+       * Un échec de publication FAIT ÉCHOUER l'initiation, et c'est voulu
+       * (règle B.2) : un virement invisible de la surveillance est un défaut de
+       * conformité, pas un défaut de confort.
+       */
+      await publishDomainEvent(
+        {
+          name: "transaction.initiated.v1",
+          aggregateId: String(tx._id),
+          occurredAt: tx.createdAt || new Date(),
+          payload: {
+            transactionId: String(tx._id),
+            reference: tx.reference || "",
+            flow: tx.flow || "",
+            rail: "paynoval",
+            provider: "paynoval",
+            senderId: String(tx.sender || senderId),
+            receiverId: String(tx.receiver || ""),
+            amount: amountSourceStd,
+            currency: currencySourceISO,
+            senderCountry: corridorLock?.snapshot?.senderCountry || "",
+            receiverCountry: corridorLock?.snapshot?.receiverCountry || "",
+            initiatedAt: (tx.createdAt || new Date()).toISOString(),
+          },
+        },
+        sess
+      );
 
       return tx;
     });

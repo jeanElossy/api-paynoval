@@ -695,7 +695,30 @@ const baseRateLimitConfig = {
     if (
       req.path === "/api/v1/cagnotte/participation/settle" ||
       req.path === "/api/v1/cagnotte/vault-withdrawals/settle" ||
-      req.path === "/api/v1/cagnotte/closure-fees/settle"
+      req.path === "/api/v1/cagnotte/closure-fees/settle" ||
+      /**
+       * Participation par LIEN PUBLIC. Exemptée pour la même raison que ses
+       * trois voisines : c'est un appel service-à-service du backend principal,
+       * pas du trafic utilisateur. La limiter reviendrait à perdre des rappels
+       * prestataires déjà authentifiés — donc de l'argent encaissé et non
+       * crédité — précisément aux heures de forte affluence.
+       */
+      req.path === "/api/v1/cagnotte/external-participation/settle" ||
+      /**
+       * ⚠️ EXEMPTÉE POUR UNE RAISON DIFFÉRENTE DES QUATRE PRÉCÉDENTES, et il
+       * faut la dire : celles-là sont du trafic service-à-service pur, celle-ci
+       * a une ORIGINE PUBLIQUE — un payeur anonyme sur la page de contribution.
+       *
+       * Elle est exemptée ICI parce que Tx-Core ne voit que l'adresse de la
+       * passerelle : un compteur par IP les fondrait tous en un seul, et le
+       * premier afflux de contributions bloquerait tous les payeurs à la fois.
+       *
+       * La limite qui compte est donc portée par la PASSERELLE, qui voit la
+       * vraie adresse du payeur. Si elle disparaissait là-bas, ce chemin
+       * n'aurait plus de limite du tout — c'est la contrepartie de cette ligne,
+       * et `test/collectionIntent.test.js` la verrouille.
+       */
+      req.path === "/api/v1/collections/initiate"
     ) {
       return true;
     }
@@ -770,6 +793,16 @@ if (redisConn.url && RedisStore && Redis) {
   });
 
   closeOfflineQueueWhenReady(redisClient, { logger, label: "rate-limit" });
+
+  /**
+   * ⚠️ UN SEUL CLIENT REDIS PAR PROCESSUS (invariant A8).
+   *
+   * Le domaine de la tarification, accueilli le 2026-09-10, cache le
+   * référentiel des règles de change. Sans ce registre, il aurait dû ouvrir un
+   * SECOND client — doublant sockets, reconnexions et métriques pour la même
+   * base. On enregistre donc celui-ci, déjà ouvert.
+   */
+  require("./services/redisClientAccessor").setClient(redisClient);
 
   /**
    * ⚠️ LE DIAGNOSTIC EST ÉTRANGLÉ ET EXPLICITE.
@@ -933,6 +966,7 @@ let autoCancelWorker = null;
 let reconciliationWorker = null;
 let settlementReplayWorker = null;
 let referralOutboxWorker = null;
+let eventRelay = null;
 
 /**
  * Worker de livraison des evenements de parrainage.
@@ -1174,6 +1208,75 @@ async function bootstrap() {
       logger.warn(`[ledger] contrôle de l'index de déduplication ignoré : ${err?.message || err}`);
     }
 
+    /**
+     * ══════════════════════════════════════════════════════════════════════
+     * ÉTAT DE LA CONFORMITÉ — règle B.6 : le démarrage dit la vérité
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * Ces deux annonces existent parce que les deux défauts qu'elles couvrent
+     * ont été MESURÉS le 2026-09-10, et qu'aucun des deux ne se voyait :
+     *
+     *   1. le criblage sanctions — 1 359 lignes de service, branché sur l'AML,
+     *      et ÉTEINT : `SANCTIONS_SCREENING_ENABLED` n'est renseignée nulle
+     *      part et vaut `false` par défaut. Rien ne le disait ;
+     *
+     *   2. le jeton interne — les routes admin lisaient trois noms de variable
+     *      dont AUCUN n'était posé, pendant que la passerelle en envoyait un
+     *      quatrième. Tout le back-office rendait 500, et le message accusait
+     *      une variable plutôt que la divergence qui l'avait produite.
+     *
+     * Un service qui démarre en annonçant « j'écoute » sans dire ce qu'il ne
+     * fait pas est la panne la plus chère à diagnostiquer.
+     */
+    try {
+      const {
+        annoncerPrincipal,
+      } = require("./utils/principalEndpoint");
+
+      annoncerPrincipal(process.env, logger);
+    } catch (err) {
+      logger.error(
+        `❌ Annonce du backend principal impossible : ${err?.message || err}`
+      );
+    }
+
+    try {
+      const {
+        annoncerJetonsInternes,
+      } = require("./utils/internalTokens");
+
+      annoncerJetonsInternes(process.env, logger);
+    } catch (err) {
+      logger.error(
+        `❌ Annonce des jetons internes impossible : ${err?.message || err}`
+      );
+    }
+
+    /**
+     * ⚠️ CE BLOC PEUT REFUSER LE DÉMARRAGE, ET C'EST SA RAISON D'ÊTRE.
+     *
+     * Le criblage sanctions a été trouvé ÉTEINT le 2026-09-10 : 1 359 lignes de
+     * service, branchées sur les deux chemins de l'argent, et
+     * `SANCTIONS_SCREENING_ENABLED` renseignée nulle part. Aucun bénéficiaire
+     * n'était confronté à une liste, et rien ne le disait.
+     *
+     * En développement, l'état est toléré et ANNONCÉ avec sa conséquence. En
+     * production, il refuse le démarrage : activer par défaut ne réglerait rien
+     * — sans fournisseur, le service retombe sur `mock`, qui répond « aucune
+     * correspondance » à tout. On remplacerait un contrôle éteint par un
+     * contrôle qui MENT, ce qui est pire.
+     *
+     * Voir `utils/screeningGuard.js` pour les trois régimes et l'échappatoire
+     * d'incident.
+     */
+    try {
+      const { assertScreeningReady } = require("./utils/screeningGuard");
+      assertScreeningReady(process.env, logger);
+    } catch (err) {
+      logger.error(`❌ Démarrage refusé — ${err?.message || err}`);
+      process.exit(1);
+    }
+
     const providerReport = describeProviderRails();
     for (const line of formatProviderRailsReport(providerReport)) {
       if (line.includes("❌")) logger.error(line);
@@ -1196,27 +1299,32 @@ async function bootstrap() {
     getTxMetricsInstance().setRailModes(providerReport);
 
     /**
-     * GATEWAY_URL — annoncée au démarrage, pas découverte au premier devis.
+     * ── TARIFICATION : LA DÉPENDANCE NE REMONTE PLUS ──────────────────────
      *
-     * Tx Core NE calcule pas les prix : il demande un devis à la passerelle
-     * (`services/transactions/shared/pricing.js`). Sans `GATEWAY_URL`, aucune
-     * transaction tarifée ne peut aboutir.
+     * Jusqu'au 2026-09-10, ce bloc contrôlait `GATEWAY_URL` et annonçait :
+     * « GATEWAY_URL absente ⇒ toute transaction nécessitant un devis échouera
+     * en 503 ». C'était exact, et c'était le symptôme d'un défaut
+     * d'architecture : **le moteur d'argent dépendait du bord**. Une panne ou
+     * un redémarrage de la passerelle arrêtait les virements de l'intérieur.
      *
-     * Jusqu'au 2026-09-02, `getGatewayBase()` retombait en silence sur l'URL de
-     * la passerelle de PRODUCTION. Le repli est retiré : la fonction lève
-     * désormais un 503 (règle B.2). Ce contrôle est l'autre moitié du
-     * correctif — la règle B.6 veut qu'un service démarré sans une dépendance
-     * essentielle le DISE, avec sa conséquence, plutôt que de le laisser
-     * découvrir par un utilisateur dont le virement échoue.
+     * Le domaine des prix appartient désormais à Tx-Core (`services/pricing/`,
+     * base `MONGO_URI_PRICING`) et le devis est un appel de fonction. Ce qui
+     * doit être annoncé au démarrage n'est donc plus l'URL de la passerelle,
+     * mais la présence de la BASE des barèmes — la nouvelle dépendance réelle.
+     *
+     * Le contrôle vit dans `config/db.js`, au moment de l'ouverture de la
+     * connexion, parce que c'est là qu'on sait si elle a abouti. En dire quoi
+     * que ce soit ici serait le répéter sans le vérifier.
+     *
+     * Règle B.6 : on annonce ce qui est mesuré, avec sa conséquence — et on
+     * cesse d'annoncer ce qui n'est plus vrai.
      */
-    if (!String(process.env.GATEWAY_URL || "").trim()) {
-      logger.error(
-        "❌ GATEWAY_URL absente — CONSÉQUENCE : toute transaction nécessitant " +
-          "un devis échouera en 503. Aucun repli n'est appliqué (règle B.2). " +
-          "Le service démarre : les chemins qui ne tarifient pas restent servis."
+    if (String(process.env.GATEWAY_URL || "").trim()) {
+      logger.info(
+        "ℹ️ GATEWAY_URL renseignée — elle ne sert plus à la tarification " +
+          "(devis calculés localement depuis le 2026-09-10). Les autres usages " +
+          "de cette variable restent inchangés."
       );
-    } else {
-      logger.info(`✅ Tarification : devis demandés à ${process.env.GATEWAY_URL}`);
     }
 
     const providerWebhookRoutes = require("./routes/providerWebhookRoutes");
@@ -1226,12 +1334,22 @@ async function bootstrap() {
 
     const internalPaymentsRoutes = require("./routes/internalPaymentsRoutes");
     const internalTxRoutes = require("./routes/internalTransactions.routes");
+    const internalWalletRoutes = require("./routes/internalWallets.routes");
     const internalReferralRoutes = require("./routes/internalReferralRoutes");
     const internalCancelRefundRoutes = require("./routes/internalCancelRefund.routes");
 
     const cagnotteSettlementRoutes = require("./routes/cagnotteSettlementRoutes");
     const cagnotteVaultSettlementRoutes = require("./routes/cagnotteVaultSettlementRoutes");
     const cagnotteClosureFeesRoutes = require("./routes/cagnotteClosureFeesRoutes");
+    const cagnotteExternalSettlementRoutes = require("./routes/cagnotteExternalSettlementRoutes");
+    const collectionRoutes = require("./routes/collectionRoutes");
+    const depositPhoneVerificationRoutes = require("./routes/depositPhoneVerification.routes");
+    const pricingRoutes = require("./routes/pricingRoutes");
+    const pricingRulesRoutes = require("./routes/pricingRulesRoutes");
+    const pricingChangeRequestsRoutes = require("./routes/pricingChangeRequestsRoutes");
+    const feesRoutes = require("./routes/feesRoutes");
+    const fxRulesRoutes = require("./routes/fxRulesRoutes");
+    const exchangeRatesRoutes = require("./routes/exchangeRatesRoutes");
 
     const internalAdminTransactionsRoutes = require("./routes/internalAdminTransactions.routes");
 
@@ -1264,6 +1382,17 @@ async function bootstrap() {
 
     // Internal.
     app.use("/api/v1/internal", internalTxRoutes);
+
+    /**
+     * `POST /api/v1/internal/wallets/ensure` — le backend principal DEMANDE un
+     * portefeuille, Tx-Core l'écrit.
+     *
+     * Il écrivait auparavant lui-même dans `tx_wallet_balances`, avec un schéma
+     * qui déclare `amount` en `Number` là où le propriétaire le déclare en
+     * `Decimal128` : toute écriture y stockait un flottant sous un champ lu
+     * comme décimal exact (invariant 12).
+     */
+    app.use("/api/v1/internal", internalWalletRoutes);
     app.use("/api/v1/internal-payments", internalPaymentsRoutes);
     app.use("/api/v1/internal/referral", internalReferralRoutes);
 
@@ -1271,6 +1400,58 @@ async function bootstrap() {
     app.use("/api/v1/cagnotte", cagnotteSettlementRoutes);
     app.use("/api/v1/cagnotte", cagnotteVaultSettlementRoutes);
     app.use("/api/v1/cagnotte", cagnotteClosureFeesRoutes);
+
+    /**
+     * Participation par lien public. Montée sur le MÊME préfixe que ses trois
+     * voisines, avec un chemin propre (`/external-participation/settle`) : la
+     * parenté se lit dans l'URL, et la garde de jeton interne est la même.
+     */
+    app.use("/api/v1/cagnotte", cagnotteExternalSettlementRoutes);
+
+    /**
+     * ── ENCAISSEMENTS ENTRANTS ────────────────────────────────────────────
+     *
+     * `POST /api/v1/collections/initiate` — l'argent qui ENTRE, depuis un payeur
+     * qui n'a pas de compte PayNoval.
+     *
+     * ⚠️ Ce chemin n'écrit RIEN au grand livre. Il demande à un prestataire de
+     * prélever, et rend `pending`. Le grand livre est écrit au rappel signé,
+     * par `/api/v1/cagnotte/external-participation/settle` (règle B.3).
+     */
+    app.use("/api/v1/collections", collectionRoutes);
+
+    /**
+     * ── CONFIANCE D'UN NUMÉRO DE DÉPÔT ────────────────────────────────────
+     *
+     * Descendue du bord le 2026-09-10. Le contrôle qui AUTORISE un encaissement
+     * appartient au moteur qui déplace l'argent, comme l'AML avant lui.
+     *
+     * ⚠️ Le chemin est celui que l'application mobile appelle DÉJÀ. Il rendait
+     * 404 : le bord ne montait pas sa route native (353 l. de contrôleur
+     * référencées par aucun fichier) et ne relayait pas le préfixe. Un dépôt
+     * vers un numéro tiers ne pouvait donc jamais être débloqué — le 403 du
+     * contrôle citait trois routes inexistantes.
+     */
+    app.use("/api/v1/phone-verification", depositPhoneVerificationRoutes);
+
+    /**
+     * ── TARIFICATION ──────────────────────────────────────────────────────
+     *
+     * Déplacée depuis l'API Gateway le 2026-09-10. La passerelle expose
+     * `/api/v1/pricing/*` au monde et relaie ici ; Tx-Core, lui, n'appelle plus
+     * aucune route de devis — il utilise `services/pricing/quoteService` en
+     * direct.
+     *
+     * ⚠️ C'est ce qui referme l'inversion de dépendance : le moteur d'argent
+     * appelait le bord pour connaître ses prix, et une panne de la passerelle
+     * arrêtait les virements de l'intérieur.
+     */
+    app.use("/api/v1/pricing", pricingRoutes);
+    app.use("/api/v1/pricing-rules", pricingRulesRoutes);
+    app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
+    app.use("/api/v1/fees", feesRoutes);
+    app.use("/api/v1/fx-rules", fxRulesRoutes);
+    app.use("/api/v1/exchange-rates", exchangeRatesRoutes);
 
     app.get("/api/v1/health", (_req, res) =>
       res.status(200).json({
@@ -1282,6 +1463,55 @@ async function bootstrap() {
     // Démarrage des workers après la connexion DB et le montage des routes.
     autoCancelWorker = startAutoCancelWorker();
     referralOutboxWorker = startReferralWorker();
+
+    /**
+     * ══════════════════════════════════════════════════════════════════════
+     * LE RELAIS D'ÉVÉNEMENTS — LA MOITIÉ PRODUCTRICE DU BUS
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * Il lit `domain_events` (écrit DANS les transactions du moteur) et publie
+     * sur le flux Redis. Il ne décide rien : il transporte.
+     *
+     * ⚠️ IL TOURNE DANS CE PROCESSUS, LES CONSOMMATEURS NON.
+     *
+     * Le relais appartient au producteur — il lit la base du moteur, et le
+     * faire tourner ailleurs ferait sortir cette lecture de son propriétaire.
+     * Les consommateurs, eux, ont leur propre point d'entrée
+     * (`workers/riskMonitor.js`) : ils se déploient et se redémarrent
+     * séparément, et une surveillance qui s'effondre n'emporte pas le moteur
+     * d'argent avec elle.
+     *
+     * C'est l'étape vers le service `Risk/AML` du schéma cible : processus
+     * séparé d'abord, dépôt séparé ensuite. L'inverse — extraire le dépôt avant
+     * d'avoir séparé le processus — oblige à inventer un contrat réseau avant
+     * de savoir ce qu'il doit porter.
+     *
+     * ⚠️ Sans Redis, le relais tourne À VIDE et ne marque RIEN comme publié :
+     * les événements s'accumulent en base, intacts, et repartent dès que le
+     * transport revient. Il ne perd rien en silence.
+     */
+    try {
+      const relais = require("./services/events/relay");
+      const fluxEv = require("./services/events/stream");
+
+      if (!fluxEv.clientOuNull()) {
+        logger.warn(
+          "⚠️ Bus d'événements SANS TRANSPORT (Redis absent) — CONSÉQUENCE : " +
+            "les événements de domaine s'accumulent dans `domain_events` et " +
+            "AUCUN consommateur ne les reçoit. La surveillance AML asynchrone " +
+            "est donc à l'arrêt. Rien n'est perdu : tout repart au retour de Redis."
+        );
+      }
+
+      eventRelay = relais.start({ logger });
+    } catch (err) {
+      logger.error("❌ Relais d'événements non démarré", {
+        message: err?.message || err,
+        consequence:
+          "aucun événement de domaine ne sera publié ; la surveillance de " +
+          "conformité et tout consommateur en aval sont aveugles",
+      });
+    }
 
     /**
      * RÉCONCILIATION PLANIFIÉE.
@@ -1409,6 +1639,15 @@ const graceful = async (signal) => {
       logger.info("🎁 Worker parrainage arrêté");
     } catch (err) {
       logger.warn("Erreur arrêt worker parrainage", {
+        message: err?.message || err,
+      });
+    }
+
+    try {
+      eventRelay?.stop?.();
+      logger.info("📨 Relais d'événements arrêté");
+    } catch (err) {
+      logger.warn("Erreur arrêt relais d'événements", {
         message: err?.message || err,
       });
     }

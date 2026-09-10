@@ -32,6 +32,7 @@
  *   6. Des fonds réservés ne doivent pas rester bloqués indéfiniment.
  */
 
+const mongoose = require("mongoose");
 const { getTxConn } = require("../../config/db");
 
 const { computeTrialBalance } = require("../ledger/doubleEntry");
@@ -151,6 +152,129 @@ const NOT_SANDBOX = Object.freeze({
   ],
 });
 
+/**
+ * ============================================================================
+ * ANALYSE D'UNE SEULE TRANSACTION — LA RÈGLE, EXTRAITE DE SA BOUCLE
+ * ============================================================================
+ *
+ * ── Pourquoi cette extraction ───────────────────────────────────────────────
+ *
+ * Ces règles vivaient dans le corps de la boucle de `checkTransactionLedger`.
+ * Le contrôle déclenché par événement (`settlementConsumer`) en avait besoin
+ * pour UNE transaction, à la confirmation, au lieu d'attendre le prochain
+ * balayage périodique.
+ *
+ * Les recopier aurait produit deux jeux de règles de réconciliation comptable.
+ * Ce dépôt sait ce que ça donne : deux `aml.js` de même souche, 1 234 lignes
+ * d'écart, chacun recevant la moitié des correctifs. Une règle de contrôle
+ * dupliquée est une règle qui finira par ne plus contrôler la même chose des
+ * deux côtés — et personne ne saura laquelle a raison.
+ *
+ * Le balayage périodique et le contrôle événementiel appellent donc CETTE
+ * fonction, et elle seule.
+ *
+ * @param {object} tx    la transaction (projection de `checkTransactionLedger`)
+ * @param {Array}  own   ses écritures au grand livre
+ * @returns {Array}      anomalies constatées (vide si tout est cohérent)
+ */
+function analyserTransaction(tx, own) {
+  const anomalies = [];
+
+  if (tx.fundsCaptured && !own.length) {
+    anomalies.push({
+      type: ANOMALIES.MISSING_LEDGER_FOR_CAPTURE,
+      transactionId: String(tx._id),
+      reference: tx.reference || null,
+      flow: tx.flow || null,
+      at: tx.fundsCapturedAt || tx.createdAt,
+      detail: "fonds déclarés capturés, aucune écriture au grand livre",
+    });
+  }
+
+  if (tx.beneficiaryCredited && !own.some((e) => e.direction === "CREDIT")) {
+    anomalies.push({
+      type: ANOMALIES.MISSING_LEDGER_FOR_CREDIT,
+      transactionId: String(tx._id),
+      reference: tx.reference || null,
+      flow: tx.flow || null,
+      at: tx.beneficiaryCreditedAt || tx.createdAt,
+      detail: "bénéficiaire déclaré crédité, aucune écriture de crédit",
+    });
+  }
+
+  /**
+   * Deux écritures identiques (même compte, même sens, même type) pour un même
+   * mouvement : c'est la signature d'un rejeu qui a franchi les gardes.
+   */
+  const seen = new Map();
+
+  for (const e of own) {
+    const key = `${e.accountId}|${e.direction}|${e.entryType}`;
+    seen.set(key, (seen.get(key) || 0) + 1);
+  }
+
+  for (const [key, count] of seen) {
+    if (count > 1) {
+      anomalies.push({
+        type: ANOMALIES.DUPLICATE_LEDGER_ENTRY,
+        transactionId: String(tx._id),
+        reference: tx.reference || null,
+        signature: key,
+        count,
+        detail: "écriture comptable produite plusieurs fois pour un même mouvement",
+      });
+    }
+  }
+
+  /**
+   * ═══ BALANCE DE VÉRIFICATION ═══════════════════════════════════════════
+   *
+   * L'invariant fondateur de la comptabilité en partie double :
+   * `Σ DEBIT = Σ CREDIT`, **par devise**.
+   *
+   * Vérifié PAR DEVISE et jamais globalement — un virement peut convertir, et
+   * additionner des XOF avec des CAD n'aurait aucun sens. Le raisonnement
+   * complet est en tête de `services/ledger/doubleEntry.js`.
+   *
+   * ⚠️ Ne porte que sur les écritures `ledgerVersion >= 2`. L'historique en
+   * partie simple, antérieur au 2026-08-26, est ignoré : l'inclure ferait
+   * échouer le contrôle sur tout le passé, et un contrôle toujours rouge est
+   * un contrôle qu'on désactive dans la semaine.
+   */
+  const trial = computeTrialBalance(own);
+
+  if (!trial.balanced) {
+    anomalies.push({
+      type: ANOMALIES.LEDGER_UNBALANCED,
+      transactionId: String(tx._id),
+      reference: tx.reference || null,
+      flow: tx.flow || null,
+      byCurrency: trial.byCurrency,
+      consideredEntries: trial.consideredEntries,
+      anomaliesDeLecture: trial.anomalies,
+      /**
+       * Deux causes possibles, à ne pas confondre : un déséquilibre réel, ou
+       * des écritures que la balance n'a pas su lire. La seconde était
+       * silencieuse jusqu'au 2026-09-03 — un montant illisible comptait pour
+       * zéro, un sens corrompu pour un crédit.
+       */
+      detail: !trial.ecartsDansLaTolerance
+        ? "débits ≠ crédits sur cette transaction : " +
+          Object.entries(trial.byCurrency)
+            .filter(([, b]) => Math.abs(b.delta) > 0.005)
+            .map(([cur, b]) => `${cur} écart ${b.delta.toFixed(4)}`)
+            .join(", ")
+        : "écritures ILLISIBLES : " +
+          `${trial.anomalies.montantIllisible} montant(s), ` +
+          `${trial.anomalies.sensInconnu} sens, ` +
+          `${trial.anomalies.deviseIllisible} devise(s). ` +
+          "L'équilibre ne peut pas être affirmé sur ces écritures.",
+    });
+  }
+
+  return anomalies;
+}
+
 async function checkTransactionLedger({ sinceHours, limit }) {
   const Transaction = model("Transaction");
   const LedgerEntry = model("LedgerEntry");
@@ -188,98 +312,7 @@ async function checkTransactionLedger({ sinceHours, limit }) {
 
   for (const tx of transactions) {
     const own = byTx.get(String(tx._id)) || [];
-
-    if (tx.fundsCaptured && !own.length) {
-      anomalies.push({
-        type: ANOMALIES.MISSING_LEDGER_FOR_CAPTURE,
-        transactionId: String(tx._id),
-        reference: tx.reference || null,
-        flow: tx.flow || null,
-        at: tx.fundsCapturedAt || tx.createdAt,
-        detail: "fonds déclarés capturés, aucune écriture au grand livre",
-      });
-    }
-
-    if (tx.beneficiaryCredited && !own.some((e) => e.direction === "CREDIT")) {
-      anomalies.push({
-        type: ANOMALIES.MISSING_LEDGER_FOR_CREDIT,
-        transactionId: String(tx._id),
-        reference: tx.reference || null,
-        flow: tx.flow || null,
-        at: tx.beneficiaryCreditedAt || tx.createdAt,
-        detail: "bénéficiaire déclaré crédité, aucune écriture de crédit",
-      });
-    }
-
-    /**
-     * Deux écritures identiques (même compte, même sens, même type) pour un même
-     * mouvement : c'est la signature d'un rejeu qui a franchi les gardes.
-     */
-    const seen = new Map();
-
-    for (const e of own) {
-      const key = `${e.accountId}|${e.direction}|${e.entryType}`;
-      seen.set(key, (seen.get(key) || 0) + 1);
-    }
-
-    for (const [key, count] of seen) {
-      if (count > 1) {
-        anomalies.push({
-          type: ANOMALIES.DUPLICATE_LEDGER_ENTRY,
-          transactionId: String(tx._id),
-          reference: tx.reference || null,
-          signature: key,
-          count,
-          detail: "écriture comptable produite plusieurs fois pour un même mouvement",
-        });
-      }
-    }
-
-    /**
-     * ═══ BALANCE DE VÉRIFICATION ═══════════════════════════════════════════
-     *
-     * L'invariant fondateur de la comptabilité en partie double :
-     * `Σ DEBIT = Σ CREDIT`, **par devise**.
-     *
-     * Vérifié PAR DEVISE et jamais globalement — un virement peut convertir, et
-     * additionner des XOF avec des CAD n'aurait aucun sens. Le raisonnement
-     * complet est en tête de `services/ledger/doubleEntry.js`.
-     *
-     * ⚠️ Ne porte que sur les écritures `ledgerVersion >= 2`. L'historique en
-     * partie simple, antérieur au 2026-08-26, est ignoré : l'inclure ferait
-     * échouer le contrôle sur tout le passé, et un contrôle toujours rouge est
-     * un contrôle qu'on désactive dans la semaine.
-     */
-    const trial = computeTrialBalance(own);
-
-    if (!trial.balanced) {
-      anomalies.push({
-        type: ANOMALIES.LEDGER_UNBALANCED,
-        transactionId: String(tx._id),
-        reference: tx.reference || null,
-        flow: tx.flow || null,
-        byCurrency: trial.byCurrency,
-        consideredEntries: trial.consideredEntries,
-        anomaliesDeLecture: trial.anomalies,
-        /**
-         * Deux causes possibles, à ne pas confondre : un déséquilibre réel, ou
-         * des écritures que la balance n'a pas su lire. La seconde était
-         * silencieuse jusqu'au 2026-09-03 — un montant illisible comptait pour
-         * zéro, un sens corrompu pour un crédit.
-         */
-        detail: !trial.ecartsDansLaTolerance
-          ? "débits ≠ crédits sur cette transaction : " +
-            Object.entries(trial.byCurrency)
-              .filter(([, b]) => Math.abs(b.delta) > 0.005)
-              .map(([cur, b]) => `${cur} écart ${b.delta.toFixed(4)}`)
-              .join(", ")
-          : "écritures ILLISIBLES : " +
-            `${trial.anomalies.montantIllisible} montant(s), ` +
-            `${trial.anomalies.sensInconnu} sens, ` +
-            `${trial.anomalies.deviseIllisible} devise(s). ` +
-            "L'équilibre ne peut pas être affirmé sur ces écritures.",
-      });
-    }
+    anomalies.push(...analyserTransaction(tx, own));
   }
 
   return { checked: transactions.length, anomalies };
@@ -423,8 +456,99 @@ async function reconcileTransactions({ sinceHours = 48, limit = 5000 } = {}) {
   return report;
 }
 
+/**
+ * ============================================================================
+ * CONTRÔLE D'UNE SEULE TRANSACTION — DÉCLENCHÉ PAR ÉVÉNEMENT
+ * ============================================================================
+ *
+ * ── Ce que ça change ────────────────────────────────────────────────────────
+ *
+ * La réconciliation tournait uniquement sur MINUTERIE. Un écart entre une
+ * transaction et le grand livre attendait donc le prochain balayage — jusqu'à
+ * plusieurs heures pendant lesquelles un compte affichait un solde que les
+ * écritures ne justifiaient pas.
+ *
+ * Branchée sur `transaction.confirmed.v1`, la vérification a lieu quelques
+ * secondes après le mouvement. Le balayage périodique NE DISPARAÎT PAS : il
+ * reste le filet qui attrape ce que le bus n'a pas livré, et les transactions
+ * dont l'état a changé sans événement (rappels prestataires, rattrapages
+ * manuels). Un contrôle événementiel seul aurait exactement les angles morts
+ * du bus lui-même.
+ *
+ * ── Pourquoi il ne signale rien de prématuré ────────────────────────────────
+ *
+ * Les règles ne s'appliquent qu'aux transactions portant `fundsCaptured` ou
+ * `beneficiaryCredited`. Une confirmation dont la capture viendra plus tard
+ * (flux externes, réglés au rappel prestataire) ne porte aucun de ces drapeaux :
+ * la fonction rend « rien à vérifier » au lieu d'inventer une anomalie.
+ *
+ * C'est ce qui distingue un détecteur utile d'un détecteur bruyant — et un
+ * détecteur bruyant finit désactivé, emportant la protection qu'il apportait.
+ */
+async function reconcileOneTransaction(transactionId) {
+  const identifiant = String(transactionId || "").trim();
+
+  if (!identifiant) {
+    return { checked: 0, anomalies: [], raison: "TRANSACTION_ID_MANQUANT" };
+  }
+
+  /**
+   * ⚠️ VALIDER LA FORME AVANT D'INTERROGER MONGO — défaut mesuré le 2026-09-10.
+   *
+   * `findOne({ _id: "pas-un-objectid" })` ne rend pas « introuvable » : il LÈVE
+   * une `CastError`. Or ce service est appelé par un consommateur du bus, pour
+   * qui une exception signifie « échec temporaire, relivre ». Un identifiant
+   * malformé était donc réessayé CINQ FOIS avant de partir en lettre morte —
+   * en retardant à chaque tour tous les messages suivants du groupe.
+   *
+   * Trouvé en faisant tourner le bus contre un vrai Redis, pas en le lisant :
+   * l'exception ne se produit qu'avec une valeur que le code de production ne
+   * produit jamais... jusqu'au jour où un producteur mal écrit le fait.
+   *
+   * Une forme invalide est une réponse DÉFINITIVE, pas une panne : on la rend
+   * comme telle, et le consommateur acquitte au premier passage.
+   */
+  if (!mongoose.Types.ObjectId.isValid(identifiant)) {
+    return { checked: 0, anomalies: [], raison: "TRANSACTION_ID_INVALIDE" };
+  }
+
+  const Transaction = model("Transaction");
+  const LedgerEntry = model("LedgerEntry");
+
+  const tx = await Transaction.findOne({ _id: identifiant, ...NOT_SANDBOX })
+    .select(
+      "_id reference status flow fundsCaptured beneficiaryCredited " +
+        "fundsCapturedAt beneficiaryCreditedAt createdAt"
+    )
+    .lean();
+
+  /**
+   * Transaction introuvable : ce n'est PAS une anomalie de réconciliation. Le
+   * bac à sable est exclu par `NOT_SANDBOX`, et un identifiant inconnu relève
+   * d'un problème de publication d'événement — que le relais et ses compteurs
+   * signalent déjà. Inventer une anomalie comptable ici brouillerait les deux.
+   */
+  if (!tx) return { checked: 0, anomalies: [], raison: "TRANSACTION_INTROUVABLE" };
+
+  if (!tx.fundsCaptured && !tx.beneficiaryCredited) {
+    return { checked: 0, anomalies: [], raison: "RIEN_A_VERIFIER" };
+  }
+
+  const own = await LedgerEntry.find({ transactionId: tx._id })
+    .select("_id transactionId direction entryType amount currency accountId")
+    .lean();
+
+  return {
+    checked: 1,
+    anomalies: analyserTransaction(tx, own),
+    raison: "",
+  };
+}
+
 module.exports = {
   reconcileTransactions,
+  reconcileOneTransaction,
+  analyserTransaction,
   NOT_SANDBOX,
   checkWalletBalances,
   checkTransactionLedger,

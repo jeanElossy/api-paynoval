@@ -116,6 +116,26 @@ function buildConfig(env = process.env) {
     mongo: {
       users: env.MONGO_URI_USERS,
       transactions: env.MONGO_URI_TRANSACTIONS,
+
+      /**
+       * ── BASE TARIFICATION ────────────────────────────────────────────────
+       *
+       * Le domaine des prix (barèmes, versions, devis, frais, règles de change,
+       * taux) appartenait à l'API Gateway jusqu'au 2026-09-10, et Tx-Core lui
+       * demandait ses devis EN HTTP. La dépendance remontait donc du moteur
+       * d'argent vers le bord — une panne de la passerelle arrêtait les
+       * virements de l'intérieur.
+       *
+       * Les collections, elles, n'ont pas bougé : `MONGO_URI_PRICING` désigne
+       * la base que la passerelle utilisait (`MONGO_URI_GATEWAY`). C'est le
+       * motif « strangler » — on déplace le CODE et la PROPRIÉTÉ d'abord, la
+       * consolidation des bases est une décision distincte, et une migration de
+       * données ne se déclenche pas en passant une variable d'environnement.
+       *
+       * Repli sur `MONGO_URI_TRANSACTIONS` : le jour où les collections seront
+       * consolidées, il n'y aura rien à changer ici.
+       */
+      pricing: env.MONGO_URI_PRICING || env.MONGO_URI_TRANSACTIONS,
     },
 
     // Redis (rate-limit + caches)

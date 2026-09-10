@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const config = require("../config");
 
 let txConn = null;
+let pricingConn = null;
 
 function buildMongooseOpts() {
   return {
@@ -112,6 +113,31 @@ function registerTransactionModels(conn) {
   require("../models/IdempotencyRecord")(conn);
 
   /**
+   * ⚠️ LE BUS D'ÉVÉNEMENTS VIT DANS LA BASE DES TRANSACTIONS, ET C'EST LA
+   * CONDITION DE SA CORRECTION.
+   *
+   * `domain_events` est écrit DANS la transaction qui change l'état. Le placer
+   * ailleurs — par exemple à côté de `outboxes`, dans la base des utilisateurs —
+   * ne donnerait l'atomicité que tant que les deux connexions partagent leur
+   * `MongoClient`. C'est vrai aujourd'hui ; ce n'est pas une garantie, et le
+   * motif « outbox transactionnel » ne vaut que par sa garantie.
+   *
+   * `processed_events` l'accompagne : le dédoublonnage des consommateurs se lit
+   * et s'écrit à chaque message, il n'a rien à faire à un aller-retour de plus.
+   */
+  require("../models/DomainEvent")(conn);
+  require("../models/ProcessedEvent")(conn);
+
+  /**
+   * La confiance d'un numéro de dépôt AUTORISE un encaissement : elle vit avec
+   * les transactions qu'elle conditionne, pas dans la base des utilisateurs.
+   * C'est l'erreur qu'`AMLLog` a commise — déclaré en `mongoose.model()`
+   * global, il atterrit loin des transactions qu'il décrit, et le rattraper
+   * demandera une migration.
+   */
+  require("../models/TrustedDepositNumber")(conn);
+
+  /**
    * ⚠️ ENREGISTRÉS ICI PARCE QUE L'ENREGISTREMENT PARESSEUX EST UNE BOMBE À
    * RETARDEMENT D'ORDRE DE DÉMARRAGE.
    *
@@ -136,6 +162,23 @@ function registerTransactionModels(conn) {
   require("../models/CronLock")(conn);
 
   /**
+   * Règlement d'une participation à une cagnotte par LIEN PUBLIC (payeur sans
+   * compte). Déclaré ici comme les autres, et pour la même raison : un modèle
+   * résolu paresseusement n'existe que si un premier appel l'a créé, et la
+   * réconciliation — qui le cherche par `conn.models` — échouerait sur les
+   * instances qui n'en ont jamais reçu. Un contrôle qui marche ou pas selon
+   * l'instance qui gagne le verrou n'est pas un contrôle.
+   */
+  require("../models/CagnotteExternalSettlement")(conn);
+
+  /**
+   * Intention d'encaissement — l'argent qui ENTRE. Même raison d'être déclarée
+   * ici : le rapprochement prestataire la cherche par `conn.models`, et une
+   * instance qui n'a encore reçu aucun encaissement ne l'aurait pas.
+   */
+  require("../models/CollectionIntent")(conn);
+
+  /**
    * ⚠️ Ces deux modèles étaient chargés dans des `try {} catch {}` VIDES.
    * Corrigé le 2026-09-02.
    *
@@ -158,6 +201,30 @@ function registerTransactionModels(conn) {
    * les autres : un `require` nu, sans filet.
    */
   require("../models/TxSystemBalance")(conn);
+}
+
+/**
+ * ============================================================================
+ * MODÈLES DE LA BASE TARIFICATION
+ * ============================================================================
+ *
+ * Les huit modèles du domaine des prix, déplacés depuis l'API Gateway le
+ * 2026-09-10. Déclarés ICI et non paresseusement, pour la même raison que les
+ * modèles de la base transactions : un modèle résolu au premier appel n'existe
+ * pas sur les instances qui n'ont encore servi aucun devis, et tout ce qui le
+ * cherche par `conn.models` — audit d'index, pose d'index, rapprochement —
+ * échoue alors sur « modèle non enregistré », de façon imprévisible d'une
+ * instance à l'autre.
+ */
+function registerPricingModels(conn) {
+  require("../models/pricing/PricingRule")(conn);
+  require("../models/pricing/PricingRuleVersion")(conn);
+  require("../models/pricing/PricingQuote")(conn);
+  require("../models/pricing/PricingCoverageGap")(conn);
+  require("../models/pricing/PricingChangeRequest")(conn);
+  require("../models/pricing/Fee")(conn);
+  require("../models/pricing/FxRule")(conn);
+  require("../models/pricing/ExchangeRate")(conn);
 }
 
 async function connectUsersDB(uriUsers, opts) {
@@ -327,12 +394,94 @@ async function connectTransactionsDB() {
 
   attachPoolMetrics(txConn, "transactions");
 
+  /* ══════════════════════════════════════════════════════════════════════════
+   * BASE TARIFICATION
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * Ouverte APRÈS la base transactions et par le MÊME mécanisme : si son URI
+   * partage hôte et identifiants avec celle des utilisateurs, on réutilise le
+   * `MongoClient` déjà établi (`useDb`) plutôt que d'ouvrir un second pool.
+   *
+   * ⚠️ La tarification n'a PAS besoin de partager une session transactionnelle
+   * avec le grand livre, et ne doit pas prétendre le faire. Un devis est LU
+   * avant le mouvement, figé dans un `PricingQuote`, puis référencé par son
+   * identifiant au moment de l'écriture comptable. C'est la forme de Stripe :
+   * le montant des frais est arrêté à la création de l'intention, pas
+   * recalculé au moment de débiter — sinon le prix affiché au client et le prix
+   * prélevé peuvent diverger sans que personne ne le voie.
+   */
+  const uriPricing = (config.mongo || {}).pricing;
+
+  if (!uriPricing) {
+    /**
+     * Règle B.6 : on annonce l'absence AVEC sa conséquence. Le service démarre
+     * — les chemins qui ne tarifient pas restent servis — mais tout devis
+     * échouera, et il faut que ce soit lisible au déploiement plutôt que
+     * découvert par un utilisateur dont le virement échoue.
+     */
+    console.error(
+      "❌ MONGO_URI_PRICING absente — CONSÉQUENCE : aucun devis ne pourra être " +
+        "calculé, toute transaction nécessitant une tarification échouera. " +
+        "Aucun repli n'est appliqué (règle B.2)."
+    );
+  } else if (pricingConn && pricingConn.readyState === 1) {
+    registerPricingModels(pricingConn);
+  } else if (canShareMongoClient(uriUsers, uriPricing)) {
+    const { dbName } = splitMongoUri(uriPricing);
+
+    pricingConn = mongoose.connection.useDb(dbName, { useCache: true });
+
+    console.log(`✅ DB Tarification sur le client partagé : ${pricingConn.name}`);
+    registerPricingModels(pricingConn);
+  } else {
+    pricingConn = mongoose.createConnection(uriPricing, opts);
+    attachConnLogs(pricingConn, "pricing");
+
+    await pricingConn.asPromise();
+
+    console.log(`✅ DB Tarification connectée : ${pricingConn.name}`);
+    registerPricingModels(pricingConn);
+  }
+
+  if (pricingConn) attachPoolMetrics(pricingConn, "pricing");
+
   logSessionMode();
 
   return {
     usersConn: mongoose.connection,
     txConn,
+    pricingConn,
   };
+}
+
+/**
+ * Connexion de la base tarification.
+ *
+ * ⚠️ LÈVE si elle n'est pas initialisée, au lieu de rendre `null`. Un appelant
+ * qui reçoit `null` écrit `conn?.models?.X` et obtient `undefined`, puis un
+ * devis vide, puis un prix de zéro. Sur un chemin d'argent, l'absence de base
+ * doit arrêter l'opération, pas la laisser continuer sans prix (règle B.2).
+ */
+function getPricingConn() {
+  if (!pricingConn) {
+    throw new Error(
+      "Base tarification non initialisée : aucun devis ne peut être calculé. " +
+        "Vérifier MONGO_URI_PRICING."
+    );
+  }
+
+  return pricingConn;
+}
+
+/** Modèle de la base tarification, ou une erreur nommée. */
+function getPricingModel(modelName) {
+  const conn = getPricingConn();
+
+  if (!conn.models[modelName]) {
+    throw new Error(`Modèle ${modelName} non enregistré sur la base tarification`);
+  }
+
+  return conn.models[modelName];
 }
 
 function getTxConn() {
@@ -373,6 +522,9 @@ function getTxModel(modelName) {
 
 module.exports = {
   connectTransactionsDB,
+  registerPricingModels,
+  getPricingConn,
+  getPricingModel,
 
   /**
    * Exporté pour `scripts/ensureIndexes.js`, qui doit connaître la liste

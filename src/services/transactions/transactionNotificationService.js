@@ -5,12 +5,13 @@ const crypto = require("crypto");
 const runtime = require("./shared/runtime");
 
 /**
- * `logger`, `maybeSessionOpts` et `getUsersConnectionSafe` sont des fonctions :
+ * `logger` et `maybeSessionOpts` sont des fonctions :
  * les déstructurer ne déclenche aucune connexion. `User`, en revanche, est un
  * getter paresseux qui résout la base au premier accès — il est donc lu DANS
  * les fonctions, jamais ici.
  */
-const { logger, maybeSessionOpts, getUsersConnectionSafe } = runtime;
+const { logger, maybeSessionOpts } = runtime;
+const { publishDomainEvent } = require("../events/publisher");
 
 /**
  * Lecture des montants : logique pure, isolée dans `utils/txMoneyFields.js`
@@ -26,30 +27,20 @@ const {
 } = require("../../utils/txMoneyFields");
 
 /**
- * Modèles résolus au premier usage.
+ * ⚠️ CE SERVICE NE RÉSOUT PLUS AUCUN MODÈLE DU BACKEND — 2026-09-10.
  *
- * Ils l'étaient au chargement du fichier, ce qui rendait ce service — et tout
- * handler de transaction qui l'importe — impossible à charger sans base
- * connectée. C'est la raison pour laquelle `utils/txMoneyFields.js` a dû être
- * extrait « pour être testable sans connexion Mongo » : le contournement
- * n'était rendu nécessaire que par ce défaut-ci.
+ * Il détenait `Notification` et `Outbox`, résolus sur la connexion des
+ * UTILISATEURS, et écrivait donc dans deux collections dont le backend
+ * principal déclare les schémas, les index et la machine à états.
+ *
+ * Ces deux accesseurs ont disparu avec le passage au bus d'événements, et leur
+ * ABSENCE est ce qui mesure le découplage : tant qu'ils étaient là, une écriture
+ * directe pouvait revenir en une ligne. Verrouillé par
+ * `test/notificationsOnBus.test.js`.
+ *
+ * Effet de bord bienvenu : ce fichier — et tout handler de transaction qui
+ * l'importe — se charge désormais sans connexion Mongo.
  */
-let _Notification = null;
-let _Outbox = null;
-
-function notificationModel() {
-  if (!_Notification) {
-    _Notification = require("../../models/Notification")(getUsersConnectionSafe());
-  }
-  return _Notification;
-}
-
-function outboxModel() {
-  if (!_Outbox) {
-    _Outbox = require("../../models/Outbox")(getUsersConnectionSafe());
-  }
-  return _Outbox;
-}
 
 function toFloat(v, fallback = 0) {
   const n = Number(v);
@@ -331,61 +322,101 @@ async function enqueueUserNotification({
   const recipient = String(recipientId || "");
   const txId = tx?._id?.toString?.() || "";
 
-  // Forme tableau : c'est la seule que `create()` accepte avec des options.
-  await notificationModel().create(
-    [
+  if (!recipient) return;
+
+  /**
+   * ══════════════════════════════════════════════════════════════════════════
+   * ⚠️ CETTE FONCTION N'ÉCRIT PLUS DANS LES COLLECTIONS DU BACKEND — 2026-09-10
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ── Ce qu'elle faisait ─────────────────────────────────────────────────────
+   *
+   *   · `notifications` → `Notification.create([...])`
+   *   · `outboxes`      → `Outbox.insertMany([...])`
+   *
+   * Ces deux collections appartiennent au backend principal, qui en déclare les
+   * schémas, les index et la machine à états. Tx-Core y écrivait avec SA propre
+   * déclaration.
+   *
+   * C'est exactement la classe de défaut refermée sur `tx_wallet_balances`
+   * (R-06) : deux services écrivant une même collection avec deux schémas. Là
+   * -bas, un `Number` était stocké sous un champ relu comme `Decimal128` — un
+   * écart de centimes invisible pendant des mois. Ici l'enjeu n'est pas
+   * monétaire, mais le mécanisme est le même, et la divergence est garantie
+   * dès la première évolution de schéma.
+   *
+   * Le symptôme le plus parlant, déjà rencontré : le champ `priority`, absent
+   * du document écrit ici, triait en BSON comme `null` — donc AVANT les alertes
+   * de sécurité `CRITICAL`. Une notification de virement passait devant une
+   * alerte de sécurité, parce qu'un service écrivait sans connaître le tri de
+   * l'autre.
+   *
+   * ── Ce qui la remplace ─────────────────────────────────────────────────────
+   *
+   * Un événement de domaine publié DANS LA MÊME SESSION. L'équivalence est
+   * conservée à l'identique :
+   *
+   *     la transaction est confirmée  ⟺  la notification est demandée
+   *
+   * `services/notifications/notificationConsumer.js` le consomme et appelle
+   * `POST /api/v1/internal/notifications/enqueue`. Le backend redevient le seul
+   * écrivain de ses collections — et c'est lui qui crée la notification affichée
+   * ET la met en file, avec SES règles de priorité et SES index.
+   *
+   * ── La clé d'idempotence n'a pas changé ────────────────────────────────────
+   *
+   * `buildOutboxIdempotencyKey(txId, recipient, status, channel)` reste la
+   * source : le backend s'en sert pour `dedupeKey` et pour l'unicité de son
+   * outbox. La changer ferait réapparaître les notifications déjà envoyées.
+   *
+   * ⚠️ UN ÉVÉNEMENT PAR CANAL, comme avant un document d'outbox par canal. Un
+   * seul événement portant tous les canaux rendrait la clé d'idempotence
+   * ambiguë : un échec sur le courriel forcerait à rejouer la poussée.
+   */
+  for (const channel of channels.length ? channels : ["push"]) {
+    await publishDomainEvent(
       {
-        recipient,
-        type,
-        title,
-        message,
-        data,
-        read: false,
-        readAt: null,
-        date: new Date(),
-        channels: ["in_app", ...channels],
+        name: "notification.requested.v1",
+        aggregateId: txId || recipient,
+        occurredAt: new Date(),
+        payload: {
+          recipient,
+          notificationType: String(type || ""),
+          title: String(title || ""),
+          message: String(message || ""),
+          channels: [channel],
+          /**
+           * 2 = HIGH dans `paynoval-backend/services/notifications/priority.js` :
+           * « Transactions, cagnottes : l'utilisateur attend le message ».
+           * Sans cette valeur, le champ était absent et triait AVANT les
+           * alertes de sécurité `CRITICAL`.
+           */
+          priority: 2,
+          idempotencyKey: buildOutboxIdempotencyKey(
+            txId,
+            recipient,
+            status,
+            channel
+          ),
+          aggregateId: txId,
+          data: {
+            ...(data && typeof data === "object" ? data : {}),
+            meta: {
+              type: String(type || ""),
+              status: String(status || ""),
+              txId,
+              reference: tx?.reference || "",
+              role:
+                String(recipient) === String(tx?.sender || "")
+                  ? "sender"
+                  : "receiver",
+              category: "transaction",
+            },
+          },
+        },
       },
-    ],
-    { ...sessOpts }
-  );
-
-  const outboxDocs = channels.map((channel) => ({
-    service: "notifications",
-    event: "notification.deliver",
-    aggregateType: "transaction",
-    aggregateId: txId,
-    status: "pending",
-    attempts: 0,
-    maxAttempts: 8,
-    payload: {
-      userId: recipient,
-      title,
-      message,
-      data,
-      channels: [channel],
-      meta: {
-        type,
-        status,
-        txId,
-        reference: tx?.reference || "",
-        role: String(recipient) === String(tx?.sender || "") ? "sender" : "receiver",
-        category: "transaction",
-      },
-    },
-    idempotencyKey: buildOutboxIdempotencyKey(txId, recipient, status, channel),
-    // 2 = HIGH dans `paynoval-backend/services/notifications/priority.js` :
-    // « Transactions, cagnottes : l'utilisateur attend le message ». Sans cette
-    // valeur, le champ était absent et triait AVANT les alertes de sécurité.
-    priority: 2,
-    availableAt: new Date(),
-    processedAt: null,
-    lockedAt: null,
-    lockedBy: "",
-    lastError: "",
-  }));
-
-  if (outboxDocs.length) {
-    await outboxModel().insertMany(outboxDocs, { ordered: false, ...sessOpts });
+      sessOpts?.session || null
+    );
   }
 }
 
