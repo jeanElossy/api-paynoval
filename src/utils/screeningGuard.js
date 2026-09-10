@@ -67,6 +67,54 @@ function estVrai(valeur) {
   return VRAI.includes(String(valeur ?? "").trim().toLowerCase());
 }
 
+/**
+ * ============================================================================
+ * LES CINQ RAILS EXTERNES — CE QUI REND L'ÉCHAPPATOIRE CADUQUE
+ * ============================================================================
+ *
+ * ── Pourquoi le criblage et les rails sont liés ICI ────────────────────────
+ *
+ * L'échappatoire `SANCTIONS_SCREENING_ALLOW_DISABLED` est défendable tant
+ * qu'AUCUN rail externe n'est branché : sans prestataire, aucun encaissement ni
+ * virement ne part, et le criblage protège un chemin qui n'existe pas.
+ *
+ * Elle cesse de l'être à la SECONDE où un rail s'active. Or ce moment n'a pas
+ * de sonnerie : on pose `ORANGE_BASE_URL` un mardi pour tester, et l'échappatoire
+ * posée trois mois plus tôt « en attendant » est toujours là.
+ *
+ * C'est le mode de défaillance classique du contournement temporaire : il ne
+ * survit pas à un oubli, il survit à l'ABSENCE de rappel. On ne confie donc pas
+ * ce rappel à la mémoire de l'exploitant — on le rend structurel.
+ *
+ * ⚠️ CONSÉQUENCE VOULUE : poser la première URL de prestataire fait REFUSER le
+ * démarrage tant que le criblage n'est pas réel. Le contrôle de conformité
+ * redevient obligatoire exactement quand l'argent commence à bouger.
+ *
+ * `providerMode.js` applique la règle jumelle dans l'autre sens : un rail
+ * déclaré réel sans URL de base ne peut pas payer.
+ */
+const PREFIXES_RAILS = Object.freeze([
+  "ORANGE",
+  "MTN",
+  "MOOV",
+  "WAVE",
+  "VISA_DIRECT",
+]);
+
+/**
+ * Rend la liste des rails dont l'URL de base est renseignée. Fonction PURE.
+ *
+ * On regarde `<PREFIXE>_BASE_URL` et non `<PREFIXE>_MOCK=false` : c'est l'URL
+ * qui déclare l'intention. `providerMode.js` fait la même lecture — « personne
+ * ne renseigne l'URL d'Orange pour continuer à simuler ».
+ */
+function railsBranches(env = process.env) {
+  return PREFIXES_RAILS.filter((prefixe) => {
+    const url = String(env[`${prefixe}_BASE_URL`] ?? "").trim();
+    return url.length > 0;
+  });
+}
+
 /** Fournisseurs qui consultent RÉELLEMENT une liste. `mock` n'en fait pas partie. */
 const FOURNISSEURS_REELS = Object.freeze([
   "opensanctions",
@@ -100,6 +148,9 @@ function inspecterCriblage(env = process.env) {
    */
   const fermeture = estVrai(env.SANCTIONS_SCREENING_FAIL_CLOSED);
 
+  /** Les rails externes réellement configurés — voir `PREFIXES_RAILS`. */
+  const rails = railsBranches(env);
+
   let motif = "";
 
   if (!actif) motif = "SANCTIONS_SCREENING_ENABLED absente ou fausse";
@@ -115,6 +166,7 @@ function inspecterCriblage(env = process.env) {
     strict,
     production,
     echappatoire,
+    rails,
     motif,
   };
 }
@@ -170,6 +222,29 @@ function assertScreeningReady(env = process.env, logger = console) {
     );
   }
 
+  /**
+   * ⚠️ L'ÉCHAPPATOIRE NE COUVRE PAS UN RAIL BRANCHÉ.
+   *
+   * Elle est défendable tant qu'aucun prestataire externe n'est joignable.
+   * Dès qu'une URL de rail est posée, de l'argent peut sortir ou entrer — et
+   * un contournement de conformité posé « en attendant » ne doit pas survivre à
+   * ce basculement. Voir l'en-tête de `PREFIXES_RAILS`.
+   */
+  if (etat.strict && etat.echappatoire && etat.rails.length > 0) {
+    throw new ScreeningGuardError(
+      `Criblage sanctions indisponible (${etat.motif}) ALORS QUE ` +
+        `${etat.rails.length} rail(s) de paiement sont configurés : ` +
+        `${etat.rails.join(", ")}. ${consequence}\n` +
+        "  SANCTIONS_SCREENING_ALLOW_DISABLED ne couvre PAS ce cas : elle est " +
+        "prévue pour un incident sur un service qui ne déplace pas d'argent " +
+        "vers l'extérieur.\n" +
+        "  De l'argent peut désormais sortir ou entrer par ces rails. Le " +
+        "criblage doit être réel avant qu'il ne le fasse.\n" +
+        `  Renseigner SANCTIONS_SCREENING_ENABLED=true et un fournisseur réel ` +
+        `(${FOURNISSEURS_REELS.join(", ")}), ou retirer les URL de rail.`
+    );
+  }
+
   if (etat.strict && etat.echappatoire) {
     /**
      * ⚠️ `error`, pas `warn`. Une échappatoire de conformité active en
@@ -179,7 +254,9 @@ function assertScreeningReady(env = process.env, logger = console) {
     logger.error?.(
       `❌ CRIBLAGE DÉSACTIVÉ EN PRODUCTION PAR ÉCHAPPATOIRE EXPLICITE ` +
         `(${etat.motif}). ${consequence} ` +
-        "SANCTIONS_SCREENING_ALLOW_DISABLED doit être retirée dès l'incident clos."
+        "SANCTIONS_SCREENING_ALLOW_DISABLED doit être retirée dès l'incident " +
+        "clos. Elle cessera d'être acceptée dès qu'une URL de rail " +
+        `(${PREFIXES_RAILS.map((p) => `${p}_BASE_URL`).join(", ")}) sera posée.`
     );
 
     return etat;
@@ -192,6 +269,8 @@ function assertScreeningReady(env = process.env, logger = console) {
 
 module.exports = {
   FOURNISSEURS_REELS,
+  PREFIXES_RAILS,
+  railsBranches,
   ScreeningGuardError,
   inspecterCriblage,
   assertScreeningReady,

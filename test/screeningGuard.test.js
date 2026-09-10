@@ -219,3 +219,100 @@ test("le garde est réellement appelé au démarrage, et il arrête le service",
 
   assert.match(bloc, /process\.exit\(1\)/);
 });
+
+/* ==========================================================================
+ * L'ÉCHAPPATOIRE NE SURVIT PAS AU BRANCHEMENT D'UN RAIL
+ * ======================================================================== */
+
+test("sans rail branché, l'échappatoire est tolérée", () => {
+  /**
+   * C'est le régime de l'utilisateur au 2026-09-10 : aucun contrat mobile money
+   * ni carte. Sans prestataire joignable, aucun encaissement ni virement externe
+   * ne part — le criblage protège un chemin qui n'existe pas encore.
+   */
+  const etat = assertScreeningReady(
+    {
+      NODE_ENV: "production",
+      SANCTIONS_SCREENING_ALLOW_DISABLED: "true",
+    },
+    { info() {}, warn() {}, error() {} }
+  );
+
+  assert.equal(etat.reel, false);
+  assert.deepEqual(etat.rails, []);
+});
+
+test("une seule URL de rail suffit à faire refuser le démarrage", () => {
+  /**
+   * ⚠️ LE CŒUR DE CE COUPLAGE.
+   *
+   * Un contournement « en attendant » ne meurt pas d'un oubli : il meurt de
+   * l'ABSENCE de rappel. On pose `ORANGE_BASE_URL` un mardi pour un essai, et
+   * l'échappatoire posée trois mois plus tôt est toujours là — sauf si le
+   * démarrage la refuse.
+   *
+   * Le contrôle de conformité redevient donc obligatoire exactement quand
+   * l'argent peut commencer à bouger, sans que personne ait à y penser.
+   */
+  for (const prefixe of ["ORANGE", "MTN", "MOOV", "WAVE", "VISA_DIRECT"]) {
+    assert.throws(
+      () =>
+        assertScreeningReady(
+          {
+            NODE_ENV: "production",
+            SANCTIONS_SCREENING_ALLOW_DISABLED: "true",
+            [`${prefixe}_BASE_URL`]: "https://exemple.test",
+          },
+          { info() {}, warn() {}, error() {} }
+        ),
+      (err) => {
+        assert.equal(err.code, "SANCTIONS_SCREENING_REQUIRED");
+        assert.match(err.message, new RegExp(prefixe));
+        return true;
+      },
+      `${prefixe}_BASE_URL renseignée n'invalide pas l'échappatoire : un rail ` +
+        "peut déplacer de l'argent sans qu'aucune liste de sanctions soit consultée."
+    );
+  }
+});
+
+test("un criblage RÉEL autorise le démarrage même avec des rails branchés", () => {
+  /**
+   * Le volet positif. Un test qui n'interdit que des choses finit par bloquer
+   * la mise en service légitime : celui-ci exige que la configuration correcte
+   * passe.
+   */
+  const etat = assertScreeningReady(
+    {
+      NODE_ENV: "production",
+      SANCTIONS_SCREENING_ENABLED: "true",
+      SANCTIONS_SCREENING_PROVIDER: "opensanctions",
+      SANCTIONS_SCREENING_FAIL_CLOSED: "true",
+      ORANGE_BASE_URL: "https://api.orange.test",
+      WAVE_BASE_URL: "https://api.wave.test",
+    },
+    { info() {}, warn() {}, error() {} }
+  );
+
+  assert.equal(etat.reel, true);
+  assert.deepEqual(etat.rails, ["ORANGE", "WAVE"]);
+});
+
+test("une URL de rail VIDE ne compte pas comme un rail branché", () => {
+  /**
+   * Render crée souvent la variable avant qu'on la renseigne. Compter une
+   * chaîne vide comme un rail actif ferait refuser le démarrage pour une
+   * variable déclarée et jamais remplie — un refus que rien ne justifie.
+   */
+  const etat = assertScreeningReady(
+    {
+      NODE_ENV: "production",
+      SANCTIONS_SCREENING_ALLOW_DISABLED: "true",
+      ORANGE_BASE_URL: "",
+      WAVE_BASE_URL: "   ",
+    },
+    { info() {}, warn() {}, error() {} }
+  );
+
+  assert.deepEqual(etat.rails, []);
+});
