@@ -69,7 +69,21 @@ function cache() {
   _cache = createCache({
     client: getClient(),
     env: process.env.NODE_ENV || "development",
-    service: "gateway",
+    /**
+     * ⚠️ Ce segment entre DANS la clé Redis :
+     * `paynoval:<env>:<service>:<ressource>:<id>` (`cacheKeys.js`).
+     *
+     * Il a valu « gateway » jusqu'au 2026-09-10 — hérité du déplacement du
+     * domaine des prix, où seul le nom du dossier avait suivi. Tx-Core
+     * écrivait donc son cache sous le nom d'un service qui ne le lit pas :
+     * l'exploitant qui inspecte Redis l'attribuait au bord, et le segment
+     * censé SÉPARER les services en réunissait deux.
+     *
+     * Le changement invalide les entrées existantes. C'est sans conséquence :
+     * un cache n'est jamais source de vérité (invariant A1), et sans Redis ce
+     * service relit la base à chaque appel.
+     */
+    service: "tx-core",
     logger: console,
   });
   return _cache;

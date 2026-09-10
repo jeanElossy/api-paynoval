@@ -114,16 +114,27 @@ function pickBodyPricingInput(reqBody = {}) {
  *
  * ── Ce qui NE change pas, et c'est important ────────────────────────────────
  *
- * La signature, le contrat de retour et surtout `extractPricingBundle`, qui
+ * Le contrat de retour, et surtout `extractPricingBundle`, qui
  * VALIDE le devis avant de s'en servir. Un devis calculé sur place n'est pas
  * plus digne de confiance qu'un devis reçu par le réseau : un barème absent ou
  * un taux indisponible doivent toujours arrêter l'opération, jamais produire un
  * prix de zéro (règle B.2).
  *
- * `authHeader` reste accepté et ignoré : les appelants le passent encore, et
- * changer leur signature dans le même mouvement aurait mêlé deux corrections.
+ * ── Le nom, corrigé le 2026-09-10 ──────────────────────────────────────────
+ *
+ * Elle s'est appelée `fetchPricingQuoteFromGateway` jusqu'à cette date, bien
+ * après avoir cessé d'appeler quoi que ce soit. Ce nom a réellement induit en
+ * erreur : à sa lecture, on conclut que le moteur appelle le bord sur le
+ * chemin de l'argent — un défaut d'architecture majeur, qui n'existe pas.
+ *
+ * Un nom périmé ne se contente pas d'être inexact : il fait porter à celui qui
+ * le lit une conclusion fausse, avec assurance.
+ *
+ * `authHeader` a disparu de la signature dans le même mouvement. Le paramètre
+ * était accepté et ignoré ; les deux appelants continuent d'exiger un jeton
+ * `Bearer` avant d'appeler — cette vérification-là n'a pas bougé.
  */
-async function fetchPricingQuoteFromGateway({ authHeader, pricingInput }) {
+async function computePricingQuote({ pricingInput }) {
   const {
     buildRequest,
     validateRequest,
@@ -256,6 +267,6 @@ function extractPricingBundle(pricingPayload, pricingInput = {}) {
 
 module.exports = {
   pickBodyPricingInput,
-  fetchPricingQuoteFromGateway,
+  computePricingQuote,
   extractPricingBundle,
 };

@@ -29,7 +29,7 @@ const {
 
 const {
   pickBodyPricingInput,
-  fetchPricingQuoteFromGateway,
+  computePricingQuote,
   extractPricingBundle,
 } = require("../shared/pricing");
 
@@ -387,7 +387,9 @@ async function buildPricingContext({
   currencySourceISO,
   currencyTargetISO,
 }) {
-  const authHeader = ensureBearer(req);
+  /* Exige un jeton `Bearer` et lève sinon. La valeur n'est plus transmise au
+     devis — il se calcule dans le processus — mais le CONTRÔLE reste. */
+  ensureBearer(req);
   const effectiveBody = { ...body, ...req.body };
 
   const pricingInput = pickBodyPricingInput({
@@ -410,10 +412,7 @@ async function buildPricingContext({
   let pricingPayload;
 
   try {
-    pricingPayload = await fetchPricingQuoteFromGateway({
-      authHeader,
-      pricingInput,
-    });
+    pricingPayload = await computePricingQuote({ pricingInput });
   } catch (e) {
     logger.error("[pricing/quote] gateway error (external)", {
       pricingInput,

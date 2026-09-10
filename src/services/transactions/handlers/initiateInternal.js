@@ -22,7 +22,7 @@ const {
 
 const {
   pickBodyPricingInput,
-  fetchPricingQuoteFromGateway,
+  computePricingQuote,
   extractPricingBundle,
 } = require("../shared/pricing");
 
@@ -412,11 +412,16 @@ async function initiateInternal(req, res, next) {
     /**
      * PHASE 1 — PRÉPARATION, HORS TRANSACTION.
      *
-     * `fetchPricingQuoteFromGateway()` part en HTTP POST vers la passerelle
-     * avec douze secondes de délai d'attente. Aucun appel réseau ne doit se
-     * trouver dans une transaction Mongo : les verrous resteraient tenus le
-     * temps de l'attente, et au-delà de `transactionLifetimeLimitSeconds`
-     * (60 s par défaut) le serveur tuerait la transaction sous nos pieds.
+     * `computePricingQuote()` calcule le devis DANS LE PROCESSUS depuis le
+     * 2026-09-10 : le domaine des prix appartient à Tx-Core
+     * (`services/pricing/`). Il n'y a plus d'appel réseau ici.
+     *
+     * ⚠️ La séparation des phases reste néanmoins obligatoire, et pour une
+     * raison qui n'a pas disparu avec le saut réseau : le devis lit la base
+     * de tarification et peut attendre un taux de change. Toute attente
+     * placée DANS une transaction Mongo tient ses verrous pendant sa durée,
+     * et au-delà de `transactionLifetimeLimitSeconds` (60 s par défaut) le
+     * serveur tue la transaction sous nos pieds.
      *
      * Les lectures de profil se font donc sans session — elles ne servent
      * qu'à valider. L'écriture, elle, est atomique en phase 2.
@@ -576,12 +581,9 @@ async function initiateInternal(req, res, next) {
     let pricingPayload;
 
     try {
-      pricingPayload = await fetchPricingQuoteFromGateway({
-        authHeader,
-        pricingInput,
-      });
+      pricingPayload = await computePricingQuote({ pricingInput });
     } catch (e) {
-      safeLog("error", "[TX INTERNAL] pricing quote gateway error", {
+      safeLog("error", "[TX INTERNAL] pricing quote error", {
         senderId,
         toEmail: cleanEmail,
         pricingInput,
