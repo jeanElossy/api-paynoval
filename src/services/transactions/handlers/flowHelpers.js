@@ -150,7 +150,8 @@ function normalizeProviderAlias(v) {
   if (["moov", "moov_money", "flooz"].includes(s)) return "moov";
   if (["wave"].includes(s)) return "wave";
 
-  if (["bank", "banque"].includes(s)) return "bank";
+  /* « bank » retiré le 2026-09-10 : hors périmètre de lancement. Non
+     normalisé, donc non reconnu — il ne peut plus apparier aucun flux. */
 
   if (["card", "visa", "stripe", "visa_direct"].includes(s)) return s;
 
@@ -165,7 +166,7 @@ function normalizeFundsOrDestination(v) {
   if (!s) return "";
 
   if (["mobilemoney", "mobile_money", "momo"].includes(s)) return "mobilemoney";
-  if (["bank", "banque"].includes(s)) return "bank";
+  /* « bank » / « banque » retirés le 2026-09-10 — voir ci-dessus. */
   if (["card", "visa", "stripe", "visa_direct"].includes(s)) return s;
   if (["paynoval", "internal"].includes(s)) return "paynoval";
 
@@ -202,14 +203,6 @@ function resolveExternalFlow(body = {}) {
 
   if (
     funds === "paynoval" &&
-    destination === "bank" &&
-    ["send", "withdraw"].includes(action)
-  ) {
-    return OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT;
-  }
-
-  if (
-    funds === "paynoval" &&
     /* « stripe » retiré le 2026-09-09 : accepté ici, il était réécrit en
        `visa_direct` plus bas — un prestataire retiré nommé explicitement doit
        être REFUSÉ, pas substitué (règle B.2). */
@@ -225,14 +218,6 @@ function resolveExternalFlow(body = {}) {
     action === "deposit"
   ) {
     return INBOUND_EXTERNAL_FLOWS.MOBILEMONEY_COLLECTION_TO_PAYNOVAL;
-  }
-
-  if (
-    funds === "bank" &&
-    destination === "paynoval" &&
-    action === "deposit"
-  ) {
-    return INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL;
   }
 
   if (
@@ -283,12 +268,26 @@ function resolveProviderForFlow(flow, body = {}) {
     return "mobilemoney";
   }
 
-  if (
-    flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT ||
-    flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
-  ) {
-    return "bank";
-  }
+  /**
+   * ⚠️ UNE BRANCHE « bank » VIVAIT ICI, ET ELLE MORDAIT — retirée le 2026-09-10.
+   *
+   * Elle testait :
+   *
+   *     flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT ||
+   *     flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
+   *
+   * Les deux CONSTANTES avaient été retirées avec le rail bancaire — les deux
+   * membres droits valaient donc `undefined`. La condition se lisait en réalité
+   * `flow === undefined || flow === undefined`.
+   *
+   * Conséquence MESURÉE : `resolveProviderForFlow(undefined)` rendait `"bank"`.
+   * Un flux non résolu ne tombait pas sur le repli `paynoval` — il sélectionnait
+   * un rail qui n'existe plus et n'a AUCUN adaptateur.
+   *
+   * C'est la signature d'un retrait fait à moitié : on enlève les constantes,
+   * on laisse les comparaisons. Le code continue de tourner, et une comparaison
+   * privée de ses deux bornes devient une condition qui dit oui.
+   */
 
   /**
    * Les deux flux carte rendent le MÊME prestataire.

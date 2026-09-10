@@ -248,7 +248,9 @@ function inferMethodValue(reqBody = {}) {
   const provider = String(reqBody.provider || "").trim().toLowerCase();
 
   if (funds === "mobilemoney" || destination === "mobilemoney") return "MOBILEMONEY";
-  if (funds === "bank" || destination === "bank") return "BANK";
+  /* « bank » retiré du périmètre le 2026-09-10 : non normalisé, donc jamais
+     reconnu comme un rail valide. Le refus explicite des transactions héritées
+     vit dans `providers/providerSelector.js`, qui LÈVE plutôt que de router. */
   /**
    * `provider === "stripe"` a été retiré le 2026-09-09 avec le rail Stripe.
    *

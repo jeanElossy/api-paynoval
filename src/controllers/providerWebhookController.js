@@ -368,17 +368,10 @@ function inferRailFromProvider(provider) {
     return "card";
   }
 
-  if (
-    [
-      "bank",
-      "bank_generic",
-      "bankgeneric",
-      "bank-transfer",
-      "bank_transfer",
-    ].includes(p)
-  ) {
-    return "bank";
-  }
+  /* Les cinq alias bancaires ont été retirés le 2026-09-10. Un rappel
+     prestataire annonçant un rail bancaire ne peut plus être classé : il tombe
+     en chaîne vide, donc refusé. C'est voulu — PayNoval n'a plus de rail
+     bancaire, donc aucun prestataire bancaire n'a de raison de nous rappeler. */
 
   return "";
 }

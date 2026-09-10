@@ -138,3 +138,93 @@ test("les rails retirés du produit ne reviennent pas par l'énumération", () =
     );
   }
 });
+
+/* ==========================================================================
+ * UNE CONSTANTE RETIRÉE LAISSE DES COMPARAISONS QUI DISENT « OUI »
+ * ======================================================================== */
+
+test("aucune comparaison ne survit à la constante bancaire qu'elle testait", () => {
+  /**
+   * ⚠️ LE DÉFAUT MESURÉ LE 2026-09-10, ET POURQUOI IL EST DE CETTE FAMILLE.
+   *
+   * Les constantes `PAYNOVAL_TO_BANK_PAYOUT` et `BANK_TRANSFER_TO_PAYNOVAL`
+   * avaient été retirées des tables de flux — proprement. Mais les
+   * COMPARAISONS qui les testaient étaient restées dans
+   * `resolveProviderForFlow` :
+   *
+   *     flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_BANK_PAYOUT ||
+   *     flow === INBOUND_EXTERNAL_FLOWS.BANK_TRANSFER_TO_PAYNOVAL
+   *
+   * Les deux membres droits valant `undefined`, la condition se lisait
+   * `flow === undefined || flow === undefined`. Elle rendait donc VRAI pour
+   * tout flux non résolu, et `resolveProviderForFlow(undefined)` répondait
+   * `"bank"` — un rail retiré, sans adaptateur.
+   *
+   * Un retrait à moitié fait est pire qu'un retrait non fait : le premier
+   * laisse une condition privée de ses deux bornes, et une comparaison sans
+   * bornes finit par dire oui.
+   *
+   * Ce test ne verrouille pas le texte du code : il vérifie le COMPORTEMENT
+   * pour toutes les valeurs qu'un flux non résolu peut prendre.
+   */
+  const {
+    resolveProviderForFlow,
+    resolveExternalFlow,
+  } = require("../src/services/transactions/handlers/flowHelpers");
+
+  for (const flou of [undefined, null, "", "UNKNOWN_FLOW", "N_IMPORTE_QUOI"]) {
+    const prestataire = resolveProviderForFlow(flou, {});
+
+    assert.notEqual(
+      prestataire,
+      "bank",
+      `resolveProviderForFlow(${JSON.stringify(flou)}) rend « bank » : un flux ` +
+        "non résolu sélectionne un rail retiré, qui n'a aucun adaptateur."
+    );
+  }
+
+  /** Et les deux charges bancaires ne résolvent aucun flux. */
+  for (const charge of [
+    { funds: "paynoval", destination: "bank", action: "withdraw" },
+    { funds: "bank", destination: "paynoval", action: "deposit" },
+    { funds: "paynoval", destination: "banque", action: "send" },
+  ]) {
+    assert.equal(
+      resolveExternalFlow(charge),
+      "UNKNOWN_FLOW",
+      `${JSON.stringify(charge)} résout encore un flux. Le rail bancaire est ` +
+        "hors périmètre : trois rails et rien d'autre."
+    );
+  }
+});
+
+test("les trois rails du périmètre restent résolvables", () => {
+  /**
+   * Le volet positif. Un test qui n'interdit que des choses pousse à tout
+   * supprimer : celui-ci exige que le périmètre arrêté — PayNoval interne,
+   * mobile money, carte Visa — continue de fonctionner.
+   */
+  const {
+    resolveExternalFlow,
+  } = require("../src/services/transactions/handlers/flowHelpers");
+
+  const attendus = [
+    [{ funds: "paynoval", destination: "mobilemoney", action: "withdraw" },
+     "PAYNOVAL_TO_MOBILEMONEY_PAYOUT"],
+    [{ funds: "mobilemoney", destination: "paynoval", action: "deposit" },
+     "MOBILEMONEY_COLLECTION_TO_PAYNOVAL"],
+    [{ funds: "paynoval", destination: "visa_direct", action: "withdraw" },
+     "PAYNOVAL_TO_CARD_PAYOUT"],
+    [{ funds: "card", destination: "paynoval", action: "deposit" },
+     "CARD_TOPUP_TO_PAYNOVAL"],
+  ];
+
+  for (const [charge, flux] of attendus) {
+    assert.equal(
+      resolveExternalFlow(charge),
+      flux,
+      `${JSON.stringify(charge)} ne résout plus « ${flux} ». Le retrait du ` +
+        "rail bancaire a emporté un rail du périmètre."
+    );
+  }
+});

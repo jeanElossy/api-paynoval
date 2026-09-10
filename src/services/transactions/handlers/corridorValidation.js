@@ -172,7 +172,9 @@ function normalizeProvider(v) {
   if (!s) return "";
   if (s === "mobile_money" || s === "mobilemoney" || s === "momo") return "mobilemoney";
   if (s === "visa" || s === "stripe" || s === "visa_direct" || s === "card") return "card";
-  if (s === "bank" || s === "banque" || s === "bank_account") return "bank";
+  /* « bank » retiré du périmètre le 2026-09-10 : non normalisé, donc jamais
+     reconnu comme un rail valide. Le refus explicite des transactions héritées
+     vit dans `providers/providerSelector.js`, qui LÈVE plutôt que de router. */
   if (s === "paynoval" || s === "internal") return "paynoval";
 
   return s;
