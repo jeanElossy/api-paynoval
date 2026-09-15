@@ -184,6 +184,15 @@ module.exports = function buildCagnotteExternalSettlementModel(conn) {
       },
       /** Crédit arrivé après la clôture : argent encaissé, jamais refusé. */
       lateCredit: { type: Boolean, default: false },
+      /**
+       * Cumul remboursé à l'invité (2026-09-15), en devise source et cible.
+       * Sert de garde de concurrence : un remboursement ne part que du cumul
+       * qu'il a lu, et un versement refusé le rétablit.
+       */
+      refunded: {
+        source: { type: Number, default: 0, min: 0 },
+        target: { type: Number, default: 0, min: 0 },
+      },
     },
     {
       timestamps: true,

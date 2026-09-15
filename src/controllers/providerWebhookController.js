@@ -624,6 +624,8 @@ const {
 const {
   notifyCagnotteParticipation,
 } = require("../services/collections/collectionNotifier");
+const { handleGuestRefundWebhook } = require("../services/cagnotte/guestRefund");
+const { guestRefundDeps } = require("../services/cagnotte/guestRefundRepo");
 
 /**
  * ============================================================================
@@ -886,7 +888,16 @@ async function providerWebhookController(req, res, next) {
        * le laisser aller à `settleExternalTransaction` produirait
        * « transaction introuvable » et une réémission sans fin.
        */
-      result = await traiterCommeEncaissement(req.body);
+      /**
+       * Versement de REMBOURSEMENT d'un invité (2026-09-15) : il n'a ni
+       * `Transaction` ni demande d'encaissement — seulement un règlement de
+       * remboursement, retrouvé par sa référence. `null` s'il n'est pas concerné.
+       */
+      result = await handleGuestRefundWebhook(req.body, guestRefundDeps());
+
+      if (!result) {
+        result = await traiterCommeEncaissement(req.body);
+      }
 
       if (!result) {
         result = await settleExternalTransaction(req.body);

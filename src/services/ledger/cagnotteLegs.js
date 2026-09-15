@@ -33,6 +33,7 @@ const {
   cagnotteVaultClearingAccountId,
   fxConversionClearingAccountId,
   providerInboundClearingAccountId,
+  providerOutboundClearingAccountId,
   treasuryAccountId,
   transferLegs,
   assertBalanced,
@@ -401,9 +402,83 @@ function buildCagnotteRefundLots({
   return lots;
 }
 
+/**
+ * Remboursement d'un INVITÉ (2026-09-15) : l'argent sort du coffre vers le
+ * compte de SORTIE prestataire, dans la devise où l'invité a payé.
+ *
+ *   même devise :  CAGNOTTE_VAULT:T → PROVIDER_OUTBOUND:<RAIL>:T
+ *   conversion  :  CAGNOTTE_VAULT:T → FX_CONVERSION:T
+ *                  FX_CONVERSION:S  → PROVIDER_OUTBOUND:<RAIL>:S
+ *
+ * `reverse: true` rend la contre-écriture EXACTE (versement refusé par
+ * l'opérateur) : mêmes montants, sens inversé, type REVERSAL. On n'efface
+ * jamais le lot d'origine (invariant 4).
+ */
+function buildCagnotteGuestRefundLots({
+  rail,
+  sourceCurrency,
+  targetCurrency,
+  refundSource,
+  refundTarget,
+  reverse = false,
+}) {
+  const S = upper(sourceCurrency);
+  const T = upper(targetCurrency);
+  const s = money(refundSource, S, "refundSource");
+  const t = money(refundTarget, T, "refundTarget");
+  const outbound = {
+    accountType: "SYSTEM_CLEARING",
+    accountId: providerOutboundClearingAccountId(rail, S),
+    userId: null,
+  };
+  const suffix = reverse ? ".reversal" : "";
+
+  const legs = (from, to, amount, currency) =>
+    reverse
+      ? transferLegs({ from: to, to: from, amount, currency })
+      : transferLegs({ from, to, amount, currency });
+
+  const lots = [];
+
+  if (S === T) {
+    if (Math.abs(s - t) > epsilon(T)) {
+      throw legsError(
+        "CAGNOTTE_LEGS_INCONSISTENT",
+        `Remboursement invité en même devise : source ${s} ≠ cible ${t}.`
+      );
+    }
+
+    lots.push({
+      scope: `cagnotte.guest-refund.payout${suffix}`,
+      entryType: reverse ? "REVERSAL" : "REFUND",
+      stage: "cagnotte-guest-refund",
+      legs: legs(vaultAccount(T), outbound, t, T),
+    });
+  } else {
+    lots.push({
+      scope: `cagnotte.guest-refund.fx-target${suffix}`,
+      entryType: "REVERSAL",
+      stage: "cagnotte-guest-refund-fx-target",
+      legs: legs(vaultAccount(T), fxAccount(T), t, T),
+    });
+
+    lots.push({
+      scope: `cagnotte.guest-refund.fx-source${suffix}`,
+      entryType: reverse ? "REVERSAL" : "REFUND",
+      stage: "cagnotte-guest-refund-fx-source",
+      legs: legs(fxAccount(S), outbound, s, S),
+    });
+  }
+
+  for (const lot of lots) assertBalanced(lot.legs, lot.scope);
+
+  return lots;
+}
+
 module.exports = {
   buildCagnotteCreditLots,
   buildCagnotteRefundLots,
+  buildCagnotteGuestRefundLots,
   computeRefundAmounts,
   epsilon,
 };

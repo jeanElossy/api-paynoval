@@ -11,7 +11,7 @@
  */
 
 const express = require("express");
-const { body, validationResult } = require("express-validator");
+const { body, param, validationResult } = require("express-validator");
 const {
   extractInternalToken,
   matchesAnyToken,
@@ -20,6 +20,10 @@ const {
   settleExternalParticipation,
   quoteExternalParticipation,
 } = require("../controllers/cagnotteExternalSettlementController");
+const {
+  refundGuestParticipation,
+  getCagnotteRefund,
+} = require("../controllers/cagnotteGuestRefundController");
 
 const router = express.Router();
 
@@ -55,7 +59,15 @@ function checkValidation(req, res, next) {
   const errors = validationResult(req);
 
   if (!errors.isEmpty()) {
-    return res.status(400).json({ success: false, errors: errors.array() });
+    /**
+     * Champ et message SEULEMENT : `errors.array()` recopie la valeur reçue,
+     * et une valeur ici peut être un numéro de téléphone (règle B.4).
+     */
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      errors: errors.array().map((e) => ({ field: e.path || e.param, message: e.msg })),
+    });
   }
 
   return next();
@@ -122,6 +134,34 @@ router.post(
   body("provider").exists().isString().trim().notEmpty(),
   checkValidation,
   quoteExternalParticipation
+);
+
+/**
+ * Remboursement d'un INVITÉ vers son opérateur mobile money (2026-09-15).
+ * `payoutPhone` : saisi par un administrateur, vérifié contre les 4 derniers
+ * chiffres du payeur d'origine, transmis à l'opérateur puis oublié.
+ */
+router.post(
+  "/external-participation/refund",
+  verifyInternalToken,
+  body("reference").exists().isString().trim().isLength({ min: 8, max: 200 }),
+  body("idempotencyKey").exists().isString().trim().isLength({ min: 8, max: 200 }),
+  body("participationReference").exists().isString().trim().isLength({ min: 8, max: 200 }),
+  body("initiatedByUserId").exists().isString().trim().isLength({ min: 1, max: 64 }),
+  body("payoutPhone").exists().isString().trim().isLength({ min: 8, max: 24 }),
+  body("amount").optional({ nullable: true }).isFloat({ gt: 0 }).toFloat(),
+  body("reason").optional().isString().trim().isLength({ max: 500 }),
+  checkValidation,
+  refundGuestParticipation
+);
+
+/** État d'un remboursement (lu par le rapprochement du backend). */
+router.get(
+  "/refunds/:reference",
+  verifyInternalToken,
+  param("reference").isString().trim().isLength({ min: 8, max: 200 }),
+  checkValidation,
+  getCagnotteRefund
 );
 
 module.exports = router;

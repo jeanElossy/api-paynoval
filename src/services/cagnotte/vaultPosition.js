@@ -283,6 +283,38 @@ async function debitPosition({
   return updated;
 }
 
+/**
+ * Inverse EXACT de `debitPosition({ kind: "REFUND" })` — pour un remboursement
+ * invité dont le versement a été refusé par l'opérateur (2026-09-15).
+ *
+ * Solde et « collecté » rétablis, compteur de remboursements diminué. Pas de
+ * garde de clôture : l'argent n'a jamais quitté PayNoval, il revient au coffre
+ * même clos. La garde porte sur le compteur : on ne rend pas plus qu'on n'a
+ * débité.
+ */
+async function reverseRefundDebit({ Model, vaultId, currency, amount, session }) {
+  const cur = upper(currency);
+  const counter = DEBIT_KINDS.REFUND;
+  const pos = toDec(amount, cur);
+  const neg = toDec(amount, cur, { negative: true });
+
+  const updated = await Model.findOneAndUpdate(
+    { vaultId: String(vaultId), currency: cur, [counter]: { $gte: pos } },
+    { $inc: { balance: pos, collected: pos, [counter]: neg }, $set: { lastMovementAt: new Date() } },
+    { new: true, session }
+  );
+
+  if (!updated) {
+    throw positionError(
+      409,
+      "VAULT_POSITION_REVERSAL_REFUSED",
+      "Contre-passation du remboursement impossible : position introuvable, devise différente ou compteur incohérent."
+    );
+  }
+
+  return updated;
+}
+
 /** Idempotent : une position déjà close est rendue telle quelle. */
 async function closePosition({ Model, vaultId, session }) {
   const now = new Date();
@@ -304,6 +336,7 @@ module.exports = {
   getPosition,
   creditPosition,
   debitPosition,
+  reverseRefundDebit,
   closePosition,
   positionToJSON,
   assertPositionIdentity,

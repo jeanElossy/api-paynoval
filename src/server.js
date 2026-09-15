@@ -704,6 +704,9 @@ const baseRateLimitConfig = {
       req.path === "/api/v1/cagnotte/participation/refund" ||
       req.path === "/api/v1/cagnotte/vaults/open" ||
       req.path === "/api/v1/cagnotte/external-participation/quote" ||
+      // Remboursement invité et son état : appels du backend (jeton interne).
+      req.path === "/api/v1/cagnotte/external-participation/refund" ||
+      /^\/api\/v1\/cagnotte\/refunds\/[^/]+$/.test(req.path) ||
       /^\/api\/v1\/cagnotte\/vaults\/[^/]+\/position$/.test(req.path) ||
       req.path === "/api/v1/cagnotte/vault-withdrawals/settle" ||
       req.path === "/api/v1/cagnotte/closure-fees/settle" ||

@@ -298,6 +298,27 @@ function providerInboundClearingAccountId(rail, currency) {
   return `system_clearing:PROVIDER_INBOUND:${r}:${normCurrency(currency)}`;
 }
 
+/**
+ * Compte de SORTIE vers un prestataire (2026-09-15) — symétrique de
+ * `PROVIDER_INBOUND`. Premier usage : le remboursement d'un invité, versé sur
+ * son mobile money. Son solde répond à « quels versements avons-nous engagés
+ * sans qu'un relevé prestataire les ait encore rapprochés ? ». Le mêler au
+ * clearing général lui donnerait un plancher permanent, comme pour l'entrée.
+ */
+function providerOutboundClearingAccountId(rail, currency) {
+  const r = String(rail || "").trim().toUpperCase();
+
+  if (!r) {
+    // Règle B.2 : pas de rail par défaut sur une écriture financière.
+    throw new Error(
+      "providerOutboundClearingAccountId : rail absent. Un versement externe " +
+        "sans rail identifié ne peut être rapproché d'aucun relevé prestataire."
+    );
+  }
+
+  return `system_clearing:PROVIDER_OUTBOUND:${r}:${normCurrency(currency)}`;
+}
+
 function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
   return `treasury:${String(treasurySystemType || "").trim().toUpperCase()}:${normId(
     treasuryUserId
@@ -645,6 +666,7 @@ module.exports = {
   cagnotteVaultClearingAccountId,
   fxConversionClearingAccountId,
   providerInboundClearingAccountId,
+  providerOutboundClearingAccountId,
   treasuryAccountId,
 
   summarizeLegs,
