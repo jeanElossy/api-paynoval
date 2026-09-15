@@ -41,7 +41,14 @@
 const assert = require("node:assert/strict");
 const { exigerBanc } = require("./benchGuard");
 
-const VARIABLES_REQUISES = ["MONGO_URI_USERS", "MONGO_URI_TRANSACTIONS"];
+/**
+ * ⚠️ `MONGO_URI_PRICING` ajoutée le 2026-09-15. `connectTransactionsDB()` ouvre
+ * aussi la base de TARIFICATION ; non contrôlée, elle retombait sur le `.env`
+ * du dépôt, et la suite a ouvert l'Atlas de test. Toute connexion que le point
+ * d'entrée ouvre doit figurer ici — sinon le garde affirme « tout est local »
+ * pendant qu'une connexion part ailleurs.
+ */
+const VARIABLES_REQUISES = ["MONGO_URI_USERS", "MONGO_URI_TRANSACTIONS", "MONGO_URI_PRICING"];
 
 /**
  * Taille du pool — plafonne la concurrence réelle.

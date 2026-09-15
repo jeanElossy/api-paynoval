@@ -68,6 +68,13 @@ Quatre index portent à eux seuls toutes les garanties testées ici :
 | `wallet.concurrency.test.js` | même portefeuille · même utilisateur | `NO DOUBLE DEBIT` |
 | `ledger.concurrency.test.js` | même transaction | `NO DOUBLE CREDIT` · `NO INCONSISTENT LEDGER` |
 | `idempotency.concurrency.test.js` | même clé · même référence prestataire | `NO LOST TRANSACTION` |
+| `cagnotteVault.concurrency.test.js` | même coffre de cagnotte | `NO GOAL OVERFLOW` · `NO VAULT OVERDRAFT` · `NO CREDIT AFTER CLOSE` · `NO DOUBLE REVERSAL` |
+
+> ⚠️ **Depuis le 2026-09-15, le harnais exige aussi `MONGO_URI_PRICING`.**
+> `connectTransactionsDB()` ouvre une troisième connexion (tarification) ; non
+> posée, elle retombait sur le `.env` du dépôt et la suite a ouvert l'Atlas de
+> test. `docs/load/bench/env.sh` la pose sur `bench_gateway`, et `preflight.js`
+> refuse de démarrer sans elle.
 
 Après chaque rafale touchant le grand livre, la **balance de vérification**
 (`services/ledger/doubleEntry.js`) doit fermer à zéro **par devise**. C'est le
