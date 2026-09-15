@@ -29,6 +29,8 @@
  *   node scripts/ensureIndexes.js                        # SIMULATION (défaut)
  *   node scripts/ensureIndexes.js --apply                # pose TOUT
  *   node scripts/ensureIndexes.js --only=DomainEvent,ProcessedEvent --apply
+ *   node scripts/ensureIndexes.js --only=CagnotteSettlement --apply --convert
+ *                                                        # + convertit en place un index DIVERGENT
  *
  * Le défaut est la simulation, et c'est délibéré : sur une grosse collection,
  * une construction d'index lancée par mégarde se paie en latence de production.
@@ -51,9 +53,78 @@
 
 const mongoose = require("mongoose");
 const config = require("../src/config");
-const { comparerIndex, empreinteIndex } = require("../src/services/indexAudit");
+const {
+  comparerIndex,
+  empreinteIndex,
+  diagnostiquerDivergence,
+  commandesConversion,
+} = require("../src/services/indexAudit");
 
 const APPLIQUER = process.argv.includes("--apply");
+
+/**
+ * `--convert` : convertit EN PLACE un index de même clé mais d'une autre
+ * nature (simple → unique, simple → TTL), par `collMod`. Drapeau à part, car
+ * ses deux conséquences ne s'activent pas en posant de simples index : rendre
+ * un index TTL PURGE les documents hors rétention, et rendre un index unique
+ * échoue s'il existe des doublons.
+ */
+const CONVERTIR = process.argv.includes("--convert");
+
+/**
+ * Un index de même clé existe déjà, d'une autre nature : `createIndex`
+ * échouerait sur un message brut du serveur. On ne le tente pas ; on dit ce
+ * qu'il faut faire, et on le fait sous `--convert`.
+ *
+ * @returns {Promise<"converti"|"echec"|"non-traite">}
+ */
+async function traiterDivergence({ conn, modele, cle, divergence }) {
+  const collection = modele.collection.collectionName;
+
+  if (!divergence.conversion) {
+    console.log(
+      `       ⚠️  divergent — « ${divergence.nomReel} » : ${divergence.raison}. À traiter à la main ; rien n'est tenté.`
+    );
+    return "non-traite";
+  }
+
+  const commandes = commandesConversion(collection, cle, divergence);
+  const nature = divergence.conversion === "unique" ? "UNIQUE" : "TTL";
+  console.log(`       ⚠️  divergent — « ${divergence.nomReel} » existe, mais pas ${nature}. Conversion en place :`);
+  for (const commande of commandes) console.log(`         db.runCommand(${JSON.stringify(commande)})`);
+
+  if (divergence.conversion === "ttl") {
+    // Rendre un index TTL purge aussitôt ce qui dépasse la rétention : c'est
+    // une suppression de documents, elle se chiffre AVANT d'être décidée.
+    const [champ] = Object.keys(cle);
+    const seuil = new Date(Date.now() - divergence.expireAfterSeconds * 1000);
+    const purges = await modele.collection.countDocuments({ [champ]: { $lt: seuil } });
+    console.log(`         ⚠️  purgera ${purges} document(s) antérieur(s) au ${seuil.toISOString()}`);
+  }
+
+  if (!APPLIQUER || !CONVERTIR) {
+    if (APPLIQUER) console.log("       ⏭️  non converti — relancer avec --apply --convert");
+    return "non-traite";
+  }
+
+  let etapes = 0;
+  try {
+    for (const commande of commandes) {
+      await conn.db.command(commande);
+      etapes += 1;
+    }
+    console.log("       ✅ converti");
+    return "converti";
+  } catch (err) {
+    console.log(`       ⛔ échec : ${err?.message || err}`);
+    if (divergence.conversion === "unique" && etapes === 1) {
+      console.log(
+        "       ↳ l'index refuse déjà tout NOUVEAU doublon (prepareUnique). Résoudre les doublons existants, puis relancer."
+      );
+    }
+    return "echec";
+  }
+}
 
 /** `--only=A,B` → Set(["A","B"]) ; absent → `null` (aucun filtre). */
 const SEULEMENT = (() => {
@@ -76,6 +147,11 @@ const SEULEMENT = (() => {
 
 async function main() {
   config.load({ strict: false });
+
+  if (CONVERTIR && !APPLIQUER) {
+    console.error("⛔ `--convert` exige `--apply` : sans lui, rien ne serait écrit. Rien n'est tenté.");
+    process.exit(1);
+  }
 
   const uri = config.mongo?.transactions;
   if (!uri) {
@@ -100,6 +176,8 @@ async function main() {
   let aPoser = 0;
   let poses = 0;
   let echecs = 0;
+  let convertis = 0;
+  let nonTraites = 0;
 
   if (SEULEMENT) {
     /**
@@ -134,13 +212,14 @@ async function main() {
     const declares = modele.schema.indexes();
     if (!declares.length) continue;
 
-    let reels = [];
+    let indexReels = [];
     try {
-      reels = (await modele.collection.indexes()).map((i) => empreinteIndex(i.key, i));
+      indexReels = await modele.collection.indexes();
     } catch {
       // Collection encore inexistante : tous les index sont à poser.
-      reels = [];
+      indexReels = [];
     }
+    const reels = indexReels.map((i) => empreinteIndex(i.key, i));
 
     const { manquants } = comparerIndex(
       declares.map(([cle, options]) => empreinteIndex(cle, options)),
@@ -157,6 +236,15 @@ async function main() {
       aPoser += 1;
       const detail = options?.unique ? " [unique]" : options?.expireAfterSeconds ? " [TTL]" : "";
       console.log(`     · ${empreinte}${detail}`);
+
+      const divergence = diagnostiquerDivergence(cle, options, indexReels);
+      if (divergence) {
+        const issue = await traiterDivergence({ conn, modele, cle, divergence });
+        if (issue === "converti") convertis += 1;
+        else if (issue === "echec") echecs += 1;
+        else nonTraites += 1;
+        continue;
+      }
 
       if (!APPLIQUER) continue;
 
@@ -177,9 +265,14 @@ async function main() {
   if (!aPoser) {
     console.log("  ✅ Tous les index DÉCLARÉS AU SCHÉMA sont déjà posés.");
   } else if (!APPLIQUER) {
-    console.log(`  ${aPoser} index à poser. Relancer avec --apply, en heure creuse.`);
+    console.log(
+      `  ${aPoser} index à poser, dont ${nonTraites} divergent(s). Relancer avec --apply, en heure creuse` +
+        (nonTraites ? " (--convert pour convertir les divergents)." : ".")
+    );
   } else {
-    console.log(`  ${poses} posé(s), ${echecs} échec(s).`);
+    console.log(
+      `  ${poses} posé(s), ${convertis} converti(s), ${echecs} échec(s), ${nonTraites} divergent(s) non traité(s).`
+    );
   }
 
   /**
@@ -219,7 +312,9 @@ async function main() {
 `);
 
   await conn.close();
-  process.exit(echecs ? 1 : 0);
+  // Un divergent laissé en l'état est une garantie déclarée que la base ne
+  // porte pas : ce n'est pas un succès.
+  process.exit(echecs || (APPLIQUER && nonTraites) ? 1 : 0);
 }
 
 main().catch((err) => {
