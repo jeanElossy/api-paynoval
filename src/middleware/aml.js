@@ -1236,43 +1236,49 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     const dailyLimit = getDailyLimit(provider, currencyCode);
 
+    /**
+     * ÉCHEC EN FERMETURE — décision du 2026-09-15.
+     *
+     * Avant : si l'agrégation échouait, `stats` restait `null`, `dailyTotal`
+     * valait 0, et le plafond JOURNALIER — avec les contrôles de volume et de
+     * fractionnement — était sauté en silence. Une panne Mongo levait une
+     * frontière de conformité ; c'était un repli ouvert jamais tranché.
+     *
+     * Tranché comme le font les établissements de paiement régulés : un
+     * plafond qu'on ne sait pas vérifier n'autorise rien (règle B.2). Le
+     * client reçoit un 503 réessayable, aucune opération n'a lieu. Le coût en
+     * disponibilité est faible : la base qui ne sait pas agréger ne saurait
+     * pas davantage régler l'opération.
+     */
     let stats = null;
+    let statsError = null;
 
     try {
       stats = await getUserTransactionsStats(userId, provider, currencyCode);
     } catch (err) {
-      /**
-       * ⚠️ REPLI OUVERT ASSUMÉ, ET DÉSORMAIS NOMMÉ.
-       *
-       * `stats` reste `null`, donc `dailyTotal` vaut 0 quelques lignes plus
-       * bas, donc le plafond JOURNALIER ne s'applique plus — et les contrôles
-       * de volume et de fractionnement sont sautés avec lui. Une panne
-       * d'agrégation Mongo lève ainsi une frontière de conformité en silence.
-       *
-       * Le choix est un arbitrage de DISPONIBILITÉ : refuser tout paiement dès
-       * le premier hoquet de la base est l'autre extrême. Il n'a jamais été
-       * tranché explicitement — il est ici nommé, avec sa conséquence, pour
-       * qu'il puisse l'être (règle B.6) plutôt que de rester la retombée
-       * involontaire d'un `catch`.
-       *
-       * Le plafond PAR ENVOI, lui, s'applique toujours : il ne dépend d'aucune
-       * lecture en base.
-       */
-      logger.warn(
-        "[AML] Cumul journalier NON VÉRIFIÉ — statistiques indisponibles, " +
-          "le plafond journalier et les contrôles de fractionnement sont SAUTÉS",
-        {
-          error: err?.message || String(err),
-          provider,
-          userId,
-          dailyLimit,
-        }
-      );
+      statsError = err;
     }
 
-    const dailyTotal = Number.isFinite(Number(stats?.dailyTotal))
-      ? Number(stats.dailyTotal)
-      : 0;
+    const dailyTotal = Number(stats?.dailyTotal);
+
+    if (statsError || !Number.isFinite(dailyTotal) || dailyTotal < 0) {
+      logger.error("[AML] Cumul journalier ILLISIBLE — opération REFUSÉE (échec en fermeture)", {
+        error: statsError ? statsError?.message || String(statsError) : "dailyTotal illisible",
+        provider,
+        userId,
+        dailyLimit,
+        consequence: "aucun paiement ne passe tant que le cumul du jour ne se lit pas",
+      });
+
+      return res.status(503).json({
+        success: false,
+        error:
+          "Contrôle des plafonds momentanément indisponible : aucune opération n'a été effectuée. " +
+          "Réessayez dans quelques instants.",
+        code: "AML_STATS_UNAVAILABLE",
+        details: { retryable: true },
+      });
+    }
 
     const futureTotal = dailyTotal + (amount || 0);
 

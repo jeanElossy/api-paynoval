@@ -391,6 +391,71 @@ function buildAmountExpression() {
 /* AML stats                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* Participations de cagnotte (2026-09-15)                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Une participation de cagnotte débite le solde PayNoval du participant, mais
+ * elle vit dans `tx_cagnotte_settlements`, pas dans `transactions` : elle
+ * échappait au cumul journalier. Vingt participations juste sous le plafond
+ * par envoi passaient donc toutes, là où vingt transferts auraient été
+ * arrêtés au plafond journalier.
+ *
+ * Elles comptent désormais, dans la devise SOURCE (celle du participant, que
+ * le plafond vise) et seulement sur le rail PayNoval : une participation ne
+ * passe par aucun autre.
+ */
+function appliesToCagnotteParticipations(provider) {
+  const p = normalizeProvider(provider);
+  return !p || p === "paynoval";
+}
+
+function cagnotteParticipationMatch({ userId, currency, since }) {
+  const match = {
+    userId: String(userId),
+    status: "confirmed",
+    schemaVersion: { $gte: 2 },
+    createdAt: { $gte: since },
+  };
+
+  if (currency) match["source.currency"] = currency;
+  return match;
+}
+
+function resolveCagnotteSettlementModel() {
+  const { getTxConn } = require("../config/db");
+  const conn = getTxConn();
+  return conn.models.CagnotteSettlement || require("../models/CagnotteSettlement")(conn);
+}
+
+/**
+ * Cumul 24 h et nombre sur la dernière heure. N'avale AUCUNE erreur : une
+ * lecture impossible remonte à l'appelant, qui applique la politique déjà
+ * nommée pour les statistiques indisponibles (voir `middleware/aml.js`) —
+ * pas un second repli à zéro, silencieux celui-là.
+ */
+async function getCagnotteParticipationStats({ userId, currency, provider, since24h, since1h, Model = null }) {
+  if (!userId || !appliesToCagnotteParticipations(provider)) {
+    return { dailyTotal: 0, lastHour: 0 };
+  }
+
+  const M = Model || resolveCagnotteSettlementModel();
+  const rows = await M.aggregate([
+    { $match: cagnotteParticipationMatch({ userId, currency, since: since24h }) },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: "$source.amount" },
+        lastHour: { $sum: { $cond: [{ $gte: ["$createdAt", since1h] }, 1, 0] } },
+      },
+    },
+  ]);
+
+  const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+  return { dailyTotal: safeNumber(row?.total), lastHour: Number(row?.lastHour || 0) };
+}
+
 async function getUserTransactionsStats(userId, provider, currencyISO = null) {
   const uid = String(userId || "").trim();
 
@@ -497,10 +562,19 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
     ? Math.max(...Object.values(destCount))
     : 0;
 
+  const cagnotte = await getCagnotteParticipationStats({
+    userId: uid,
+    currency,
+    provider,
+    since24h: last24hDate,
+    since1h: lastHourDate,
+  });
+
   return {
-    lastHour: Number(lastHour || 0),
-    dailyTotal: safeNumber(dailyTotal),
+    lastHour: Number(lastHour || 0) + cagnotte.lastHour,
+    dailyTotal: safeNumber(dailyTotal) + cagnotte.dailyTotal,
     sameDestShortTime: Number(sameDestShortTime || 0),
+    cagnotteDailyTotal: cagnotte.dailyTotal,
   };
 }
 
@@ -565,4 +639,8 @@ module.exports = {
   normalizeIso,
   safeNumber,
   buildCurrencyOrMatch,
+
+  appliesToCagnotteParticipations,
+  cagnotteParticipationMatch,
+  getCagnotteParticipationStats,
 };
