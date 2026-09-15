@@ -694,6 +694,17 @@ const baseRateLimitConfig = {
 
     if (
       req.path === "/api/v1/cagnotte/participation/settle" ||
+      /**
+       * Devis, remboursement et position de coffre (2026-09-10) : même nature
+       * que le règlement — appels service-à-service du backend, authentifiés
+       * par jeton interne. Le trafic utilisateur est limité en amont, au bord
+       * et dans le backend, là où l'utilisateur est connu.
+       */
+      req.path === "/api/v1/cagnotte/participation/quote" ||
+      req.path === "/api/v1/cagnotte/participation/refund" ||
+      req.path === "/api/v1/cagnotte/vaults/open" ||
+      req.path === "/api/v1/cagnotte/external-participation/quote" ||
+      /^\/api\/v1\/cagnotte\/vaults\/[^/]+\/position$/.test(req.path) ||
       req.path === "/api/v1/cagnotte/vault-withdrawals/settle" ||
       req.path === "/api/v1/cagnotte/closure-fees/settle" ||
       /**
@@ -1249,6 +1260,21 @@ async function bootstrap() {
     } catch (err) {
       logger.error(
         `❌ Annonce des jetons internes impossible : ${err?.message || err}`
+      );
+    }
+
+    /**
+     * Module Cagnotte (2026-09-10) : sans les deux trésoreries, tout
+     * règlement avec frais ou marge de change est REFUSÉ en fermeture. Le dire
+     * ici, avec sa conséquence, plutôt qu'à la première participation.
+     */
+    try {
+      const { announceCagnotteReadiness } = require("./utils/cagnotteReadiness");
+
+      announceCagnotteReadiness(process.env, logger);
+    } catch (err) {
+      logger.error(
+        `❌ Annonce du module Cagnotte impossible : ${err?.message || err}`
       );
     }
 

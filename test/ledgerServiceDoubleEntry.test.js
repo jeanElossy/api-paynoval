@@ -459,105 +459,109 @@ const PAYEUR = "dddddddddddddddddddddddd";
 const BENEFICIAIRE = "eeeeeeeeeeeeeeeeeeeeeeee";
 const REGLEMENT = "2b2b2b2b2b2b2b2b2b2b2b2b";
 
-test("participation sans frais : payeur → compensation cagnotte", async () => {
-  const batch = await expectBalancedPair("participation", () =>
-    ledger.postCagnotteParticipationEntries({
-      settlementId: REGLEMENT,
-      reference: "CAGPART-TEST-001",
-      payer: { userId: PAYEUR, amount: 5000, currency: "XOF" },
-      feeCredit: null,
-    })
-  );
+const { buildCagnotteCreditLots } = require("../src/services/ledger/cagnotteLegs");
 
-  assert.equal(batch.length, 2, "un débit, une contrepartie");
+const FEES = { userId: CAGNOTTE_TREASURY, systemType: "CAGNOTTE_FEES_TREASURY" };
+const FX_MARGIN = { userId: "abababababababababababab", systemType: "FX_MARGIN_TREASURY" };
 
-  const debit = batch.find((d) => d.direction === "DEBIT");
-  const credit = batch.find((d) => d.direction === "CREDIT");
-
-  assert.equal(debit.accountType, "USER_WALLET");
-  assert.ok(debit.accountId.includes(PAYEUR), "le débit porte le payeur");
-
-  /**
-   * ⚠️ La contrepartie va sur la compensation CAGNOTTE, pas sur la compensation
-   * générale. Le solde de `system_clearing:<devise>` sert à détecter des fonds
-   * bloqués en transit et doit revenir à zéro ; l'encours d'une cagnotte
-   * ouverte est légitimement non nul et durable. Les mélanger rendrait le seul
-   * indicateur de fonds bloqués illisible.
-   */
-  assert.equal(credit.accountType, "SYSTEM_CLEARING");
-  assert.equal(
-    credit.accountId,
-    "system_clearing:CAGNOTTE_VAULT:XOF",
-    "la compensation cagnotte doit rester distincte de la compensation générale"
-  );
-});
-
-test("participation avec frais : deux lots, équilibrés CHACUN par devise", async () => {
+test("participation XOF → XOF : un lot de frais, un lot de crédit, chacun équilibré", async () => {
   written.length = 0;
 
-  await ledger.postCagnotteParticipationEntries({
+  await ledger.postCagnotteLotEntries({
     settlementId: REGLEMENT,
-    reference: "CAGPART-TEST-002",
-    payer: { userId: PAYEUR, amount: 5000, currency: "XOF" },
-    feeCredit: {
-      treasuryUserId: CAGNOTTE_TREASURY,
-      treasurySystemType: "CAGNOTTE_FEES_TREASURY",
-      amount: 1.25,
-      currency: "CAD",
-    },
+    reference: "CAGPART-TEST-001",
+    lots: buildCagnotteCreditLots({
+      origin: { kind: "USER_WALLET", userId: PAYEUR },
+      sourceCurrency: "XOF",
+      targetCurrency: "XOF",
+      gross: 5000,
+      fee: 13,
+      netSource: 4987,
+      netTarget: 4987,
+      feesTreasury: FEES,
+    }),
   });
 
-  assert.equal(written.length, 2, "le débit et les frais sont deux lots distincts");
+  assert.equal(written.length, 2, "frais et crédit sont deux lots distincts");
 
-  /**
-   * ⚠️ DEUX LOTS, ET C'EST LA RAISON D'ÊTRE DU DÉCOUPAGE.
-   *
-   * Le payeur paie en XOF, la trésorerie encaisse en CAD. Fondus en un seul
-   * lot, l'équilibre par devise serait impossible à satisfaire — et le refus
-   * de `checkBalanced` porterait sur une écriture pourtant légitime.
-   */
   for (const [i, lot] of written.entries()) {
     const verdict = checkBalanced(asLegs(lot));
     assert.equal(verdict.ok, true, `lot ${i} déséquilibré : ${verdict.detail}`);
   }
 
-  const fraisLot = written[1];
-  const debitFrais = fraisLot.find((d) => d.direction === "DEBIT");
-  const creditFrais = fraisLot.find((d) => d.direction === "CREDIT");
+  const credit = written[1].find((d) => d.direction === "CREDIT");
 
-  assert.equal(
-    debitFrais.accountId,
-    "system_clearing:CAGNOTTE_VAULT:CAD",
-    "les frais se prélèvent SUR LE COFFRE, pas sur le payeur une seconde fois"
-  );
-  assert.equal(creditFrais.accountType, "TREASURY");
-  assert.ok(
-    creditFrais.accountId.includes("CAGNOTTE_FEES_TREASURY"),
-    "les frais de cagnotte vont à la trésorerie cagnotte"
-  );
+  /**
+   * ⚠️ La contrepartie va sur la compensation CAGNOTTE, pas sur la compensation
+   * générale : l'encours d'une cagnotte ouverte est légitimement non nul et
+   * durable, le mélanger rendrait illisible l'indicateur des fonds bloqués.
+   */
+  assert.equal(credit.accountId, "system_clearing:CAGNOTTE_VAULT:XOF");
+  assert.equal(written[0].find((d) => d.direction === "DEBIT").accountType, "USER_WALLET");
+  assert.ok(written[0].find((d) => d.direction === "CREDIT").accountId.includes("CAGNOTTE_FEES_TREASURY"));
 });
 
-test("participation à frais nuls : AUCUN lot de frais, et pas un lot à zéro", async () => {
-  /**
-   * Le créateur qui participe à sa propre cagnotte ne paie pas de frais : le
-   * backend envoie `amount: 0`. Un lot à zéro serait refusé par `checkBalanced`
-   * (`bad-amount`) et ferait échouer une participation légitime.
-   */
+test("participation CAD → XOF : le coffre ne reçoit QUE des XOF, la conversion passe par FX_CONVERSION", async () => {
   written.length = 0;
 
-  await ledger.postCagnotteParticipationEntries({
+  await ledger.postCagnotteLotEntries({
     settlementId: REGLEMENT,
-    reference: "CAGPART-TEST-003",
-    payer: { userId: PAYEUR, amount: 5000, currency: "XOF" },
-    feeCredit: {
-      treasuryUserId: CAGNOTTE_TREASURY,
-      treasurySystemType: "CAGNOTTE_FEES_TREASURY",
-      amount: 0,
-      currency: "CAD",
-    },
+    reference: "CAGPART-TEST-002",
+    lots: buildCagnotteCreditLots({
+      origin: { kind: "USER_WALLET", userId: PAYEUR },
+      sourceCurrency: "CAD",
+      targetCurrency: "XOF",
+      gross: 100,
+      fee: 0.25,
+      netSource: 99.75,
+      netTarget: 43703,
+      fxRevenue: 217,
+      feesTreasury: FEES,
+      fxMarginTreasury: FX_MARGIN,
+    }),
   });
 
-  assert.equal(written.length, 1, "un seul lot : le débit du payeur");
+  assert.equal(written.length, 3, "frais (CAD), sortie source (CAD), entrée cible (XOF)");
+
+  for (const [i, lot] of written.entries()) {
+    const verdict = checkBalanced(asLegs(lot));
+    assert.equal(verdict.ok, true, `lot ${i} déséquilibré : ${verdict.detail}`);
+  }
+
+  const toutes = written.flat();
+
+  /**
+   * ⚠️ R-16 : l'ancienne primitive créditait `CAGNOTTE_VAULT:CAD`. Le retrait,
+   * lui, débite `CAGNOTTE_VAULT:XOF` — la conversion n'existait nulle part.
+   */
+  assert.equal(
+    toutes.filter((d) => d.accountId.startsWith("system_clearing:CAGNOTTE_VAULT:") && d.currency !== "XOF").length,
+    0,
+    "aucune jambe du compte de coffre dans une autre devise que celle de la cagnotte"
+  );
+  assert.ok(toutes.some((d) => d.accountId === "system_clearing:FX_CONVERSION:CAD" && d.direction === "CREDIT"));
+  assert.ok(toutes.some((d) => d.accountId === "system_clearing:FX_CONVERSION:XOF" && d.direction === "DEBIT"));
+  assert.ok(toutes.some((d) => d.accountId.includes("FX_MARGIN_TREASURY") && d.entryType === "FX_REVENUE"));
+});
+
+test("participation sans frais : AUCUN lot de frais, et pas un lot à zéro", async () => {
+  written.length = 0;
+
+  await ledger.postCagnotteLotEntries({
+    settlementId: REGLEMENT,
+    reference: "CAGPART-TEST-003",
+    lots: buildCagnotteCreditLots({
+      origin: { kind: "USER_WALLET", userId: PAYEUR },
+      sourceCurrency: "XOF",
+      targetCurrency: "XOF",
+      gross: 5000,
+      fee: 0,
+      netSource: 5000,
+      netTarget: 5000,
+    }),
+  });
+
+  assert.equal(written.length, 1, "un seul lot : le crédit du coffre");
 });
 
 test("retrait de coffre : compensation cagnotte → bénéficiaire", async () => {
@@ -632,13 +636,15 @@ test("une écriture de cagnotte REFUSE une autre trésorerie", async () => {
 test("les primitives de cagnotte échouent en FERMETURE, jamais par défaut", async () => {
   written.length = 0;
 
-  // Montant absent : refus, pas une écriture à zéro.
-  await assert.rejects(() =>
-    ledger.postCagnotteParticipationEntries({
-      settlementId: REGLEMENT,
-      reference: "CAGPART-TEST-004",
-      payer: { userId: PAYEUR, amount: null, currency: "XOF" },
-    })
+  // Aucun lot : refus, pas un mouvement de cagnotte sans écriture.
+  await assert.rejects(
+    () =>
+      ledger.postCagnotteLotEntries({
+        settlementId: REGLEMENT,
+        reference: "CAGPART-TEST-004",
+        lots: [],
+      }),
+    /aucun lot/
   );
 
   // Identifiant de règlement absent : refus.

@@ -90,7 +90,12 @@ const ScopeSchema = new mongoose.Schema(
   {
     txType: {
       type: String,
-      enum: ["TRANSFER", "DEPOSIT", "WITHDRAW", "ALL"],
+      /**
+       * `CAGNOTTE_PARTICIPATION` / `CAGNOTTE_CLOSURE` (2026-09-10) : les frais
+       * de cagnotte étaient codés en dur (0,25 % et 0,5 %) dans le backend.
+       * Ils relèvent désormais des mêmes règles gouvernées que les virements.
+       */
+      enum: ["TRANSFER", "DEPOSIT", "WITHDRAW", "CAGNOTTE_PARTICIPATION", "CAGNOTTE_CLOSURE", "ALL"],
       default: "ALL",
       index: true,
     },

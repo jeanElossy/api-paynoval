@@ -1,13 +1,30 @@
 "use strict";
 
+/**
+ * Routes internes de participation à une cagnotte (appelées par le backend
+ * principal seul, jeton interne en temps constant).
+ *
+ *   POST /participation/quote      devis figé — passe par l'AML existant
+ *   POST /participation/settle     règlement d'un devis
+ *   POST /participation/refund     contre-écriture au taux d'origine
+ *   POST /vaults/open              position du coffre, devise figée
+ *   GET  /vaults/:vaultId/position lecture pour la réconciliation
+ */
+
 const express = require("express");
 const {
   extractInternalToken,
   matchesAnyToken,
 } = require("../utils/internalTokens");
-const { body, validationResult } = require("express-validator");
+const { body, param, validationResult } = require("express-validator");
+const amlMiddleware = require("../middleware/aml");
 const {
+  attachCagnotteParticipant,
+  quoteCagnotteParticipation,
   settleCagnotteParticipation,
+  refundCagnotteParticipation,
+  openCagnotteVaultPosition,
+  getCagnotteVaultPosition,
 } = require("../controllers/cagnotteSettlementController");
 
 const router = express.Router();
@@ -21,12 +38,8 @@ function verifyInternalToken(req, res, next) {
   ).trim();
 
   /**
-   * ⚠️ La comparaison était un `!==` simple : le temps de réponse variait avec
-   * la longueur du préfixe commun, ce qui rend le jeton devinable caractère par
-   * caractère par une mesure statistique. `matchesAnyToken` (utils/internalTokens)
-   * compare en temps constant, et c'est la MÊME implémentation que le reste du
-   * service — le dépôt comptait quatre façons différentes de répondre à « ce
-   * jeton est-il valide ? », ce qui garantissait qu'elles divergeraient.
+   * Comparaison en temps constant via `utils/internalTokens` — la MÊME
+   * implémentation que le reste du service.
    */
   const got = extractInternalToken(req);
 
@@ -52,26 +65,77 @@ function checkValidation(req, res, next) {
   if (!errors.isEmpty()) {
     return res.status(400).json({
       success: false,
+      code: "VALIDATION_ERROR",
       errors: errors.array(),
     });
   }
   return next();
 }
 
+const currencyField = (name) =>
+  body(name).exists().isString().trim().isLength({ min: 3, max: 3 }).isAlpha().toUpperCase();
+
+const idField = (name) => body(name).exists().isString().trim().isLength({ min: 1, max: 64 });
+
+router.post(
+  "/participation/quote",
+  verifyInternalToken,
+  body("userId").exists().isMongoId(),
+  idField("cagnotteId"),
+  idField("vaultId"),
+  currencyField("cagnotteCurrency"),
+  body("amount").exists().isFloat({ gt: 0 }).toFloat(),
+  checkValidation,
+  attachCagnotteParticipant,
+  amlMiddleware,
+  quoteCagnotteParticipation
+);
+
 router.post(
   "/participation/settle",
   verifyInternalToken,
+  body("quoteId").optional().isString().trim().isLength({ min: 8, max: 64 }),
   body("reference").exists().isString().trim().isLength({ min: 8, max: 200 }),
   body("idempotencyKey").exists().isString().trim().isLength({ min: 8, max: 200 }),
-  body("userId").exists().isString().trim().notEmpty(),
-  body("treasuryUserId").optional().isString().trim().notEmpty(),
-  body("treasurySystemType").optional().isString().trim().notEmpty(),
-  body("payer.amount").exists().isFloat({ gt: 0 }).toFloat(),
-  body("payer.currency").exists().isString().trim().isLength({ min: 3, max: 4 }),
-  body("feeCredit.amount").optional().isFloat({ min: 0 }).toFloat(),
-  body("feeCredit.currency").optional().isString().trim().isLength({ min: 3, max: 4 }),
+  body("userId").exists().isMongoId(),
+  idField("cagnotteId"),
+  idField("vaultId"),
+  body("cagnotteCurrency").optional().isString().trim().isLength({ min: 3, max: 3 }).toUpperCase(),
+  body("goalCap").optional({ nullable: true }).isFloat({ gt: 0 }).toFloat(),
+  body("replayOnly").optional().isBoolean().toBoolean(),
   checkValidation,
   settleCagnotteParticipation
+);
+
+router.post(
+  "/participation/refund",
+  verifyInternalToken,
+  body("reference").exists().isString().trim().isLength({ min: 8, max: 200 }),
+  body("idempotencyKey").exists().isString().trim().isLength({ min: 8, max: 200 }),
+  body("participationReference").exists().isString().trim().isLength({ min: 8, max: 200 }),
+  body("initiatedByUserId").exists().isString().trim().isLength({ min: 1, max: 64 }),
+  body("amount").optional({ nullable: true }).isFloat({ gt: 0 }).toFloat(),
+  body("reason").optional().isString().trim().isLength({ max: 500 }),
+  checkValidation,
+  refundCagnotteParticipation
+);
+
+router.post(
+  "/vaults/open",
+  verifyInternalToken,
+  idField("vaultId"),
+  idField("cagnotteId"),
+  currencyField("currency"),
+  checkValidation,
+  openCagnotteVaultPosition
+);
+
+router.get(
+  "/vaults/:vaultId/position",
+  verifyInternalToken,
+  param("vaultId").isString().trim().isLength({ min: 1, max: 64 }),
+  checkValidation,
+  getCagnotteVaultPosition
 );
 
 module.exports = router;

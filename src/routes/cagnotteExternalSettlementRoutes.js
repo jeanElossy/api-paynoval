@@ -18,6 +18,7 @@ const {
 } = require("../utils/internalTokens");
 const {
   settleExternalParticipation,
+  quoteExternalParticipation,
 } = require("../controllers/cagnotteExternalSettlementController");
 
 const router = express.Router();
@@ -95,16 +96,32 @@ router.post(
   body("providerReference").optional().isString().trim(),
 
   body("cagnotteId").exists().isString().trim().notEmpty(),
-  body("vaultId").optional().isString().trim(),
+  // Le coffre est désormais OBLIGATOIRE : c'est sa position qui est créditée.
+  body("vaultId").exists().isString().trim().notEmpty(),
+  body("cagnotteCurrency").exists().isString().trim().isLength({ min: 3, max: 3 }).toUpperCase(),
 
   body("collected.amount").exists().isFloat({ gt: 0 }).toFloat(),
-  body("collected.currency").exists().isString().trim().isLength({ min: 3, max: 4 }),
+  body("collected.currency").exists().isString().trim().isLength({ min: 3, max: 3 }).toUpperCase(),
 
-  body("feeCredit.amount").optional().isFloat({ min: 0 }).toFloat(),
-  body("feeCredit.currency").optional().isString().trim().isLength({ min: 3, max: 4 }),
+  // Frais et conversion sont calculés par Tx-Core : aucun montant de frais
+  // n'est lu dans le corps.
+  body("country").optional().isString().trim().isLength({ max: 60 }),
 
   checkValidation,
   settleExternalParticipation
+);
+
+router.post(
+  "/external-participation/quote",
+  verifyInternalToken,
+  body("cagnotteId").exists().isString().trim().notEmpty(),
+  body("cagnotteCurrency").exists().isString().trim().isLength({ min: 3, max: 3 }).toUpperCase(),
+  body("currency").optional().isString().trim().isLength({ min: 3, max: 3 }).toUpperCase(),
+  body("amount").exists().isFloat({ gt: 0 }).toFloat(),
+  body("rail").exists().isString().trim().notEmpty(),
+  body("provider").exists().isString().trim().notEmpty(),
+  checkValidation,
+  quoteExternalParticipation
 );
 
 module.exports = router;

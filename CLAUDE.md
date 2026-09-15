@@ -235,6 +235,17 @@ Architecture complète : [`../.claude/context/redis.md`](../.claude/context/redi
 - **TLS uniquement sur `rediss://`.** Le `{ tls: {} }` inconditionnel d'avant forçait la poignée de main même sur `redis://` : elle échouait, le client ne se connectait jamais, et le service tournait avec un magasin inutilisable — sans repli, puisque `RedisStore` était bel et bien construit. La limitation ne comptait donc plus rien.
 - Monter en `express-rate-limit@7` rendrait `resilientStore` inutile. C'est une décision à prendre séparément : c'est le service qui bouge l'argent.
 
+## Module Cagnotte (refonte du 2026-09-10)
+
+Contrat : [`../docs/architecture/cagnotte-module.md`](../docs/architecture/cagnotte-module.md). Tx-Core est l'autorité de TOUT mouvement de cagnotte ; le backend principal ne fait que projeter.
+
+- **Devis puis règlement** (`controllers/cagnotteSettlementController.js`) : le devis (`CagnotteQuote`, base transactions, TTL `CAGNOTTE_QUOTE_TTL_SECONDS`) lit la devise source sur le `User` et la devise cible sur la position du coffre, et passe par `amlMiddleware` ; le règlement consomme le devis `ACTIVE → USED` DANS la transaction du débit. Aucun montant, taux ni frais n'est accepté d'un appelant ; l'ancien corps `payer/feeCredit` rend 410. `replayOnly: true` rend un règlement existant sans jamais en déclencher un nouveau.
+- **Prix** : `services/cagnotte/participationPricing.js` sur le moteur `PricingRule` (`txType` `CAGNOTTE_PARTICIPATION` / `CAGNOTTE_CLOSURE`). Sans règle : 503 `PRICING_UNAVAILABLE`. Même devise ⇒ aucun taux, même si une règle en déclare un. Seed : `npm run seed:cagnotte-pricing` dépose des demandes de changement à APPROUVER (`--apply --requested-by=<staffId>`).
+- **Position du coffre** (`CagnotteVaultPosition`, Decimal128, devise immuable, `services/cagnotte/vaultPosition.js`) : crédits (objectif, clôture) et débits (retrait, frais de clôture, remboursement) CONDITIONNELS. Un retrait sans position répond `VAULT_POSITION_MISSING` — rattrapage : `npm run backfill:cagnotte-positions`.
+- **Grand livre** : lots construits par `services/ledger/cagnotteLegs.js` (pur, prouvé corridor par corridor dans `test/cagnotteModule.test.js`), posés par `ledgerService.postCagnotteLotEntries`. `CAGNOTTE_VAULT:<CUR>` ne porte que la devise de la cagnotte ; la conversion passe par `system_clearing:FX_CONVERSION:<CUR>`, la marge par `FX_MARGIN_TREASURY`.
+- **Trésoreries requises** : `CAGNOTTE_FEES_TREASURY_USER_ID`, `FX_MARGIN_TREASURY_USER_ID` — annoncées au démarrage (`utils/cagnotteReadiness.js`), refus en fermeture sinon.
+- Devises activées : `CAGNOTTE_SUPPORTED_CURRENCIES` (défaut XOF, XAF, CAD, USD, EUR, GBP) — la matrice des corridors se dérive de cette liste.
+
 ## Conventions et pièges du dépôt
 
 - **Blocs hérités commentés** : une dizaine de fichiers commencent par une ancienne version intégralement commentée, la version vivante étant plus bas (`server.js` : ~650 lignes ; `routes/transactionsRoutes.js` : le code réel commence ligne ~740 ; aussi `handlers/initiateByFlow.js`, `handlers/cancelTransaction.js`, `handlers/submitExternalExecution.js`, `providers/providerExecutorRegistry.js`, `models/User.js`, `models/LedgerEntry.js`, `controllers/providerWebhook*`, `controllers/cagnotte*`). **Toujours vérifier qu'on édite le bloc actif**, et ne pas supprimer ces blocs sans demande explicite.

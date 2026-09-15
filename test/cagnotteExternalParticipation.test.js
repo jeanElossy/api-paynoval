@@ -185,23 +185,17 @@ test("un lot amputé de sa contrepartie est REFUSÉ", () => {
 /* La primitive est bien exposée                                              */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-test("postCagnotteExternalParticipationEntries est exportée par ledgerService", () => {
+test("un seul poseur de lots pour l'application ET l'invité", () => {
   /**
-   * `ledgerService` ouvre une connexion Mongo au chargement ? Non — il résout
-   * ses modèles paresseusement. On peut donc l'importer dans un test pur.
+   * Les deux anciennes primitives (`postCagnotteParticipationEntries`,
+   * `postCagnotteExternalParticipationEntries`) créditaient le coffre dans la
+   * devise du payeur (R-16), et la seconde écrivait un type d'écriture absent
+   * du modèle. Elles ne doivent pas revenir : deux chemins qui font la même
+   * chose métier appellent la même primitive.
    */
   const ledger = require("../src/services/ledgerService");
 
-  assert.equal(
-    typeof ledger.postCagnotteExternalParticipationEntries,
-    "function",
-    "La primitive doit être exportée : c'est elle que `externalPaymentCallback` " +
-      "devra appeler à la place de son `$inc: { balance }` hors grand livre."
-  );
-
-  assert.equal(
-    typeof ledger.postCagnotteParticipationEntries,
-    "function",
-    "La primitive du chemin authentifié ne doit pas avoir disparu au passage."
-  );
+  assert.equal(typeof ledger.postCagnotteLotEntries, "function");
+  assert.equal(ledger.postCagnotteParticipationEntries, undefined);
+  assert.equal(ledger.postCagnotteExternalParticipationEntries, undefined);
 });

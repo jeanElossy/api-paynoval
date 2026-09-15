@@ -66,8 +66,13 @@ function code(fichier) {
 const CHEMINS = [
   {
     fichier: "cagnotteSettlementController.js",
-    primitive: "postCagnotteParticipationEntries",
-    mouvement: "débite le portefeuille du payeur et crédite la trésorerie cagnotte",
+    primitive: "postCagnotteLotEntries",
+    mouvement: "débite le portefeuille du payeur, crédite le coffre et les trésoreries",
+  },
+  {
+    fichier: "cagnotteExternalSettlementController.js",
+    primitive: "postCagnotteLotEntries",
+    mouvement: "crédite le coffre d'un encaissement prestataire",
   },
   {
     fichier: "cagnotteVaultWithdrawalSettlementController.js",

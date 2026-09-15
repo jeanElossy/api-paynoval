@@ -5,45 +5,35 @@
  * RÈGLEMENT D'UNE PARTICIPATION PAR LIEN PUBLIC — LE PAYEUR N'A PAS DE COMPTE
  * ============================================================================
  *
- * Jumeau externe de `cagnotteSettlementController.js`. Même contrat, mêmes
- * garanties, UNE différence : il n'y a aucun portefeuille à débiter.
+ * Jumeau externe de `cagnotteSettlementController.js` : même poseur de lots,
+ * même position de coffre, même moteur de prix. UNE différence : l'origine des
+ * fonds est l'entrée prestataire du rail, pas un portefeuille.
  *
- * ── Le défaut que ce contrôleur ferme (trouvé le 2026-09-09) ────────────────
+ * ── Ce qui a changé le 2026-09-10 ──────────────────────────────────────────
  *
- * Le chemin public ne bookait rien. Le rappel prestataire
- * (`cagnotteController.externalPaymentCallback`, backend principal) créditait le
- * coffre par un `$inc: { balance: netToVault }` nu — aucun appel à TX Core,
- * aucune `LedgerEntry`. Les invariants 2 (le grand livre fait foi) et 4
- * (auditabilité) tombaient ensemble.
+ *   · Les FRAIS et la CONVERSION sont calculés ICI (`PricingRule`), et non plus
+ *     reçus du backend. Celui-ci ne transmet que ce que le prestataire a
+ *     encaissé — montant et devise, lus sur le rappel signé.
+ *   · Le coffre est crédité dans la devise de la CAGNOTTE, via la position de
+ *     change si l'invité a payé dans une autre devise (R-16).
+ *   · L'ancienne écriture portait un type (`SYSTEM_TRANSFER`) absent de
+ *     l'énumération de `LedgerEntry` : chaque règlement invité échouait à
+ *     l'insertion. Le type est désormais déclaré, et le lot est construit par
+ *     le module pur prouvé corridor par corridor.
  *
- * C'est EXACTEMENT le défaut corrigé le 2026-09-09 sur le chemin AUTHENTIFIÉ.
- * Son jumeau externe vit 2 400 lignes plus bas dans le même contrôleur et avait
- * été manqué. La leçon vaut d'être écrite : **deux chemins qui font la même
- * chose métier doivent appeler la même primitive comptable**, sinon l'un des
- * deux dérive — et c'est toujours celui qu'on regarde le moins.
+ * ── Un encaissement n'est JAMAIS refusé pour « objectif atteint » ──────────
  *
- * ── Ce qu'il fait ───────────────────────────────────────────────────────────
- *
- *   DEBIT  clearing PROVIDER_INBOUND:<RAIL>   montant encaissé
- *   CREDIT clearing CAGNOTTE_VAULT            montant encaissé
- *   DEBIT  clearing CAGNOTTE_VAULT   frais            ┐ si frais
- *   CREDIT treasury CAGNOTTE_FEES    frais            ┘
- *
- * plus le crédit du portefeuille système de trésorerie, dans la même
- * transaction. La jambe de retour ne change pas : le retrait du coffre vide la
- * compensation cagnotte vers le bénéficiaire, que l'argent soit venu d'un
- * utilisateur PayNoval ou d'un inconnu. Le coffre n'a pas à savoir d'où il vient.
+ * L'argent est déjà prélevé chez le payeur : refuser le règlement le laisserait
+ * encaissé et non crédité. Le contrôle d'objectif et de statut appartient à
+ * l'initiation (`/collections/initiate`) ; ici on crédite, et un crédit arrivé
+ * après la clôture est marqué `lateCredit` pour l'exploitation.
  *
  * ── Ce qu'il ne fait PAS ────────────────────────────────────────────────────
  *
- * Il ne vérifie aucune signature et ne parle à aucun prestataire. Il est appelé
- * APRÈS que le rappel a été authentifié — par le backend principal, sur le
- * réseau privé, jeton interne à l'appui. Poser une seconde vérification ici
- * créerait une seconde vérité sur « ce rappel est-il valable ».
- *
- * Il n'enregistre AUCUNE donnée personnelle du payeur : ni téléphone, ni nom
- * porteur, ni corps de rappel brut (règle B.4). Ce qui sert au rapprochement,
- * c'est `providerReference`.
+ * Il ne vérifie aucune signature : il est appelé APRÈS l'authentification du
+ * rappel, par le backend, jeton interne à l'appui. Il n'enregistre aucune
+ * donnée personnelle du payeur (règle B.4) — `providerReference` suffit au
+ * rapprochement.
  */
 
 const asyncHandler = require("express-async-handler");
@@ -51,18 +41,22 @@ const asyncHandler = require("express-async-handler");
 const { getTxConn, getUsersConn } = require("../config/db");
 const buildTxSystemBalanceModel = require("../models/TxSystemBalance");
 const buildCagnotteExternalSettlementModel = require("../models/CagnotteExternalSettlement");
+const buildCagnotteVaultPositionModel = require("../models/CagnotteVaultPosition");
 const { runWithTransaction } = require("../utils/transactionRunner");
 const { canUseSharedSession } = require("../utils/sharedSession");
 const {
   settlementObjectIdFromReference,
-  postCagnotteExternalParticipationEntries,
-  normalizeTreasurySystemType,
+  postCagnotteLotEntries,
   getTreasuryUserIdBySystemType,
 } = require("../services/ledgerService");
+const { buildCagnotteCreditLots } = require("../services/ledger/cagnotteLegs");
+const { computeCagnottePricing, TX_TYPES } = require("../services/cagnotte/participationPricing");
+const { assertSupportedCagnotteCurrency } = require("../services/cagnotte/currencies");
+const { openPosition, creditPosition, positionToJSON } = require("../services/cagnotte/vaultPosition");
 const logger = require("../utils/logger");
 
-const CAGNOTTE_TREASURY_SYSTEM_TYPE = "CAGNOTTE_FEES_TREASURY";
-const CAGNOTTE_TREASURY_LABEL = "Cagnotte Fees Treasury";
+const CAGNOTTE_FEES = "CAGNOTTE_FEES_TREASURY";
+const FX_MARGIN = "FX_MARGIN_TREASURY";
 
 /** Rails autorisés. Table CLOSE — alignée sur `CagnotteExternalSettlement`. */
 const RAILS = Object.freeze({
@@ -70,363 +64,369 @@ const RAILS = Object.freeze({
   card: Object.freeze(["visa_direct"]),
 });
 
-function normalizeCurrencyCode(raw) {
-  return String(raw || "").trim().toUpperCase();
-}
-
-function round2(n) {
-  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
-}
-
 function low(v) {
   return String(v || "").trim().toLowerCase();
 }
 
-/**
- * Crédite le portefeuille système de trésorerie. Copié sur le contrôleur
- * jumeau plutôt que factorisé : les deux fichiers doivent pouvoir diverger si
- * les règles de trésorerie divergent un jour, et une factorisation prématurée
- * entre deux chemins d'argent est un couplage qu'on regrette.
- */
-async function creditTreasurySystemWallet({
-  TxSystemBalance,
-  treasuryUserId,
-  treasurySystemType,
-  treasuryLabel,
-  currency,
-  amount,
-  session,
-}) {
-  const cur = normalizeCurrencyCode(currency);
-  const amt = round2(amount);
+function str(v) {
+  return String(v ?? "").trim();
+}
 
-  if (!(amt > 0)) return null;
+function httpError(status, code, message, details) {
+  const err = new Error(message);
+  err.status = status;
+  err.statusCode = status;
+  err.code = code;
+  if (details) err.details = details;
+  return err;
+}
 
-  const doc = await TxSystemBalance.credit(
-    treasuryUserId,
-    normalizeTreasurySystemType(treasurySystemType),
-    cur,
-    amt,
-    { session }
-  );
+function sendError(res, err) {
+  const status = Number(err?.statusCode || err?.status || 500);
+  const named = Boolean(err?.code) && typeof err.code === "string";
 
-  if (!doc) {
-    throw new Error(
-      `Crédit de trésorerie impossible (${treasurySystemType} / ${cur}).`
-    );
+  if (!named || status >= 500) {
+    logger.error(`[cagnotte][participation-externe] ${err?.message || err}`, {
+      code: err?.code || null,
+      status,
+    });
   }
 
-  return {
-    walletId: String(doc._id),
-    systemType: doc.systemType,
-    currency: cur,
-    label: treasuryLabel,
-  };
+  return res.status(status >= 400 && status < 600 ? status : 500).json({
+    success: false,
+    code: named ? err.code : "INTERNAL_ERROR",
+    error: named ? err.message : "Erreur interne Tx-Core.",
+    ...(err?.details ? { details: err.details } : {}),
+  });
+}
+
+function treasuryFor(systemType) {
+  try {
+    return { userId: getTreasuryUserIdBySystemType(systemType), systemType };
+  } catch {
+    throw httpError(
+      500,
+      "TREASURY_UNCONFIGURED",
+      `Trésorerie ${systemType} non configurée : des fonds sans compte de destination ` +
+        "ne s'encaissent pas « quelque part »."
+    );
+  }
 }
 
 /**
- * POST /internal/cagnottes/external-participation/settle
+ * POST /api/v1/cagnotte/external-participation/settle
  *
- * Corps attendu :
  *   reference          identifiant PayNoval du règlement (unique, dérive le _id)
  *   idempotencyKey     clé du rappel
- *   rail               "mobilemoney" | "card"
- *   provider           wave | orange | mtn | moov | visa_direct
- *   providerReference  référence du prestataire (clé de rapprochement)
- *   cagnotteId         cagnotte créditée
- *   collected          { amount, currency }  ce que le participant a payé
- *   feeCredit          { amount, currency }  facultatif
+ *   rail, provider     table close
+ *   providerReference  clé de rapprochement prestataire
+ *   cagnotteId, vaultId, cagnotteCurrency
+ *   collected          { amount, currency }  ce que le prestataire a encaissé
  */
 const settleExternalParticipation = asyncHandler(async (req, res) => {
   const txConn = getTxConn();
   const TxSystemBalance = buildTxSystemBalanceModel(txConn);
-  const CagnotteExternalSettlement =
-    buildCagnotteExternalSettlementModel(txConn);
+  const Settlement = buildCagnotteExternalSettlementModel(txConn);
+  const Position = buildCagnotteVaultPositionModel(txConn);
 
-  const {
-    reference,
-    idempotencyKey,
-    rail: railBrut,
-    provider: providerBrut,
-    providerReference,
-    cagnotteId,
-    vaultId,
-    collected,
-    feeCredit,
-    meta,
-  } = req.body || {};
+  const ref = str(req.body?.reference);
+  const idem = str(req.body?.idempotencyKey);
+  const rail = low(req.body?.rail);
+  const provider = low(req.body?.provider).replace(/-/g, "_");
+  const providerReference = str(req.body?.providerReference);
+  const cagnotteId = str(req.body?.cagnotteId);
+  const vaultId = str(req.body?.vaultId);
+  const collectedAmount = Number(req.body?.collected?.amount);
 
-  const ref = String(reference || "").trim();
-  const idem = String(idempotencyKey || "").trim();
-  const rail = low(railBrut);
-  const provider = low(providerBrut).replace(/-/g, "_");
-  const cagnotte = String(cagnotteId || "").trim();
+  let source;
+  let target;
 
-  const collectedAmount = round2(collected?.amount);
-  const collectedCurrency = normalizeCurrencyCode(collected?.currency);
+  try {
+    if (!ref || !idem || !cagnotteId || !vaultId) {
+      throw httpError(400, "INVALID_REQUEST", "reference, idempotencyKey, cagnotteId et vaultId sont requis.");
+    }
 
-  const feeAmount = round2(feeCredit?.amount || 0);
-  const feeCurrency = normalizeCurrencyCode(feeCredit?.currency);
+    if (!RAILS[rail]) {
+      throw httpError(
+        400,
+        "UNKNOWN_RAIL",
+        `Rail « ${req.body?.rail} » inconnu. Le rail décide du compte de compensation ` +
+          "d'entrée, donc du relevé auquel ce règlement sera rapproché.",
+        { accepted: Object.keys(RAILS) }
+      );
+    }
 
-  /* ── Validation : tout est FERMÉ, rien ne prend de valeur par défaut ────── */
-
-  if (!ref || !idem || !cagnotte) {
-    return res.status(400).json({
-      success: false,
-      error: "reference, idempotencyKey et cagnotteId sont requis.",
-    });
-  }
-
-  if (!RAILS[rail]) {
-    return res.status(400).json({
-      success: false,
-      code: "UNKNOWN_RAIL",
-      error: `Rail « ${railBrut} » inconnu. Le rail décide du compte de ` +
-        "compensation d'entrée, donc du relevé auquel ce règlement sera rapproché.",
-      accepted: Object.keys(RAILS),
-    });
-  }
-
-  if (!RAILS[rail].includes(provider)) {
-    return res.status(400).json({
-      success: false,
-      code: "UNKNOWN_PROVIDER",
-      error: `Opérateur « ${providerBrut} » inconnu sur le rail ${rail}.`,
-      accepted: RAILS[rail],
-    });
-  }
-
-  if (!collectedCurrency || !(collectedAmount > 0)) {
-    return res.status(400).json({
-      success: false,
-      error: "collected.amount doit être positif et collected.currency présente.",
-    });
-  }
-
-  if (feeAmount > 0 && !feeCurrency) {
-    return res.status(400).json({
-      success: false,
-      error: "feeCredit.currency est requis dès lors que feeCredit.amount > 0.",
-    });
-  }
-
-  /**
-   * ⚠️ Les frais ne peuvent pas dépasser l'encaissement QUAND ILS SONT DANS LA
-   * MÊME DEVISE. Dans une devise différente, la comparaison n'a aucun sens —
-   * on ne compare pas des XOF à des CAD — et c'est précisément pour cela que le
-   * lot « frais » est séparé du lot « débit » au grand livre.
-   */
-  const netToVaultAmount =
-    feeAmount > 0 && feeCurrency === collectedCurrency
-      ? round2(collectedAmount - feeAmount)
-      : collectedAmount;
-
-  if (netToVaultAmount <= 0) {
-    return res.status(400).json({
-      success: false,
-      code: "FEE_EXCEEDS_COLLECTED",
-      error:
-        "Les frais absorbent la totalité de l'encaissement : le coffre ne " +
-        "recevrait rien. Un règlement qui ne crédite pas la cagnotte n'est pas " +
-        "un règlement.",
-    });
-  }
-
-  let treasuryUserId = "";
-
-  if (feeAmount > 0) {
-    treasuryUserId = getTreasuryUserIdBySystemType(CAGNOTTE_TREASURY_SYSTEM_TYPE);
-
-    if (!treasuryUserId) {
-      return res.status(500).json({
-        success: false,
-        code: "TREASURY_UNCONFIGURED",
-        error:
-          "Trésorerie cagnotte non configurée (CAGNOTTE_FEES_TREASURY_USER_ID). " +
-          "Des frais sans compte de destination ne s'encaissent pas « quelque part ».",
+    if (!RAILS[rail].includes(provider)) {
+      throw httpError(400, "UNKNOWN_PROVIDER", `Opérateur « ${req.body?.provider} » inconnu sur le rail ${rail}.`, {
+        accepted: RAILS[rail],
       });
     }
+
+    if (!Number.isFinite(collectedAmount) || collectedAmount <= 0) {
+      throw httpError(400, "INVALID_AMOUNT", "collected.amount doit être positif.");
+    }
+
+    source = assertSupportedCagnotteCurrency(req.body?.collected?.currency, process.env, "devise encaissée");
+    target = assertSupportedCagnotteCurrency(req.body?.cagnotteCurrency, process.env, "devise de la cagnotte");
+  } catch (err) {
+    return sendError(res, err);
   }
 
   /**
-   * ⚠️ REFUS EN FERMETURE SANS SESSION ATOMIQUE — identique au jumeau.
-   *
-   * `postDoubleEntry` ne transmet la session au grand livre que si
-   * `canUseSharedSession()` est vrai. Sans elle, les écritures partiraient HORS
-   * de la transaction qui porte le crédit de trésorerie : une annulation
-   * laisserait des écritures fantômes en face d'un solde remis en état. Un
-   * grand livre faux est pire qu'un grand livre absent — on lui fait confiance.
+   * ⚠️ REFUS EN FERMETURE SANS SESSION ATOMIQUE : sans elle, les écritures
+   * partiraient hors de la transaction qui porte le crédit de position et de
+   * trésorerie. Un grand livre faux est pire qu'un grand livre absent.
    */
   if (!canUseSharedSession(getUsersConn, getTxConn)) {
-    logger.error(
-      "[cagnotte][participation-externe] REFUS : session atomique indisponible",
-      {
-        reference: ref,
-        rail,
-        provider,
-        consequence:
-          "le grand livre s'écrirait hors transaction ; aucun mouvement n'a eu lieu",
-      }
-    );
+    logger.error("[cagnotte][participation-externe] REFUS : session atomique indisponible", {
+      reference: ref,
+      rail,
+      provider,
+      consequence: "le grand livre s'écrirait hors transaction ; aucun mouvement n'a eu lieu",
+    });
 
     return res.status(503).json({
       success: false,
       code: "ATOMIC_SESSION_UNAVAILABLE",
       error:
         "Règlement refusé : les deux bases ne partagent pas de session Mongo, " +
-        "l'écriture au grand livre et le crédit de trésorerie ne peuvent donc " +
-        "pas être atomiques. Vérifier MONGO_SHARE_CLIENT.",
+        "l'écriture au grand livre et le crédit du coffre ne peuvent donc pas " +
+        "être atomiques. Vérifier MONGO_SHARE_CLIENT.",
     });
   }
 
-  /**
-   * Identifiant DÉTERMINISTE dérivé de la référence : un rejeu réinsère le même
-   * `_id` et se heurte à la clé primaire, et surtout le `dedupKey` du grand
-   * livre reste stable d'une tentative à l'autre. L'idempotence ne repose donc
-   * pas sur la seule disponibilité de la transaction Mongo.
-   */
-  const settlementId = settlementObjectIdFromReference(
-    ref,
-    "cagnotte.participation.external"
-  );
+  const settlementId = settlementObjectIdFromReference(ref, "cagnotte.participation.external");
 
-  const existing = await CagnotteExternalSettlement.findOne({
-    reference: ref,
-  }).lean();
-
+  const existing = await Settlement.findOne({ reference: ref }).lean();
   if (existing) {
+    return res.status(200).json({ success: true, alreadyProcessed: true, data: existing });
+  }
+
+  let pricing;
+  let lots;
+  let feesTreasury = null;
+  let fxMarginTreasury = null;
+
+  try {
+    // Hors transaction : ouverture idempotente et prix (réseau possible).
+    await openPosition({ Model: Position, vaultId, cagnotteId, currency: target });
+
+    pricing = await computeCagnottePricing({
+      txType: TX_TYPES.PARTICIPATION,
+      method: rail === "card" ? "CARD" : "MOBILEMONEY",
+      provider,
+      amount: collectedAmount,
+      sourceCurrency: source,
+      targetCurrency: target,
+      country: str(req.body?.country) || null,
+      requestId: ref,
+    });
+
+    if (pricing.fee.amount > 0) feesTreasury = treasuryFor(CAGNOTTE_FEES);
+    if (pricing.fx.revenue.amount > 0) fxMarginTreasury = treasuryFor(FX_MARGIN);
+
+    lots = buildCagnotteCreditLots({
+      origin: { kind: "PROVIDER_INBOUND", rail },
+      sourceCurrency: source,
+      targetCurrency: target,
+      gross: pricing.source.amount,
+      fee: pricing.fee.amount,
+      netSource: pricing.netSource,
+      netTarget: pricing.destination.amount,
+      fxRevenue: pricing.fx.revenue.amount,
+      feesTreasury,
+      fxMarginTreasury,
+    });
+  } catch (err) {
+    /**
+     * L'argent est encaissé chez le prestataire mais pas encore crédité : c'est
+     * un écart à rattraper, pas un détail. Le backend rend une erreur au
+     * prestataire, qui réémettra le rappel — le règlement est idempotent.
+     */
+    logger.error("[cagnotte][participation-externe] prix ou position indisponible — encaissement NON crédité", {
+      reference: ref,
+      code: err?.code || null,
+    });
+    return sendError(res, err);
+  }
+
+  const session = await txConn.startSession();
+
+  try {
+    const result = await runWithTransaction(session, async () => {
+      const again = await Settlement.findOne({ reference: ref }).session(session);
+      if (again) return { replay: again };
+
+      const position = await creditPosition({
+        Model: Position,
+        vaultId,
+        currency: target,
+        amount: pricing.destination.amount,
+        goalCap: null,
+        allowClosed: true,
+        session,
+      });
+
+      let treasuryWalletAfter = null;
+
+      if (feesTreasury) {
+        const t = await TxSystemBalance.credit(feesTreasury.userId, CAGNOTTE_FEES, source, pricing.fee.amount, {
+          session,
+          reference: ref,
+          historyMetadata: { source: "settleExternalParticipation", cagnotteId },
+        });
+        treasuryWalletAfter = { walletId: String(t?._id || ""), systemType: CAGNOTTE_FEES, currency: source };
+      }
+
+      if (fxMarginTreasury) {
+        await TxSystemBalance.credit(fxMarginTreasury.userId, FX_MARGIN, target, pricing.fx.revenue.amount, {
+          session,
+          reference: ref,
+          historyMetadata: { source: "settleExternalParticipation", cagnotteId },
+        });
+      }
+
+      const [settlement] = await Settlement.create(
+        [
+          {
+            _id: settlementId,
+            reference: ref,
+            idempotencyKey: idem,
+            rail,
+            provider,
+            providerReference,
+            cagnotteId,
+            vaultId,
+            collected: { amount: pricing.source.amount, currency: source },
+            feeCredit: { amount: pricing.fee.amount, currency: pricing.fee.amount > 0 ? source : "" },
+            netToVault: { amount: pricing.destination.amount, currency: target },
+            treasuryUserId: feesTreasury?.userId || "",
+            treasurySystemType: feesTreasury ? CAGNOTTE_FEES : "",
+            treasuryLabel: feesTreasury ? "Cagnotte Fees Treasury" : "",
+            status: "confirmed",
+            treasuryWalletAfter,
+            meta: { settlementKind: "cagnotte_external_participation_settlement" },
+            schemaVersion: 2,
+            netSource: pricing.netSource,
+            fx: {
+              required: pricing.fx.required,
+              appliedRate: pricing.fx.appliedRate,
+              marketRate: pricing.fx.marketRate,
+              revenue: pricing.fx.revenue.amount,
+              provider: pricing.fx.provider,
+              rateSource: pricing.fx.rateSource,
+              asOf: pricing.fx.asOf,
+            },
+            lateCredit: Boolean(position.closedAt),
+          },
+        ],
+        { session }
+      );
+
+      /**
+       * ⚠️ LE GRAND LIVRE, DANS LA MÊME TRANSACTION, AVEC LA SESSION.
+       */
+      await postCagnotteLotEntries({
+        settlementId: settlement._id,
+        reference: ref,
+        lots,
+        session,
+        metadata: {
+          settlementKind: "cagnotte_external_participation_settlement",
+          cagnotteId,
+          vaultId,
+          provider,
+          providerReference: providerReference || null,
+        },
+      });
+
+      return { settlement, position };
+    });
+
+    if (result.replay) {
+      return res.status(200).json({ success: true, alreadyProcessed: true, data: result.replay });
+    }
+
+    if (result.settlement.lateCredit) {
+      logger.warn("[cagnotte][participation-externe] crédit arrivé APRÈS la clôture", {
+        reference: ref,
+        cagnotteId,
+        vaultId,
+        consequence: "coffre crédité après le calcul des frais de clôture ; retrait complémentaire possible",
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        ...(result.settlement.toObject ? result.settlement.toObject() : result.settlement),
+        position: positionToJSON(result.position),
+      },
+    });
+  } catch (err) {
+    if (err?.code === 11000) {
+      const done = await Settlement.findOne({ reference: ref }).lean();
+      if (done) return res.status(200).json({ success: true, alreadyProcessed: true, data: done });
+    }
+    return sendError(res, err);
+  } finally {
+    try {
+      session.endSession();
+    } catch {}
+  }
+});
+
+/**
+ * POST /api/v1/cagnotte/external-participation/quote
+ *
+ * Devis INDICATIF montré à l'invité avant qu'il paie : même moteur, mêmes
+ * règles que le règlement. Rien n'est figé ni écrit — le règlement recalcule
+ * au rappel prestataire, car c'est alors seulement que le montant encaissé est
+ * connu. Aucune donnée du payeur n'est reçue ici.
+ */
+const quoteExternalParticipation = asyncHandler(async (req, res) => {
+  const rail = low(req.body?.rail);
+  const provider = low(req.body?.provider).replace(/-/g, "_");
+
+  try {
+    if (!RAILS[rail] || !RAILS[rail].includes(provider)) {
+      throw httpError(400, "UNKNOWN_PROVIDER", "Rail ou opérateur inconnu.", { accepted: RAILS });
+    }
+
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) throw httpError(400, "INVALID_AMOUNT", "Montant invalide.");
+
+    const target = assertSupportedCagnotteCurrency(req.body?.cagnotteCurrency, process.env, "devise de la cagnotte");
+    const source = assertSupportedCagnotteCurrency(req.body?.currency || target, process.env, "devise du paiement");
+
+    const pricing = await computeCagnottePricing({
+      txType: TX_TYPES.PARTICIPATION,
+      method: rail === "card" ? "CARD" : "MOBILEMONEY",
+      provider,
+      amount,
+      sourceCurrency: source,
+      targetCurrency: target,
+    });
+
     return res.status(200).json({
       success: true,
-      alreadyProcessed: true,
-      data: existing,
+      data: {
+        source: pricing.source,
+        fee: pricing.fee,
+        netSource: pricing.netSource,
+        fx: pricing.fx.required
+          ? { required: true, rate: pricing.fx.appliedRate, marketRate: pricing.fx.marketRate, provider: pricing.fx.provider, timestamp: pricing.fx.asOf }
+          : { required: false },
+        destination: pricing.destination,
+      },
     });
+  } catch (err) {
+    return sendError(res, err);
   }
-
-  const result = await (async () => {
-    const session = await txConn.startSession();
-
-    try {
-      return await runWithTransaction(session, async () => {
-        const dejaLa = await CagnotteExternalSettlement.findOne({
-          reference: ref,
-        }).session(session);
-
-        if (dejaLa) {
-          return {
-            statusCode: 200,
-            body: {
-              success: true,
-              alreadyProcessed: true,
-              data: dejaLa.toObject ? dejaLa.toObject() : dejaLa,
-            },
-          };
-        }
-
-        let treasuryWalletAfter = null;
-
-        if (feeAmount > 0) {
-          treasuryWalletAfter = await creditTreasurySystemWallet({
-            TxSystemBalance,
-            treasuryUserId,
-            treasurySystemType: CAGNOTTE_TREASURY_SYSTEM_TYPE,
-            treasuryLabel: CAGNOTTE_TREASURY_LABEL,
-            currency: feeCurrency,
-            amount: feeAmount,
-            session,
-          });
-        }
-
-        const docs = await CagnotteExternalSettlement.create(
-          [
-            {
-              _id: settlementId,
-              reference: ref,
-              idempotencyKey: idem,
-              rail,
-              provider,
-              providerReference: String(providerReference || "").trim(),
-              cagnotteId: cagnotte,
-              vaultId: String(vaultId || "").trim(),
-              collected: {
-                amount: collectedAmount,
-                currency: collectedCurrency,
-              },
-              feeCredit: {
-                amount: feeAmount,
-                currency: feeAmount > 0 ? feeCurrency : "",
-              },
-              netToVault: {
-                amount: netToVaultAmount,
-                currency: collectedCurrency,
-              },
-              treasuryUserId: feeAmount > 0 ? treasuryUserId : "",
-              treasurySystemType:
-                feeAmount > 0 ? CAGNOTTE_TREASURY_SYSTEM_TYPE : "",
-              treasuryLabel: feeAmount > 0 ? CAGNOTTE_TREASURY_LABEL : "",
-              status: "confirmed",
-              treasuryWalletAfter,
-              meta: {
-                ...(meta && typeof meta === "object" ? meta : {}),
-                settlementKind: "cagnotte_external_participation_settlement",
-              },
-            },
-          ],
-          { session }
-        );
-
-        const settlement = docs[0];
-
-        /**
-         * ⚠️ LE GRAND LIVRE, DANS LA MÊME TRANSACTION.
-         *
-         * C'est la ligne qui manquait au chemin public. Poser l'écriture après
-         * la transaction ne vaudrait pas mieux : un échec entre les deux
-         * laisserait la trésorerie créditée sans contrepartie comptable.
-         */
-        await postCagnotteExternalParticipationEntries({
-          settlementId: settlement._id,
-          reference: ref,
-          rail,
-          amount: collectedAmount,
-          currency: collectedCurrency,
-          feeCredit:
-            feeAmount > 0
-              ? {
-                  treasuryUserId,
-                  treasurySystemType: CAGNOTTE_TREASURY_SYSTEM_TYPE,
-                  amount: feeAmount,
-                  currency: feeCurrency,
-                }
-              : null,
-          metadata: {
-            settlementKind: "cagnotte_external_participation_settlement",
-            cagnotteId: cagnotte,
-            vaultId: String(vaultId || "").trim() || null,
-            provider,
-            providerReference: String(providerReference || "").trim() || null,
-          },
-          session,
-        });
-
-        return {
-          statusCode: 201,
-          body: {
-            success: true,
-            data: settlement.toObject ? settlement.toObject() : settlement,
-          },
-        };
-      });
-    } finally {
-      try {
-        session.endSession();
-      } catch {}
-    }
-  })();
-
-  return res.status(result.statusCode).json(result.body);
 });
 
 module.exports = {
   settleExternalParticipation,
+  quoteExternalParticipation,
   RAILS,
 };

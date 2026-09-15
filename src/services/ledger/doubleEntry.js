@@ -217,6 +217,33 @@ function cagnotteVaultClearingAccountId(currency) {
 
 /**
  * ============================================================================
+ * POSITION DE CHANGE DES CAGNOTTES — POURQUOI UN COMPTE DÉDIÉ
+ * ============================================================================
+ *
+ * Une participation en CAD à une cagnotte en XOF créditait jusqu'ici
+ * `CAGNOTTE_VAULT:CAD`, alors que le retrait débitait `CAGNOTTE_VAULT:XOF`. La
+ * conversion n'existait nulle part au grand livre, et l'invariant qui fait la
+ * valeur du compte de coffre — « son solde vaut la somme des coffres dans
+ * cette devise » — tombait dès la première participation multidevise.
+ *
+ * La conversion passe désormais par ce compte :
+ *
+ *     DEBIT  origine:CAD             n  → CREDIT FX_CONVERSION:CAD  n
+ *     DEBIT  FX_CONVERSION:XOF     m+x  → CREDIT CAGNOTTE_VAULT:XOF m
+ *                                         CREDIT treasury FX_MARGIN x
+ *
+ * `CAGNOTTE_VAULT:<devise>` ne reçoit plus JAMAIS que la devise de la cagnotte,
+ * et l'écart entre les soldes `FX_CONVERSION:<devise>` EST la position de
+ * change — mesurable, au lieu d'être dispersée dans les comptes de coffre.
+ *
+ * Même TYPE (`SYSTEM_CLEARING`), identifiant distinct : aucune migration.
+ */
+function fxConversionClearingAccountId(currency) {
+  return `system_clearing:FX_CONVERSION:${normCurrency(currency)}`;
+}
+
+/**
+ * ============================================================================
  * ENTRÉE PRESTATAIRE — LA CONTREPARTIE D'UN ENCAISSEMENT EXTERNE
  * ============================================================================
  *
@@ -616,6 +643,7 @@ module.exports = {
   systemReserveAccountId,
   systemClearingAccountId,
   cagnotteVaultClearingAccountId,
+  fxConversionClearingAccountId,
   providerInboundClearingAccountId,
   treasuryAccountId,
 

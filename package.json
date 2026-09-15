@@ -22,7 +22,9 @@
     "worker:settlement": "node workers/settlementMonitor.js",
     "worker:referral": "node workers/referralAward.js",
     "worker:notifications": "node workers/notificationDispatch.js",
-    "workers:all": "node workers/all.js"
+    "workers:all": "node workers/all.js",
+    "seed:cagnotte-pricing": "node scripts/seedCagnottePricingRules.js",
+    "backfill:cagnotte-positions": "node scripts/backfillCagnotteVaultPositions.js"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

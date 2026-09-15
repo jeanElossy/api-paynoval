@@ -165,6 +165,25 @@ module.exports = function buildCagnotteExternalSettlementModel(conn) {
       },
 
       meta: { type: mongoose.Schema.Types.Mixed, default: null },
+
+      /**
+       * v2 (2026-09-10) : frais et conversion calculés PAR TX-CORE au
+       * règlement — le backend ne transmet plus que ce que le prestataire a
+       * encaissé. `netToVault` est libellé dans la devise de la CAGNOTTE.
+       */
+      schemaVersion: { type: Number, default: 1 },
+      netSource: { type: Number, default: null, min: 0 },
+      fx: {
+        required: { type: Boolean, default: false },
+        appliedRate: { type: Number, default: null },
+        marketRate: { type: Number, default: null },
+        revenue: { type: Number, default: 0, min: 0 },
+        provider: { type: String, default: null },
+        rateSource: { type: String, default: null },
+        asOf: { type: Date, default: null },
+      },
+      /** Crédit arrivé après la clôture : argent encaissé, jamais refusé. */
+      lateCredit: { type: Boolean, default: false },
     },
     {
       timestamps: true,

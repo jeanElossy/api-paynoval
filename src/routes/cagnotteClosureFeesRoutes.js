@@ -69,21 +69,13 @@ router.post(
   body("vaultId").exists().isString().trim().notEmpty(),
   body("initiatedByUserId").exists().isString().trim().notEmpty(),
 
-  body("treasuryUserId").optional().isString().trim().notEmpty(),
-  body("treasurySystemType").optional().isString().trim().notEmpty(),
-  body("treasuryLabel").optional().isString().trim(),
-
-  body("feeCredit.amount").exists().isFloat({ gt: 0 }).toFloat(),
-  body("feeCredit.currency").exists().isString().trim().isLength({ min: 3, max: 4 }),
-
-  body("feeCredit.baseAmount").optional().isFloat({ min: 0 }).toFloat(),
-  body("feeCredit.baseCurrencyCode")
-    .optional()
-    .isString()
-    .trim()
-    .isLength({ min: 3, max: 4 }),
-
-  body("meta").optional().isObject(),
+  /**
+   * Plus aucun montant accepté : Tx-Core calcule les frais de clôture sur la
+   * position du coffre (règle `CAGNOTTE_CLOSURE`). Un `feeCredit` envoyé par
+   * un appelant resté en ancienne version est refusé en 410 par le contrôleur,
+   * pas ignoré en silence.
+   */
+  body("cagnotteName").optional().isString().trim().isLength({ max: 120 }),
 
   checkValidation,
   settleCagnotteClosureFees

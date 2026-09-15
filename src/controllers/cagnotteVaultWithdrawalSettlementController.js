@@ -350,6 +350,9 @@ const {
   settlementObjectIdFromReference,
   postCagnotteVaultWithdrawalEntries,
 } = require("../services/ledgerService");
+const buildCagnotteVaultPositionModel = require("../models/CagnotteVaultPosition");
+const { debitPosition, positionToJSON } = require("../services/cagnotte/vaultPosition");
+const { assertSupportedCagnotteCurrency } = require("../services/cagnotte/currencies");
 const logger = require("../utils/logger");
 
 function normalizeCurrencyCode(raw) {
@@ -455,7 +458,18 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
   const m = String(mode || "").trim().toLowerCase();
 
   const creditAmount = round2(credit?.amount);
-  const creditCurrency = normalizeCurrencyCode(credit?.currency);
+
+  /**
+   * ⚠️ Devise STRICTE, plus `normalizeCurrencyCode` : celui-ci tronquait tout
+   * code inconnu à trois lettres (« USDT » → « USD »). Sur un retrait, une
+   * devise approximative crédite le mauvais portefeuille.
+   */
+  let creditCurrency = "";
+  try {
+    creditCurrency = assertSupportedCagnotteCurrency(credit?.currency, process.env, "devise du retrait");
+  } catch (err) {
+    return res.status(err.status || 422).json({ success: false, code: err.code, error: err.message });
+  }
 
   if (!ref || !idem || !beneficiaryUserId || !vId || !cId) {
     return res.status(400).json({
@@ -548,6 +562,7 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
   }
 
   const session = await txConn.startSession();
+  let positionAfter = null;
 
   try {
     /**
@@ -561,6 +576,25 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
      * HTTP s'écrit dehors, une seule fois, quel que soit le nombre de rejeux.
      */
     const settlement = await runWithTransaction(session, async () => {
+      /**
+       * ⚠️ LE PLAFOND QUI MANQUAIT (R-14 / R-15, 2026-09-10).
+       *
+       * Ce contrôleur créditait le montant ANNONCÉ par le backend, sans aucune
+       * limite. Or le coffre backend pouvait être gonflé (taux fourni par le
+       * client) ou re-libellé (devise de cagnotte modifiable). Le retrait est
+       * désormais un débit CONDITIONNEL de la position Tx-Core : devise
+       * identique, cagnotte close, solde suffisant — sinon rien ne bouge.
+       */
+      positionAfter = await debitPosition({
+        Model: buildCagnotteVaultPositionModel(txConn),
+        vaultId: vId,
+        currency: creditCurrency,
+        amount: creditAmount,
+        kind: "WITHDRAWAL",
+        requireClosed: true,
+        session,
+      });
+
       const userWallet = await ensureWalletForUser({
         TxWalletBalance,
         userId: beneficiaryUserId,
@@ -667,16 +701,27 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
         settlement?.userWalletAfter?.amount ??
         null,
       data: settlement.toObject ? settlement.toObject() : settlement,
+      position: positionToJSON(positionAfter),
     });
   } catch (err) {
     try {
       if (session.inTransaction?.()) await session.abortTransaction();
     } catch {}
 
-    // Un refus métier levé dans l'unité de travail garde son code.
-    return res.status(err?.statusCode || 500).json({
+    // Un refus métier levé dans l'unité de travail garde son code ; une
+    // erreur inattendue ne renvoie pas son message interne (règle B.4).
+    const status = Number(err?.statusCode || err?.status || 500);
+    const named = typeof err?.code === "string";
+
+    if (!named || status >= 500) {
+      logger.error("[cagnotte][vault-withdrawal] échec", { reference: ref, message: err?.message });
+    }
+
+    return res.status(status >= 400 && status < 600 ? status : 500).json({
       success: false,
-      error: err?.message || "Erreur interne TX Core.",
+      code: named ? err.code : "INTERNAL_ERROR",
+      error: named ? err.message : "Erreur interne TX Core.",
+      ...(err?.details ? { details: err.details } : {}),
     });
   } finally {
     try {

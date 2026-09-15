@@ -172,6 +172,19 @@ function registerTransactionModels(conn) {
   require("../models/CagnotteExternalSettlement")(conn);
 
   /**
+   * Le reste du domaine cagnotte, pour la même raison. Les trois règlements
+   * historiques n'étaient résolus qu'au premier appel — donc absents de
+   * l'audit et de la pose d'index sur une instance fraîche. La position du
+   * coffre porte l'index unique qui empêche deux positions pour un même coffre :
+   * elle ne peut pas dépendre de l'ordre d'arrivée des requêtes.
+   */
+  require("../models/CagnotteSettlement")(conn);
+  require("../models/CagnotteVaultWithdrawalSettlement")(conn);
+  require("../models/CagnotteVaultPosition")(conn);
+  require("../models/CagnotteQuote")(conn);
+  require("../models/CagnotteRefundSettlement")(conn);
+
+  /**
    * Intention d'encaissement — l'argent qui ENTRE. Même raison d'être déclarée
    * ici : le rapprochement prestataire la cherche par `conn.models`, et une
    * instance qui n'a encore reçu aucun encaissement ne l'aurait pas.

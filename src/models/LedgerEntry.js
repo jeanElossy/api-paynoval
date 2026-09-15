@@ -28,6 +28,14 @@ const ENTRY_TYPES = [
   // qu'`ADJUSTMENT` : c'est une dépense récurrente et prévue, qu'on doit
   // pouvoir isoler dans l'analytique de trésorerie.
   "REFERRAL_PAYOUT",
+  // ⚠️ Mouvement entre deux comptes système (entrée prestataire → coffre de
+  // cagnotte). `ledgerService` l'écrivait depuis le 2026-09-10 sans qu'il
+  // figure ici : la validation du modèle refusait donc CHAQUE règlement de
+  // participation par lien public — le chemin était structurellement mort.
+  "SYSTEM_TRANSFER",
+  // Conversion de devise d'une participation de cagnotte : le lot en devise
+  // cible, qui vide la position de change vers le coffre.
+  "FX_CONVERSION",
 ];
 
 const ledgerEntrySchema = new mongoose.Schema(

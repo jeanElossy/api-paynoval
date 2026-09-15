@@ -195,6 +195,37 @@ module.exports = function buildCagnotteSettlementModel(conn) {
         type: mongoose.Schema.Types.Mixed,
         default: {},
       },
+
+      /**
+       * ── Forme v2 (2026-09-10) : les montants sont ceux du DEVIS Tx-Core ──
+       *
+       * v1 recopiait ce que le backend envoyait (y compris un « taux » fourni
+       * par le client). v2 relit un `CagnotteQuote` consommé dans la même
+       * transaction : source, frais, taux et montant crédité sont historisés
+       * ici et ne sont JAMAIS recalculés au taux du jour (R11).
+       */
+      schemaVersion: { type: Number, default: 1 },
+      cagnotteId: { type: String, default: null, trim: true },
+      vaultId: { type: String, default: null, trim: true },
+      quoteId: { type: String, default: null, trim: true },
+      source: { type: payerSchema, default: null },
+      fee: { type: payerSchema, default: null },
+      netSource: { type: Number, default: null, min: 0 },
+      destination: { type: payerSchema, default: null },
+      fx: {
+        required: { type: Boolean, default: false },
+        appliedRate: { type: Number, default: null },
+        marketRate: { type: Number, default: null },
+        revenue: { type: Number, default: 0, min: 0 },
+        provider: { type: String, default: null },
+        rateSource: { type: String, default: null },
+        asOf: { type: Date, default: null },
+      },
+      /** Cumul remboursé, maintenu par mise à jour CONDITIONNELLE. */
+      refunded: {
+        source: { type: Number, default: 0, min: 0 },
+        target: { type: Number, default: 0, min: 0 },
+      },
     },
     {
       collection: "tx_cagnotte_settlements",
@@ -206,6 +237,7 @@ module.exports = function buildCagnotteSettlementModel(conn) {
   schema.index({ userId: 1, idempotencyKey: 1 }, { unique: true });
   schema.index({ treasuryUserId: 1, createdAt: -1 });
   schema.index({ treasurySystemType: 1, createdAt: -1 });
+  schema.index({ vaultId: 1, createdAt: -1 });
 
   return conn.model(modelName, schema);
 };
