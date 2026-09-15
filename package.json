@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test \"test/**/*.test.js\"",
-    "test:concurrency": "node --test \"test-concurrency/**/*.test.js\"",
+    "test": "node --test $(find test -name '*.test.js' | sort)",
+    "test:concurrency": "node --test $(find test-concurrency -name '*.test.js' | sort)",
     "reconcile:referral": "node scripts/reconcileReferralPayouts.js",
     "verify:referral-idempotency": "node scripts/verifyReferralIdempotency.js",
     "reconcile:transactions": "node scripts/reconcileTransactions.js",
