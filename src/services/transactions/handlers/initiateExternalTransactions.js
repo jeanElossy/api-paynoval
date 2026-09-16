@@ -2,6 +2,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { resoudreTypeExterne } = require("../shared/externalTxType");
 
 const runtime = require("../shared/runtime");
 const { validationService, logTransaction, logger, normCur, generateTransactionRef, reserveSenderFunds, normalizePricingSnapshot, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, runInTransaction, safeAbort, safeEndSession } = runtime;
@@ -290,20 +291,12 @@ function normalizeMethodForPricing(body = {}, provider = "") {
   return "MOBILE_MONEY";
 }
 
-function normalizeTxTypeForPricing(body = {}) {
-  const txType = String(body.txType || body.transactionType || "")
-    .trim()
-    .toUpperCase();
-
-  if (txType) return txType;
-
-  const action = String(body.action || "").trim().toLowerCase();
-
-  if (action === "deposit") return "DEPOSIT";
-  if (action === "withdraw") return "WITHDRAW";
-
-  return "TRANSFER";
-}
+/**
+ * La résolution du type vit désormais dans `shared/externalTxType.js`, module
+ * PUR et testé. Elle rend `null` quand l'appelant ne déclare rien, au lieu de
+ * choisir `TRANSFER` à sa place : dépôt, retrait et transfert n'ont pas les
+ * mêmes barèmes, et deviner produisait un prix plausible sur la mauvaise règle.
+ */
 
 function buildRecipientExternalMeta(flow, body = {}) {
   if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT) {
@@ -391,6 +384,21 @@ async function buildPricingContext({
      devis — il se calcule dans le processus — mais le CONTRÔLE reste. */
   ensureBearer(req);
   const effectiveBody = { ...body, ...req.body };
+
+  /**
+   * Règle B.2 — le chemin de l'argent échoue en FERMETURE. Un appelant qui ne
+   * déclare ni `txType` ni `action` était tarifé comme un TRANSFER : un prix
+   * d'apparence normale, calculé sur un barème qui n'est pas le sien.
+   */
+  const typeExterne = resoudreTypeExterne(effectiveBody);
+
+  if (!typeExterne) {
+    throw createError(
+      400,
+      "Type d'opération non déclaré : indiquez `txType` — TRANSFER, DEPOSIT ou WITHDRAW. Le tarif dépend du type, il ne peut pas être supposé.",
+      { code: "TX_TYPE_REQUIRED" }
+    );
+  }
 
   const pricingInput = pickBodyPricingInput({
     ...effectiveBody,

@@ -26,6 +26,7 @@
     "seed:cagnotte-pricing": "node scripts/seedCagnottePricingRules.js",
     "seed:cancellation-pricing": "node scripts/seedCancellationPricingRules.js",
     "seed:rail-pricing": "node scripts/seedRailPricingRules.js",
+    "seed:corridor-pricing": "node scripts/seedCorridorPricingRules.js",
     "pricing:coverage": "node scripts/pricingCoverage.js",
     "backfill:cagnotte-positions": "node scripts/backfillCagnotteVaultPositions.js"
   },
