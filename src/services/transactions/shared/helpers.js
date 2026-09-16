@@ -7,18 +7,23 @@ const MAX_CONFIRM_ATTEMPTS = 5;
 const LOCK_MINUTES = 10;
 const MAX_DESC_LENGTH = 500;
 
-const ZERO_DECIMAL_CURRENCIES = new Set([
-  "XOF",
-  "XAF",
-  "JPY",
-  "KRW",
-  "GNF",
-  "RWF",
-  "UGX",
-  "BIF",
-  "KMF",
-  "CLP",
-]);
+/**
+ * ⚠️ LISTE ET ARRONDI DÉLÉGUÉS À `utils/money` DEPUIS LE 2026-09-16.
+ *
+ * Ce fichier portait la liste la plus COMPLÈTE des sept qui coexistaient (dix
+ * devises), et un arrondi par `toFixed` là où le moteur de tarification
+ * utilisait `Math.round` : sur 1,005 les deux rendaient 1,00 et 1,01. Le devis
+ * et l'écriture comptable pouvaient donc différer d'un centime sur le même
+ * montant.
+ *
+ * L'union des listes est reprise dans `utils/money` — aucune devise n'a été
+ * perdue au passage — et la méthode retenue est celle qui facture.
+ */
+const {
+  ZERO_DECIMAL_CURRENCIES,
+  currencyHasDecimals,
+  roundMoney,
+} = require("../../../utils/money");
 
 function sanitize(text, maxLen = MAX_DESC_LENGTH) {
   return String(text || "")
@@ -48,20 +53,9 @@ function normalizeCurrencyCode(v, fallback = "CAD") {
   return code || fallback;
 }
 
-function currencyHasDecimals(currency) {
-  return !ZERO_DECIMAL_CURRENCIES.has(normalizeCurrencyCode(currency));
-}
-
 function round2(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
-  return parseFloat(x.toFixed(2));
-}
-
-function roundMoney(n, currency = "CAD") {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
-  if (!currencyHasDecimals(currency)) return Math.round(x);
   return parseFloat(x.toFixed(2));
 }
 

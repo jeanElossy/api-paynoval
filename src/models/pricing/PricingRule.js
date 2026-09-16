@@ -95,7 +95,23 @@ const ScopeSchema = new mongoose.Schema(
        * de cagnotte étaient codés en dur (0,25 % et 0,5 %) dans le backend.
        * Ils relèvent désormais des mêmes règles gouvernées que les virements.
        */
-      enum: ["TRANSFER", "DEPOSIT", "WITHDRAW", "CAGNOTTE_PARTICIPATION", "CAGNOTTE_CLOSURE", "ALL"],
+      /**
+       * `CANCELLATION` (2026-09-16) : les frais d'annulation étaient codés en
+       * dur dans `config/cancellationFees.js` pour DEUX pays (Canada 2,99 CAD,
+       * Côte d'Ivoire 300 XOF), pendant que l'écran de simulation les lisait
+       * dans une TROISIÈME source (la collection `Fee`). Un utilisateur pouvait
+       * donc voir un montant d'annulation et s'en voir prélever un autre.
+       * Ils relèvent désormais des mêmes barèmes gouvernés que le reste.
+       */
+      enum: [
+        "TRANSFER",
+        "DEPOSIT",
+        "WITHDRAW",
+        "CANCELLATION",
+        "CAGNOTTE_PARTICIPATION",
+        "CAGNOTTE_CLOSURE",
+        "ALL",
+      ],
       default: "ALL",
       index: true,
     },

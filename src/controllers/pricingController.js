@@ -119,9 +119,19 @@ async function lock(req, res, next) {
      * authentifié. Le jeton interne, exigé par la route, est ce qui rend cet
      * en-tête digne de confiance : sans lui il serait purement déclaratif.
      */
-    const userId = String(
-      req.headers["x-user-id"] || req.body?.userId || ""
-    ).trim();
+    /**
+     * ⚠️ L'IDENTITÉ VIENT DE L'EN-TÊTE ÉTABLI PAR LE BORD, ET DE LUI SEUL.
+     *
+     * Un repli sur `req.body.userId` existait ici. Il était sans effet tant que
+     * le verrou n'engageait rien — mais depuis le 2026-09-16 un devis ENGAGE le
+     * prix, et il se consomme au nom de son propriétaire. Laisser l'appelant
+     * déclarer ce propriétaire dans le corps de la requête reviendrait à lui
+     * laisser figer un taux favorable au nom de quelqu'un d'autre.
+     *
+     * L'en-tête ne vaut, lui, que parce que la route exige le jeton interne :
+     * sans ce jeton, `x-user-id` serait purement déclaratif.
+     */
+    const userId = String(req.headers["x-user-id"] || "").trim();
 
     if (!userId) {
       return sendPricingError(

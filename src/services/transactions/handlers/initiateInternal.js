@@ -22,7 +22,7 @@ const {
 
 const {
   pickBodyPricingInput,
-  computePricingQuote,
+  resolvePricingPayload,
   extractPricingBundle,
 } = require("../shared/pricing");
 
@@ -236,12 +236,30 @@ function resolveCountryForTarget(body = {}) {
   );
 }
 
+/**
+ * Identifiant du devis accepté, quel que soit l'alias employé.
+ *
+ * ⚠️ `pricingLockId` A ÉTÉ AJOUTÉ LE 2026-09-16, ET SON ABSENCE ÉTAIT UN TROU.
+ *
+ * Le verrou de prix rend QUATRE alias du même identifiant (`quoteId`,
+ * `pricingId`, `pricingLockId`, `lockId`) — un héritage de compatibilité que
+ * le mobile renvoie tel quel. Le chemin externe les acceptait tous ; celui-ci
+ * en ignorait deux.
+ *
+ * Tant que le devis n'engageait rien, l'oubli ne se voyait pas. Depuis que le
+ * prix vient du devis, un client qui n'enverrait que `pricingLockId` verrait
+ * son devis ignoré et son virement recalculé — exactement le défaut qu'on
+ * vient de fermer, par une porte de côté.
+ */
 function getEffectivePricingId(body = {}) {
   return String(
     body.effectivePricingId ||
+      body.pricingLockId ||
       body.pricingId ||
       body.quoteId ||
+      body.lockId ||
       body.meta?.effectivePricingId ||
+      body.meta?.pricingLockId ||
       body.meta?.pricingId ||
       body.meta?.quoteId ||
       ""
@@ -412,9 +430,10 @@ async function initiateInternal(req, res, next) {
     /**
      * PHASE 1 — PRÉPARATION, HORS TRANSACTION.
      *
-     * `computePricingQuote()` calcule le devis DANS LE PROCESSUS depuis le
-     * 2026-09-10 : le domaine des prix appartient à Tx-Core
-     * (`services/pricing/`). Il n'y a plus d'appel réseau ici.
+     * `resolvePricingPayload()` rend le prix ACCEPTÉ par l'utilisateur : il
+     * consomme le devis désigné par `quoteId` (2026-09-16) et, à défaut, calcule
+     * dans le processus — le domaine des prix appartient à Tx-Core depuis le
+     * 2026-09-10 (`services/pricing/`). Il n'y a plus d'appel réseau ici.
      *
      * ⚠️ La séparation des phases reste néanmoins obligatoire, et pour une
      * raison qui n'a pas disparu avec le saut réseau : le devis lit la base
@@ -581,16 +600,37 @@ async function initiateInternal(req, res, next) {
     let pricingPayload;
 
     try {
-      pricingPayload = await computePricingQuote({ pricingInput });
+      /**
+       * Le prix vient du devis que l'utilisateur a accepté (`quoteId`), et
+       * c'est lui qui sera écrit. Sans devis, le comportement dépend de
+       * `PRICING_QUOTE_REQUIRED` — voir `shared/pricing.js`.
+       */
+      pricingPayload = await resolvePricingPayload({
+        pricingInput,
+        quoteId: effectivePricingId,
+        userId: senderId,
+        idempotencyKey: resolvePersistedIdempotencyKey(req, body),
+        contexte: "internal",
+      });
     } catch (e) {
       safeLog("error", "[TX INTERNAL] pricing quote error", {
         senderId,
         toEmail: cleanEmail,
         pricingInput,
-        status: e?.response?.status || null,
-        responseData: e?.response?.data || null,
+        status: e?.status || e?.response?.status || null,
+        code: e?.code || null,
         message: e?.message || "unknown_error",
       });
+
+      /**
+       * ⚠️ UN REFUS DE DEVIS N'EST PAS UNE PANNE DE SERVICE.
+       *
+       * « Ce devis a expiré » et « le service de tarification est indisponible »
+       * appellent deux gestes opposés côté client : redemander un prix, ou
+       * réessayer plus tard. Les fondre dans un 502 générique ferait boucler
+       * l'application sur une erreur qu'un nouveau devis réglerait.
+       */
+      if (e?.status >= 400 && e?.status < 500) throw e;
 
       throw createError(502, "Service pricing indisponible");
     }

@@ -263,6 +263,36 @@ const PricingQuoteSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
+
+    /**
+     * ── TRAÇABILITÉ DE LA CONSOMMATION (2026-09-16) ─────────────────────────
+     *
+     * Le devis engage désormais le prix : il se consomme UNE FOIS, et l'on doit
+     * pouvoir dire quelle transaction l'a consommé. Sans ces trois champs, un
+     * devis passé à `USED` serait indiscernable d'un devis brûlé par erreur.
+     *
+     * ⚠️ Aucun index n'est déclaré dessus, délibérément. `autoIndex` est coupé
+     * sur toutes les connexions de ce service et les index se posent par
+     * `scripts/ensureIndexes.js`, qui ne couvre aujourd'hui que la base des
+     * TRANSACTIONS. Déclarer ici un index que rien ne pose donnerait une
+     * garantie que la base ne porte pas.
+     */
+    usedAt: {
+      type: Date,
+      default: null,
+    },
+
+    usedByReference: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    usedByIdempotencyKey: {
+      type: String,
+      default: null,
+      trim: true,
+    },
   },
   {
     timestamps: true,

@@ -6,6 +6,9 @@ const createError = require("http-errors");
 const runtime = require("../shared/runtime");
 const { logTransaction, releaseSenderReserve, chargeCancellationFee, convertAmount, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, assertTransition, runInTransaction, safeAbort, safeEndSession } = runtime;
 
+/** Le taux réellement appliqué se déduit des montants — il ne s'invente pas. */
+const { tauxEffectif } = require("../../../utils/money");
+
 /**
  * Modèles liés PARESSEUSEMENT : chaque accès de propriété va chercher le
  * modèle au moment de l'usage. Les déstructurer directement résolvait la
@@ -261,7 +264,19 @@ async function resolveTreasuryCreditInCad({ cancellationFee, sourceCurrency }) {
       if (convertedAmount > 0) {
         treasuryFeeAmount = convertedAmount;
         treasuryFeeCurrency = FEES_TREASURY_DEFAULT_CURRENCY;
-        treasuryConversionRate = convertedRate || 1;
+
+        /**
+         * ⚠️ `convertedRate || 1` inscrivait « 1 pour 1 » dans un champ d'audit
+         * alors qu'on venait de convertir entre deux devises différentes. Le
+         * taux se DÉDUIT du couple (avant, après) — voir `utils/money.js`.
+         *
+         * ⚠️ Le `catch` juste en dessous garde, lui, un taux de 1 À BON DROIT :
+         * il n'y a alors eu AUCUNE conversion, les frais restent dans la devise
+         * source, et 1 y est la vérité. Ne pas « harmoniser » les deux.
+         */
+        treasuryConversionRate =
+          tauxEffectif(convertedAmount, cancellationFee, convertedRate) ??
+          treasuryConversionRate;
       }
     } catch {
       treasuryFeeAmount = cancellationFee;

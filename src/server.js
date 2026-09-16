@@ -1203,6 +1203,75 @@ async function bootstrap() {
     }
 
     /**
+     * ══════════════════════════════════════════════════════════════════════
+     * INVALIDATION DES BARÈMES ENTRE INSTANCES (2026-09-16)
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * Publier un barème vidait le cache du SEUL processus qui publiait. Les
+     * autres instances servaient l'ancien prix jusqu'à l'expiration de leur TTL
+     * — jusqu'à deux minutes pendant lesquelles deux clients identiques
+     * recevaient deux prix différents selon l'instance qui répondait.
+     *
+     * ⚠️ CLIENT D'ABONNEMENT DÉDIÉ, pour la même raison que la liste noire : un
+     * client Redis passé en mode abonné ne peut plus exécuter de commandes
+     * ordinaires. Et `enableOfflineQueue: true` à la duplication, sans quoi le
+     * client hérite d'une file déjà fermée alors que sa propre poignée de main
+     * n'a pas eu lieu (défaut mesuré le 2026-08-26 sur l'abonnement AML).
+     *
+     * Sans Redis, tout continue : l'invalidation retombe sur le TTL. Le
+     * démarrage le DIT (règle B.6), il ne le laisse pas deviner.
+     */
+    try {
+      const { initRuleCacheInvalidation } = require("./services/pricing/ruleCache");
+
+      let pricingSubscriber = null;
+
+      if (redisClient && Redis) {
+        try {
+          pricingSubscriber = redisClient.duplicate({ enableOfflineQueue: true });
+
+          closeOfflineQueueWhenReady(pricingSubscriber, {
+            logger,
+            label: "pricing",
+          });
+
+          pricingSubscriber.on("error", (err) => {
+            logger.warn(
+              `[pricing] abonnement à l'invalidation indisponible : ${err?.message || err}`
+            );
+          });
+        } catch (err) {
+          logger.warn(
+            `[pricing] duplication du client Redis impossible : ${err?.message || err}`
+          );
+          pricingSubscriber = null;
+        }
+      }
+
+      const regime = initRuleCacheInvalidation({
+        publisher: redisClient || null,
+        subscriber: pricingSubscriber,
+        logger,
+      });
+
+      logger.info(
+        `[pricing] invalidation des barèmes ${
+          regime.abonnement && regime.diffusion
+            ? `par pub/sub (${regime.canal})`
+            : "par TTL SEUL — une publication tarifaire mettra jusqu'à " +
+              `${Math.round(
+                Number(process.env.PRICING_RULES_CACHE_TTL_MS || 120000) / 1000
+              )} s à se propager aux autres instances`
+        }`
+      );
+    } catch (err) {
+      logger.warn(
+        `[pricing] invalidation inter-instances non branchée : ${err?.message || err} ` +
+          "— CONSÉQUENCE : propagation par TTL seul."
+      );
+    }
+
+    /**
      * L'index de déduplication du grand livre est-il bien en place ?
      *
      * Il se crée à la main (`scripts/ensure-ledger-indexes.js`). S'il manque,

@@ -24,6 +24,9 @@
     "worker:notifications": "node workers/notificationDispatch.js",
     "workers:all": "node workers/all.js",
     "seed:cagnotte-pricing": "node scripts/seedCagnottePricingRules.js",
+    "seed:cancellation-pricing": "node scripts/seedCancellationPricingRules.js",
+    "seed:rail-pricing": "node scripts/seedRailPricingRules.js",
+    "pricing:coverage": "node scripts/pricingCoverage.js",
     "backfill:cagnotte-positions": "node scripts/backfillCagnotteVaultPositions.js"
   },
   "dependencies": {

@@ -43,17 +43,14 @@ try {
   logger = console;
 }
 
-function decimalsForCurrency(code) {
-  const c = String(code || "").toUpperCase();
-  if (c === "XOF" || c === "XAF" || c === "JPY") return 0;
-  return 2;
-}
-
-function roundMoney(amount, currency) {
-  const d = decimalsForCurrency(currency);
-  const p = 10 ** d;
-  return Math.round((Number(amount) + Number.EPSILON) * p) / p;
-}
+/**
+ * ⚠️ Arrondi délégué à `utils/money` depuis le 2026-09-16 — voir l'en-tête de
+ * ce module pour les divergences mesurées entre les copies qui coexistaient.
+ */
+const {
+  decimalsForCurrency,
+  roundMoney,
+} = require("../../utils/money");
 
 const normStr = (v) => String(v ?? "").trim();
 const upper = (v) => normStr(v).toUpperCase();
@@ -466,11 +463,25 @@ exports.simulateFee = async (req, res) => {
     };
 
     if (lower(type) === "cancellation") {
-      const match = await pickBestFeeRule({
-        ...ctx,
-        txType: "",
-        method: "",
-      });
+      /**
+       * ⚠️ AFFICHER LE MONTAGE QUI SERA RÉELLEMENT PRÉLEVÉ (2026-09-16).
+       *
+       * Cette branche lisait la collection `Fee`, puis inventait 2,99 / 300 / 2
+       * quand rien ne correspondait — alors que l'annulation prélevait, elle,
+       * une table codée en dur dans `config/cancellationFees.js`. Trois sources
+       * pour un seul montant : l'utilisateur voyait un chiffre et s'en voyait
+       * prélever un autre, et le repli inventé était le pire des trois puisqu'il
+       * ne correspondait à rien de décidé.
+       *
+       * On appelle désormais EXACTEMENT le même résolveur que le prélèvement.
+       */
+      const {
+        resolveCancellationFeeFromRules,
+      } = require("../../services/pricing/cancellationPricing");
+
+      const {
+        resolveCancellationFeeRule,
+      } = require("../../config/cancellationFees");
 
       let feeValue = 0;
       let feeType = "fixed";
@@ -478,19 +489,36 @@ exports.simulateFee = async (req, res) => {
       let usedBareme = null;
       let feeBreakdown = null;
 
-      if (match) {
-        const resFee = computeFeeFromBareme(match, amountNum, fromCur);
-        feeValue = resFee.fee;
-        feeType = normalizeFeeType(match.type);
-        feeId = match._id;
-        usedBareme = match;
-        feeBreakdown = resFee.breakdown;
+      const depuisBareme = await resolveCancellationFeeFromRules({
+        amount: amountNum,
+        currency: fromCur,
+        country: normalizedCountry ? upper(normalizedCountry) : null,
+        method: normalizedMethod || null,
+        provider: normalizedProvider || null,
+      });
 
-        await modeleFee().updateOne({ _id: match._id }, { $set: { lastUsedAt: new Date() } });
+      if (depuisBareme) {
+        feeValue = depuisBareme.amount;
+        feeType = depuisBareme.type;
+        feeId = depuisBareme.feeId;
+        usedBareme = { source: depuisBareme.source, ruleVersion: depuisBareme.ruleVersion };
+        feeBreakdown = depuisBareme.breakdown;
       } else {
-        if (["USD", "CAD", "EUR"].includes(fromCur)) feeValue = 2.99;
-        else if (["XOF", "XAF"].includes(fromCur)) feeValue = 300;
-        else feeValue = 2;
+        /**
+         * Même repli que le prélèvement, et la même table — pas un chiffre
+         * inventé ici. Si les deux doivent être faux, qu'ils le soient
+         * IDENTIQUEMENT : un écart entre l'affiché et le prélevé est un litige,
+         * une table périmée est un simple tarif à mettre à jour.
+         */
+        const statique = resolveCancellationFeeRule({
+          countryCode: normalizedCountry ? upper(normalizedCountry) : null,
+          currency: fromCur,
+        });
+
+        feeValue = roundMoney(statique.amount, fromCur);
+        feeType = statique.type || "fixed";
+        feeId = statique.feeId || null;
+        usedBareme = { source: statique.source, resolvedBy: statique.resolvedBy };
       }
 
       return res.json({

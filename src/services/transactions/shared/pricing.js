@@ -265,8 +265,106 @@ function extractPricingBundle(pricingPayload, pricingInput = {}) {
   };
 }
 
+/**
+ * ============================================================================
+ * LE PRIX APPLIQUÉ VIENT DU DEVIS ACCEPTÉ, PAS D'UN NOUVEAU CALCUL
+ * ============================================================================
+ *
+ * Point d'entrée UNIQUE des chemins d'initiation depuis le 2026-09-16. Avant
+ * lui, chaque handler appelait `computePricingQuote()` directement : le prix
+ * montré à l'utilisateur et le prix écrit au grand livre étaient deux calculs
+ * distincts, séparés par le temps de réflexion de l'utilisateur. Rien ne
+ * comparait les deux.
+ *
+ * Trois situations, trois réponses :
+ *
+ *   · un `quoteId` est fourni  → on CONSOMME le devis, et on écrit SES montants
+ *   · aucun devis, exigence active (`PRICING_QUOTE_REQUIRED=true`) → 400
+ *   · aucun devis, exigence souple → on calcule, et on le JOURNALISE
+ *
+ * La troisième branche est une TRANSITION, pas un mode de fonctionnement : elle
+ * existe le temps que le parc mobile installé envoie tous un devis. Elle se
+ * ferme par variable d'environnement, sans redéploiement — même motif que
+ * `IDEMPOTENCY_REQUIRED`. Ce qu'elle ne fait pas : se taire.
+ */
+async function resolvePricingPayload({
+  pricingInput,
+  quoteId,
+  userId,
+  reference,
+  idempotencyKey,
+  contexte = "",
+}) {
+  const {
+    buildRequest,
+    validateRequest,
+    consumeQuote,
+    buildPayloadFromQuote,
+  } = require("../../pricing/quoteService");
+
+  const { devisEstExige } = require("../../pricing/quoteConsumption");
+
+  const identifiantDevis = String(quoteId || "").trim();
+
+  if (identifiantDevis) {
+    /**
+     * La demande est normalisée EXACTEMENT comme elle l'a été à l'émission du
+     * devis — sinon « CI » et « Côte d'Ivoire » désigneraient deux corridors
+     * différents et tout devis serait refusé pour divergence.
+     */
+    const request = buildRequest(pricingInput || {});
+    const erreurDeForme = validateRequest(request);
+
+    if (erreurDeForme) {
+      throw createError(400, erreurDeForme);
+    }
+
+    const devis = await consumeQuote({
+      quoteId: identifiantDevis,
+      userId,
+      request,
+      reference,
+      idempotencyKey,
+    });
+
+    logger?.info?.("[TX-CORE][PRICING][DEVIS_CONSOMMÉ]", {
+      quoteId: identifiantDevis,
+      contexte,
+      reference: reference || null,
+    });
+
+    return buildPayloadFromQuote(devis);
+  }
+
+  if (devisEstExige()) {
+    throw createError(
+      400,
+      "Un devis est exigé pour initier une transaction. Demandez un prix, " +
+        "puis initiez avec son identifiant.",
+      { code: "QUOTE_REQUIRED" }
+    );
+  }
+
+  /**
+   * ⚠️ On ne se tait pas (règle B.1). Cette ligne est la seule façon de savoir
+   * quand `PRICING_QUOTE_REQUIRED=true` deviendra sans risque : tant qu'elle
+   * apparaît, des clients initient encore sans devis, et pour ceux-là le prix
+   * affiché n'engage PayNoval à rien.
+   */
+  logger?.warn?.("[TX-CORE][PRICING][SANS_DEVIS]", {
+    contexte,
+    userId: userId || null,
+    raison:
+      "initiation sans devis — le prix est recalculé, il peut différer de " +
+      "celui qui a été affiché à l'utilisateur",
+  });
+
+  return computePricingQuote({ pricingInput });
+}
+
 module.exports = {
   pickBodyPricingInput,
   computePricingQuote,
+  resolvePricingPayload,
   extractPricingBundle,
 };

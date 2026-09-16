@@ -1092,6 +1092,34 @@ async function creditRevenueLineToTreasury({
   );
 
   if (treasuryAmount <= 0) {
+    /**
+     * ⚠️ « RIEN À ENCAISSER » ET « JE NE SAIS PAS COMBIEN » SONT DEUX CHOSES.
+     *
+     * Un corridor sans frais existe : `sourceAmount` vaut alors 0 et il n'y a
+     * réellement rien à porter — on sort, c'est légitime.
+     *
+     * Mais un revenu SOURCE strictement positif dont le montant en devise de
+     * trésorerie tombe à zéro ne veut pas dire « gratuit » : il veut dire que la
+     * conversion a échoué. Sortir ici reviendrait à garder les frais prélevés à
+     * l'expéditeur sans jamais les créditer — un revenu perdu, et une écriture
+     * de contrepartie manquante au grand livre.
+     *
+     * La tarification ne produit plus ce cas depuis le 2026-09-16 (un revenu
+     * non convertible reste libellé dans sa propre devise). Cette garde est le
+     * filet : si le cas revient par un autre chemin, il ARRÊTE l'opération au
+     * lieu de la laisser passer amputée.
+     */
+    const montantSource = Number(revenueLine?.sourceAmount || 0);
+
+    if (montantSource > 0) {
+      throw new Error(
+        `Revenu de ${montantSource} ${revenueLine?.sourceCurrency || "?"} ` +
+          `non convertible en ${treasuryCurrency} : la ligne ne peut pas être ` +
+          "portée à la trésorerie. L'opération est arrêtée plutôt que de " +
+          "prélever des frais sans les encaisser."
+      );
+    }
+
     return null;
   }
 

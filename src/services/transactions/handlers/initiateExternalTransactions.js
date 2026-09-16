@@ -29,7 +29,7 @@ const {
 
 const {
   pickBodyPricingInput,
-  computePricingQuote,
+  resolvePricingPayload,
   extractPricingBundle,
 } = require("../shared/pricing");
 
@@ -412,14 +412,43 @@ async function buildPricingContext({
   let pricingPayload;
 
   try {
-    pricingPayload = await computePricingQuote({ pricingInput });
-  } catch (e) {
-    logger.error("[pricing/quote] gateway error (external)", {
+    const {
+      resolvePersistedIdempotencyKey,
+    } = require("../../../utils/idempotencyKeys");
+
+    /**
+     * Même règle que sur le chemin interne : le prix appliqué est celui du
+     * devis accepté. `effectiveBody` porte les alias historiques du verrou
+     * (`pricingLockId`, `pricingId`, `quoteId`), que le mobile envoie tous.
+     */
+    pricingPayload = await resolvePricingPayload({
       pricingInput,
-      status: e.response?.status,
+      quoteId:
+        effectiveBody.effectivePricingId ||
+        effectiveBody.pricingLockId ||
+        effectiveBody.pricingId ||
+        effectiveBody.quoteId ||
+        null,
+      userId: String(req.user?.id || req.user?._id || "").trim(),
+      idempotencyKey: resolvePersistedIdempotencyKey(req, effectiveBody),
+      contexte: "external",
+    });
+  } catch (e) {
+    /* Nom corrigé le 2026-09-16 : ce chemin n'appelle plus aucun service tiers. */
+    logger.error("[pricing/quote] erreur de tarification (externe)", {
+      pricingInput,
+      code: e?.code || null,
+      status: e.status || e.response?.status,
       responseData: e.response?.data,
       message: e.message,
     });
+
+    /**
+     * ⚠️ UN REFUS DE DEVIS N'EST PAS UNE PANNE DE SERVICE — voir le même
+     * raisonnement sur le chemin interne. « Ce devis a expiré » demande un
+     * nouveau devis ; un 502 ferait réessayer à l'identique, sans fin.
+     */
+    if (e?.status >= 400 && e?.status < 500) throw e;
 
     throw createError(502, "Service pricing indisponible");
   }

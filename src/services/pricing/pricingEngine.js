@@ -175,17 +175,21 @@ function countryTokens(v) {
   return Array.from(new Set(tokens.filter(Boolean)));
 }
 
-function decimalsForCurrency(code) {
-  const c = upper(code);
-  if (c === "XOF" || c === "XAF" || c === "JPY") return 0;
-  return 2;
-}
-
-function roundMoney(amount, currency) {
-  const d = decimalsForCurrency(currency);
-  const p = 10 ** d;
-  return Math.round((Number(amount) + Number.EPSILON) * p) / p;
-}
+/**
+ * ⚠️ L'ARRONDI VIENT D'UN SEUL ENDROIT DEPUIS LE 2026-09-16.
+ *
+ * Cette fonction connaissait trois devises sans décimale (XOF, XAF, JPY) là où
+ * la validation du devis en connaissait sept et les helpers de transaction dix.
+ * Un montant en franc guinéen était donc arrondi au centime par le moteur —
+ * une sous-unité qui n'existe pas — puis contrôlé à l'unité ailleurs.
+ *
+ * La méthode retenue est celle qui était déjà appliquée ici, parce que c'est
+ * elle qui FACTURE : l'aligner sur l'autre aurait changé des prix sans décision.
+ */
+const {
+  decimalsForCurrency,
+  roundMoney,
+} = require("../../utils/money");
 
 function inRange(amount, range) {
   const a = Number(amount);
@@ -535,7 +539,35 @@ async function computeQuote({ req, rules, getMarketRate }) {
   let marketRate = null;
   let appliedRate = null;
 
-  if (fxMode === "OVERRIDE") {
+  /**
+   * ══════════════════════════════════════════════════════════════════════════
+   * PAS DE CHANGE ⇒ PAS DE MARGE DE CHANGE (2026-09-16)
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ── Le défaut fermé ici ─────────────────────────────────────────────────
+   *
+   * Sur un corridor en devise IDENTIQUE, le taux de marché vaut 1 — et une
+   * règle en `MARKUP_PERCENT` l'appliquait quand même : `1 × (1 − 1,5/100)`,
+   * soit **0,985**. L'expéditeur envoyait 10 000 XOF, le bénéficiaire en
+   * recevait 9 850, sans qu'aucune conversion n'ait eu lieu. Une « marge de
+   * change » sans change n'est pas une marge : c'est un frais caché, qui
+   * n'apparaît sur aucune ligne de frais.
+   *
+   * Les six règles en base évitaient le piège par CONVENTION — CI→CI et CA→CA
+   * sont en `PASS_THROUGH`. Une convention n'est pas une garantie : la
+   * première règle « toutes devises » avec marge aurait raboté chaque virement
+   * en devise identique, et rien ne l'aurait signalé.
+   *
+   * C'est déjà la règle explicite du module Cagnotte (« même devise ⇒ aucun
+   * taux, même si une règle en déclare un »). Elle vaut pour tout le moteur.
+   *
+   * ⚠️ `OVERRIDE` est concerné aussi : imposer un taux ≠ 1 entre deux comptes
+   * de la même devise ferait apparaître ou disparaître de l'argent.
+   */
+  if (fromCurrency === toCurrency) {
+    marketRate = 1;
+    appliedRate = 1;
+  } else if (fxMode === "OVERRIDE") {
     appliedRate = Number(rule?.fx?.overrideRate);
     if (!Number.isFinite(appliedRate) || appliedRate <= 0) {
       const err = new Error("Invalid overrideRate");
@@ -617,7 +649,26 @@ async function computeQuote({ req, rules, getMarketRate }) {
     },
     ruleApplied: {
       ruleId: rule._id,
-      version: Number(rule.version ?? 1),
+
+      /**
+       * ⚠️ LA VERSION VIENT DE `currentVersion`, PAS DE `version`.
+       *
+       * Ce champ lisait `rule.version`, que le workflow de gouvernance N'ÉCRIT
+       * PLUS depuis qu'il versionne par `currentVersion` (le modèle le dit
+       * lui-même : « conservé pour compatibilité de lecture »). Chaque
+       * transaction citait donc la version 1, quelle que soit la version
+       * réellement appliquée.
+       *
+       * Conséquence, mesurée le 2026-09-16 : tout l'appareil de versionnage —
+       * `PricingRuleVersion`, snapshots immuables, circuit à quatre yeux —
+       * était inexploitable en litige, puisque la transaction ne désignait pas
+       * la version qui l'avait tarifée.
+       *
+       * `version` est conservé sous son ancien nom pour les lecteurs existants,
+       * mais alimenté par la bonne source.
+       */
+      version: Number(rule.currentVersion ?? rule.version ?? 1),
+      currentVersion: Number(rule.currentVersion ?? rule.version ?? 1),
       priority: Number(rule.priority ?? 0),
     },
   };
@@ -625,6 +676,7 @@ async function computeQuote({ req, rules, getMarketRate }) {
 
 module.exports = {
   computeQuote,
+  computeFee,
   computeFxRevenue,
   roundMoney,
   decimalsForCurrency,

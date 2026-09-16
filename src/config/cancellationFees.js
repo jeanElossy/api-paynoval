@@ -2,7 +2,16 @@
 
 "use strict";
 
-const ZERO_DECIMAL_CURRENCIES = new Set(["XOF", "XAF", "JPY"]);
+/**
+ * ⚠️ Arrondi et liste de devises délégués à `utils/money` depuis le 2026-09-16.
+ * Ce fichier arrondissait par `toFixed` avec trois devises sans décimale, quand
+ * le moteur de tarification utilisait `Math.round` avec sa propre liste — deux
+ * réponses possibles pour le même montant.
+ */
+const {
+  ZERO_DECIMAL_CURRENCIES,
+  roundMoney,
+} = require("../utils/money");
 
 const CANCELLATION_FEES_BY_COUNTRY = {
   CA: {
@@ -59,15 +68,6 @@ function normalizeCountryCode(value) {
   return raw;
 }
 
-function roundMoney(amount, currency = "CAD") {
-  const cur = normalizeCurrency(currency);
-  const n = Number(amount || 0);
-
-  if (!Number.isFinite(n)) return 0;
-
-  const decimals = ZERO_DECIMAL_CURRENCIES.has(cur) ? 0 : 2;
-  return Number(n.toFixed(decimals));
-}
 
 function extractSenderCountryCode(tx = {}) {
   const meta = tx?.meta && typeof tx.meta === "object" ? tx.meta : {};

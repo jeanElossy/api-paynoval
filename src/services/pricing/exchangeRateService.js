@@ -76,6 +76,58 @@ const FX_DB_SNAPSHOT_MAX_AGE_MS = Number(
 
 const PEG_XOF_PER_EUR = Number(process.env.PEG_XOF_PER_EUR || 655.957);
 
+/**
+ * Âge maximal d'un taux « live » accepté pour tarifer. 24 h par défaut, parce
+ * que c'est la cadence de publication du fournisseur gratuit branché par défaut.
+ * Descendre ce seuil exige un fournisseur qui publie plus souvent — sinon toute
+ * cotation échouerait, ce qui est le comportement voulu mais doit être choisi.
+ */
+const FX_LIVE_MAX_AGE_MS = Number(
+  process.env.FX_LIVE_MAX_AGE_MS || 24 * 60 * 60 * 1000
+);
+
+/**
+ * Quel fournisseur de taux est RÉELLEMENT branché, et avec quelle cadence.
+ *
+ * Règle B.6 : un service qui démarre sans son fournisseur payant doit
+ * l'annoncer AVEC sa conséquence. Sans clé, PayNoval tarife sur une source
+ * gratuite, sans engagement de disponibilité, publiée une fois par jour.
+ */
+function fournisseurConfigure() {
+  const avecCle = Boolean(FX_API_KEY && FX_API_KEY !== "REPLACE_ME");
+
+  return {
+    avecCle,
+    nom: avecCle ? "exchangerate-api" : "open.er-api",
+    cadence: avecCle ? "intrajournalière" : "quotidienne",
+    consequence: avecCle
+      ? null
+      : "aucun engagement de disponibilité, publication quotidienne : " +
+        "un taux peut avoir jusqu'à 24 h au moment où il tarife",
+  };
+}
+
+/** Âge d'un taux en millisecondes, ou `null` si la date est illisible. */
+function ageDuTaux(asOfDate) {
+  if (!asOfDate) return null;
+
+  const horodatage =
+    typeof asOfDate === "number"
+      ? asOfDate * (String(asOfDate).length <= 10 ? 1000 : 1)
+      : new Date(asOfDate).getTime();
+
+  if (!Number.isFinite(horodatage)) return null;
+
+  const age = Date.now() - horodatage;
+
+  /**
+   * Une date FUTURE n'est pas un taux frais : c'est une horloge fausse ou une
+   * date d'expiration prise pour une date d'émission. On rend 0 plutôt que de
+   * laisser un âge négatif passer tous les contrôles.
+   */
+  return age < 0 ? 0 : age;
+}
+
 const pairCache = new LRUCache({ max: 2000, ttl: FX_CACHE_TTL_MS });
 const failCache = new LRUCache({ max: 2000, ttl: FX_FAIL_COOLDOWN_MS });
 
@@ -188,6 +240,7 @@ async function saveSnapshotToDb(fromCur, toCur, payload) {
     const rate = Number(payload?.rate);
     if (!Number.isFinite(rate) || rate <= 0) return;
 
+
     await modeleExchangeRate().updateOne(
       { from: fromCur, to: toCur, active: false },
       {
@@ -207,8 +260,24 @@ async function saveSnapshotToDb(fromCur, toCur, payload) {
       },
       { upsert: true }
     );
-  } catch {
-    // no-op
+  } catch (err) {
+    /**
+     * ⚠️ ON NE SE TAIT PAS (règle B.1).
+     *
+     * Ce bloc était un `catch {}` muet. L'instantané en base est le FILET qui
+     * sert quand le fournisseur de taux tombe : s'il ne se remplit jamais —
+     * droits d'écriture manquants, base en lecture seule, schéma divergent —
+     * personne ne l'apprend, et on le découvre le jour de la panne, c'est-à-dire
+     * au moment où il est le seul recours.
+     *
+     * L'échec n'interrompt toujours pas la cotation : le taux vient d'être
+     * obtenu, il est bon. Mais il est désormais AUDIBLE.
+     */
+    console.warn(
+      `⚠️ [FX] instantané non enregistré pour ${fromCur}→${toCur} — ` +
+        `CONSÉQUENCE : aucun repli en base si le fournisseur tombe. ` +
+        `Cause : ${err?.message || err}`
+    );
   }
 }
 
@@ -350,12 +419,43 @@ async function fetchLiveRate(fromCur, toCur) {
       throw e;
     }
 
+    const asOfDate = crossTable.asOfDate || new Date().toISOString();
+
+    /**
+     * ⚠️ LA FRAÎCHEUR SE CONTRÔLE AUSSI À LA SOURCE, PAS SEULEMENT AU REPLI.
+     *
+     * Le repli en base était borné (24 h) ; le taux « live », lui, ne l'était
+     * pas. Or « live » ne veut pas dire « frais » : le fournisseur gratuit
+     * utilisé par défaut (`open.er-api.com`) ne publie qu'UNE FOIS PAR JOUR, et
+     * sa table porte sa propre date. Un taux de la veille entrait donc dans une
+     * tarification exactement comme un taux de la minute, sans que rien ne le
+     * distingue.
+     *
+     * Un taux périmé ARRÊTE la cotation (règle B.2) : on retombe sur l'ancrage
+     * s'il existe, sinon on refuse. Le seuil est généreux par défaut, parce que
+     * l'abaisser suppose un fournisseur qui publie plus souvent — c'est une
+     * décision d'exploitation, pas un réglage de code.
+     */
+    const age = ageDuTaux(asOfDate);
+
+    if (age !== null && age > FX_LIVE_MAX_AGE_MS) {
+      const e = new Error(
+        `Taux ${fromCur}→${toCur} trop ancien : ${Math.round(age / 3600000)} h ` +
+          `(maximum ${Math.round(FX_LIVE_MAX_AGE_MS / 3600000)} h). ` +
+          "Aucun taux n'est appliqué."
+      );
+      e.status = 503;
+      e.code = "FX_RATE_STALE";
+      throw e;
+    }
+
     const out = {
       rate,
       source: crossTable.source || "live-market",
       provider: crossTable.provider || "market",
       stale: false,
-      asOfDate: crossTable.asOfDate || new Date().toISOString(),
+      asOfDate,
+      ageMs: age,
     };
 
     pairCache.set(pairKey, out);
@@ -537,4 +637,14 @@ module.exports = {
   getExchangeRate,
   getEffectiveExchangeRate,
   getSupportedCurrencies,
+
+  /**
+   * Exposés pour les tests et pour l'annonce de démarrage : un seuil de
+   * fraîcheur qu'aucun test ne peut atteindre est un seuil que personne ne
+   * vérifie (règle B.5).
+   */
+  ageDuTaux,
+  FX_LIVE_MAX_AGE_MS,
+  FX_DB_SNAPSHOT_MAX_AGE_MS,
+  fournisseurConfigure,
 };

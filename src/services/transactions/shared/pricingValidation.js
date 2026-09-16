@@ -43,11 +43,20 @@
  *     casserait tous les corridors à taux imposé.
  */
 
-const ZERO_DECIMAL = new Set(["XOF", "XAF", "JPY", "KRW", "CLP", "VND", "ISK"]);
-
-function decimalsFor(currency) {
-  return ZERO_DECIMAL.has(String(currency || "").trim().toUpperCase()) ? 0 : 2;
-}
+/**
+ * ⚠️ Liste déléguée à `utils/money` depuis le 2026-09-16.
+ *
+ * Elle comptait sept devises quand le moteur de tarification en connaissait
+ * trois : un montant en franc guinéen était arrondi au centime par le moteur,
+ * puis contrôlé ici avec une tolérance d'une unité. Deux couches qui ne
+ * parlaient pas de la même monnaie ne peuvent pas se vérifier l'une l'autre.
+ *
+ * `utils/money` est PUR — aucune base, aucun réseau : ce module le reste.
+ */
+const {
+  ZERO_DECIMAL_CURRENCIES: ZERO_DECIMAL,
+  decimalsForCurrency: decimalsFor,
+} = require("../../../utils/money");
 
 /**
  * Tolérance de cohérence : UNE unité minimale de la devise.

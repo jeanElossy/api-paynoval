@@ -61,6 +61,12 @@ const {
   normalizeCountryISO2,
 } = require("./pricingEngine");
 
+const {
+  construireFiltreConsommation,
+  diagnostiquerEchec,
+  quoteError,
+} = require("./quoteConsumption");
+
 const { getPricingModel } = require("../../config/db");
 
 /** Résolu à l'appel : la connexion n'existe pas au chargement du module. */
@@ -233,13 +239,42 @@ async function convertToAdminCurrency({
     };
   }
 
-  const rate = await getMarketRateDirect(from, admin, { requestId });
+  let rate = null;
+
+  try {
+    rate = await getMarketRateDirect(from, admin, { requestId });
+  } catch (err) {
+    rate = null;
+
+    console.warn(
+      `⚠️ [PRICING] conversion ${from}→${admin} indisponible (${err?.message || err}).`
+    );
+  }
 
   if (!Number.isFinite(rate) || rate <= 0) {
+    /**
+     * ⚠️ UN REVENU QU'ON NE SAIT PAS CONVERTIR N'EST PAS UN REVENU NUL.
+     *
+     * Ce bloc rendait `amountAdmin: 0`. Ce zéro ne restait pas un chiffre de
+     * rapport : il descendait dans `feeRevenue.amountCAD`, devenait
+     * `treasuryAmount` via le normalisateur, et `creditRevenueLineToTreasury`
+     * SAUTAIT alors la ligne (« montant ≤ 0 »). Résultat : des frais bel et bien
+     * prélevés à l'expéditeur, jamais portés à la trésorerie — un revenu perdu
+     * en silence, et un grand livre où la contrepartie n'existe pas.
+     *
+     * Le cas n'est pas théorique : le corridor principal peut être coté (XOF→EUR)
+     * pendant que la paire vers la devise de trésorerie (XOF→CAD) est
+     * indisponible. Ce sont deux paires différentes.
+     *
+     * Le revenu reste donc libellé dans SA devise. Le grand livre équilibre PAR
+     * DEVISE — la trésorerie détient déjà des soldes multidevises —, la
+     * conversion se fera plus tard, et rien ne disparaît (règle B.2).
+     */
     return {
-      adminCurrency: admin,
-      amountAdmin: 0,
-      conversionRate: 0,
+      adminCurrency: from,
+      amountAdmin: roundMoney(safeAmount, from),
+      conversionRate: 1,
+      converted: false,
     };
   }
 
@@ -593,11 +628,154 @@ async function lockQuote({ request, requestId, userId }) {
   return doc;
 }
 
+/**
+ * ============================================================================
+ * CONSOMMATION DU DEVIS — CE QUI REND LE VERROU CONTRAIGNANT
+ * ============================================================================
+ *
+ * Jusqu'au 2026-09-16, `lockQuote` écrivait un devis que PERSONNE ne relisait :
+ * l'initiation recalculait le prix et ne faisait que recopier `quoteId` en
+ * métadonnée. Le verrou ne verrouillait rien.
+ *
+ * ── Trois propriétés, et aucune n'est négociable ────────────────────────────
+ *
+ * 1. **Une seule fois.** `ACTIVE → USED` est une mise à jour conditionnelle sur
+ *    un document unique : Mongo la rend atomique sans transaction
+ *    multi-documents — ce qui compte, car la base de tarification ne partage
+ *    pas forcément le client Mongo du grand livre (`config/db.js`).
+ * 2. **Pour celui à qui il a été promis.** `userId` est dans le filtre. Un
+ *    devis réutilisable par un autre serait un moyen de figer un taux favorable
+ *    et de l'appliquer au virement de quelqu'un d'autre.
+ * 3. **Pour CE virement-là.** Les champs de prix sont dans le filtre : un devis
+ *    obtenu pour 10 000 XOF ne peut pas servir à en envoyer 1 000 000.
+ *
+ * ── Le rejeu, distinct du second usage ──────────────────────────────────────
+ *
+ * Un rejeu porteur de la MÊME clé d'idempotence n'est pas une seconde
+ * transaction : c'est la même, dont la réponse s'est perdue. Il retrouve donc
+ * son devis au lieu de se voir opposer « déjà consommé ». C'est ce que fait
+ * Stripe d'une requête rejouée, et c'est ce qui évite qu'une coupure réseau
+ * coûte son prix à l'utilisateur.
+ */
+function quoteDocToPlain(doc) {
+  if (!doc) return null;
+  return typeof doc.toObject === "function" ? doc.toObject() : doc;
+}
+
+/**
+ * Rend un devis figé sous la MÊME forme qu'une réponse de calcul, pour que
+ * `extractPricingBundle` le valide exactement comme il valide un devis calculé.
+ *
+ * ⚠️ Un devis relu en base n'est pas plus digne de confiance qu'un devis
+ * calculé : il a pu être écrit par une version antérieure du moteur. Il passe
+ * donc par la même validation arithmétique (règle B.2).
+ */
+function buildPayloadFromQuote(doc) {
+  const devis = quoteDocToPlain(doc) || {};
+
+  return {
+    success: true,
+    ok: true,
+    mode: "QUOTE_CONSUMED",
+    quoteId: devis.quoteId || null,
+    expiresAt: devis.expiresAt || null,
+    request: devis.request || {},
+    result: devis.result || {},
+    feeSource: Number(devis?.result?.fee ?? 0),
+    ruleApplied: devis.ruleApplied || null,
+    fxRuleApplied: devis.fxRuleApplied || null,
+    debug: devis.debug || null,
+  };
+}
+
+/**
+ * @param {object} params
+ * @param {string} params.quoteId
+ * @param {string} params.userId         Propriétaire attendu du devis.
+ * @param {object} params.request        Sortie de `buildRequest` pour la demande.
+ * @param {string} [params.reference]    Référence de la transaction qui le consomme.
+ * @param {string} [params.idempotencyKey]
+ * @param {object} [params.model]        Injection pour les tests.
+ * @returns {Promise<object>} le devis consommé
+ */
+async function consumeQuote({
+  quoteId,
+  userId,
+  request,
+  reference,
+  idempotencyKey,
+  model,
+}) {
+  const id = String(quoteId || "").trim();
+
+  if (!id) {
+    throw quoteError(400, "QUOTE_REQUIRED", "Aucun devis fourni.");
+  }
+
+  if (!String(userId || "").trim()) {
+    /**
+     * Sans identité, la propriété du devis ne peut pas être vérifiée — et un
+     * devis consommable par n'importe qui n'est plus un engagement de prix.
+     */
+    throw quoteError(401, "UNAUTHORIZED", "Identité absente.");
+  }
+
+  const Quote = model || modelePricingQuote();
+  const maintenant = new Date();
+
+  const consomme = await Quote.findOneAndUpdate(
+    construireFiltreConsommation({
+      quoteId: id,
+      userId,
+      requete: request,
+      maintenant,
+    }),
+    {
+      $set: {
+        status: "USED",
+        usedAt: maintenant,
+        usedByReference: reference ? String(reference) : null,
+        usedByIdempotencyKey: idempotencyKey ? String(idempotencyKey) : null,
+      },
+    },
+    { new: true }
+  );
+
+  if (consomme) return quoteDocToPlain(consomme);
+
+  /**
+   * Relecture pour EXPLIQUER l'échec — le devis n'a pas été touché.
+   * `lean()` n'existe pas sur un modèle injecté en test : on s'en passe alors,
+   * plutôt que d'imposer aux tests de simuler toute l'API d'une requête Mongoose.
+   */
+  const requete = Quote.findOne({ quoteId: id });
+  const devis = quoteDocToPlain(
+    await (typeof requete?.lean === "function" ? requete.lean() : requete)
+  );
+
+  /* Rejeu de la MÊME intention : on rend le devis déjà consommé. */
+  const cle = String(idempotencyKey || "").trim();
+
+  if (
+    cle &&
+    devis &&
+    devis.status === "USED" &&
+    String(devis.userId || "") === String(userId) &&
+    String(devis.usedByIdempotencyKey || "") === cle
+  ) {
+    return devis;
+  }
+
+  throw diagnostiquerEchec(devis, { userId, requete: request, maintenant });
+}
+
 module.exports = {
   buildRequest,
   validateRequest,
   computeFullQuote,
   lockQuote,
+  consumeQuote,
+  buildPayloadFromQuote,
   buildQuoteResponsePayload,
   buildLockResponsePayload,
   recordCoverageGap,

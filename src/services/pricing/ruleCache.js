@@ -58,11 +58,40 @@ const modelePricingRule = () => getPricingModel("PricingRule");
 
 const DEFAULT_TTL_MS = Number(process.env.PRICING_RULES_CACHE_TTL_MS || 120000);
 
+/**
+ * ============================================================================
+ * L'INVALIDATION DOIT TRAVERSER LES INSTANCES (2026-09-16)
+ * ============================================================================
+ *
+ * `invalidateRuleCache()` ne vidait que la mémoire du PROCESSUS qui publie. Sur
+ * plusieurs instances — le cas dès qu'on passe à deux conteneurs —, les autres
+ * continuaient de servir l'ancien barème jusqu'à l'expiration du TTL : jusqu'à
+ * deux minutes pendant lesquelles deux clients identiques recevaient deux prix
+ * différents, selon l'instance qui répondait.
+ *
+ * Le TTL restait donc, seul, à faire un travail qu'il ne sait pas faire : il
+ * borne l'écart, il ne le supprime pas.
+ *
+ * Le motif est celui DÉJÀ retenu pour la liste noire de conformité
+ * (`server.js`) : un client Redis DÉDIÉ à l'abonnement — un client passé en
+ * mode abonné ne peut plus exécuter de commandes ordinaires — et un repli sur
+ * le TTL seul quand Redis est absent, annoncé au démarrage (règle B.6).
+ *
+ * ⚠️ Ce canal ne transporte AUCUNE donnée tarifaire : seulement le signal
+ * « relis la base ». Un prix qui voyagerait par Redis ferait de Redis une
+ * source de vérité financière (invariant A1).
+ */
+const CANAL_INVALIDATION = "paynoval:pricing:rules:invalidate";
+
 let cached = null;
 let loadedAt = 0;
 let inFlight = null;
 let hits = 0;
 let misses = 0;
+
+/** Client Redis utilisé pour DIFFUSER l'invalidation. Jamais pour lire un prix. */
+let diffuseur = null;
+let abonne = false;
 
 /** Chargement par défaut : règles actives et non archivées. */
 async function defaultLoader() {
@@ -101,10 +130,91 @@ async function getActiveRules({ loader = defaultLoader, ttlMs = DEFAULT_TTL_MS }
   return inFlight;
 }
 
-/** Appelée après toute publication. Le prochain devis rechargera. */
-function invalidateRuleCache() {
+/** Vide la mémoire de CE processus. */
+function viderCacheLocal() {
   cached = null;
   loadedAt = 0;
+}
+
+/**
+ * Appelée après toute publication tarifaire. Le prochain devis rechargera —
+ * sur cette instance immédiatement, sur les autres dès réception du signal.
+ *
+ * La diffusion est au mieux : si Redis est absent ou tombe, les autres
+ * instances retombent sur le TTL. On ne fait pas échouer une publication
+ * tarifaire réussie parce qu'un cache n'a pas pu être prévenu — mais on le DIT.
+ */
+function invalidateRuleCache({ diffuser = true } = {}) {
+  viderCacheLocal();
+
+  if (!diffuser || !diffuseur) return;
+
+  try {
+    const envoi = diffuseur.publish(CANAL_INVALIDATION, String(Date.now()));
+
+    if (envoi && typeof envoi.catch === "function") {
+      envoi.catch((err) => {
+        console.warn(
+          `⚠️ [PRICING] invalidation non diffusée (${err?.message || err}) — ` +
+            "CONSÉQUENCE : les autres instances serviront l'ancien barème " +
+            "jusqu'à l'expiration de leur TTL."
+        );
+      });
+    }
+  } catch (err) {
+    console.warn(
+      `⚠️ [PRICING] invalidation non diffusée (${err?.message || err}) — ` +
+        "CONSÉQUENCE : les autres instances serviront l'ancien barème " +
+        "jusqu'à l'expiration de leur TTL."
+    );
+  }
+}
+
+/**
+ * Branche la diffusion et l'écoute de l'invalidation.
+ *
+ * @param {object} params
+ * @param {object} [params.publisher]   Client Redis ordinaire, pour diffuser.
+ * @param {object} [params.subscriber]  Client Redis DÉDIÉ, pour écouter.
+ * @param {object} [params.logger]
+ * @returns {{diffusion: boolean, abonnement: boolean, canal: string}} le régime EFFECTIF
+ */
+function initRuleCacheInvalidation({ publisher, subscriber, logger } = {}) {
+  diffuseur = publisher || null;
+
+  if (subscriber && typeof subscriber.subscribe === "function") {
+    try {
+      subscriber.subscribe(CANAL_INVALIDATION);
+
+      subscriber.on("message", (canal) => {
+        if (canal !== CANAL_INVALIDATION) return;
+
+        /* `diffuser: false` : sans cela, chaque instance rediffuserait le
+           signal qu'elle vient de recevoir — une boucle sans fin. */
+        invalidateRuleCache({ diffuser: false });
+      });
+
+      abonne = true;
+    } catch (err) {
+      abonne = false;
+      logger?.warn?.(
+        `[pricing] abonnement à l'invalidation impossible : ${err?.message || err}`
+      );
+    }
+  }
+
+  return {
+    diffusion: Boolean(diffuseur),
+    abonnement: abonne,
+    canal: CANAL_INVALIDATION,
+  };
+}
+
+/** Remise à zéro — tests uniquement. */
+function __resetInvalidation() {
+  diffuseur = null;
+  abonne = false;
+  viderCacheLocal();
 }
 
 function cacheStats() {
@@ -119,7 +229,10 @@ function cacheStats() {
 module.exports = {
   getActiveRules,
   invalidateRuleCache,
+  initRuleCacheInvalidation,
   cacheStats,
   defaultLoader,
   DEFAULT_TTL_MS,
+  CANAL_INVALIDATION,
+  __resetInvalidation,
 };

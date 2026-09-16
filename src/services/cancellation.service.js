@@ -27,6 +27,9 @@ const {
   resolveCancellationFeeRule,
 } = require("../config/cancellationFees");
 
+/** Le taux réellement appliqué se déduit des montants — il ne s'invente pas. */
+const { tauxEffectif } = require("../utils/money");
+
 const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
 
 const OUTBOUND_EXTERNAL_FLOWS = new Set([
@@ -141,10 +144,70 @@ async function resolveCancellationFeeAmounts({
 }) {
   const senderCountryCode = extractSenderCountryCode(tx);
 
-  const rule = resolveCancellationFeeRule({
-    countryCode: senderCountryCode,
-    currency: sourceCurrency,
-  });
+  /**
+   * ══════════════════════════════════════════════════════════════════════════
+   * LE BARÈME GOUVERNÉ D'ABORD, LA TABLE STATIQUE EN DERNIER RECOURS
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * Jusqu'au 2026-09-16, ces frais venaient d'une table CODÉE EN DUR couvrant
+   * deux pays, pendant que l'écran de simulation les lisait dans une autre
+   * source (la collection `Fee`) avec son propre repli en dur. L'utilisateur
+   * pouvait voir un montant et s'en voir prélever un autre, et modifier le
+   * barème affiché n'avait aucun effet sur le prélèvement.
+   *
+   * ⚠️ POURQUOI UN REPLI SUBSISTE ICI, CONTRAIREMENT AUX CAGNOTTES.
+   *
+   * La règle du chemin de l'argent est de refuser en fermeture, et c'est ce que
+   * font les cagnottes : sans barème, 503. Ici l'arbitrage est inverse, et
+   * délibéré — refuser une ANNULATION revient à retenir les fonds d'un
+   * utilisateur qui demande à les libérer. C'est la raison pour laquelle
+   * `/cancel` est déjà la seule route financière dispensée des contrôles
+   * d'éligibilité et d'AML.
+   *
+   * Le repli est donc conservé, mais il est BRUYANT : chaque recours dit ce
+   * qu'il est et ce qu'il faut faire pour qu'il cesse.
+   */
+  let rule = null;
+
+  try {
+    const {
+      resolveCancellationFeeFromRules,
+    } = require("./pricing/cancellationPricing");
+
+    const depuisBareme = await resolveCancellationFeeFromRules({
+      amount: grossSource,
+      currency: sourceCurrency,
+      country: senderCountryCode,
+      method: tx?.method || null,
+      provider: tx?.provider || null,
+    });
+
+    if (depuisBareme) rule = depuisBareme;
+  } catch (err) {
+    /**
+     * Une panne de lecture des barèmes ne doit pas empêcher une annulation :
+     * on le signale et on retombe sur la table. Se taire ici ferait passer une
+     * panne pour une absence de règle (règle B.1).
+     */
+    console.warn(
+      `⚠️ [CANCEL] barème d'annulation illisible (${err?.message || err}) — ` +
+        "repli sur la table statique."
+    );
+  }
+
+  if (!rule) {
+    rule = resolveCancellationFeeRule({
+      countryCode: senderCountryCode,
+      currency: sourceCurrency,
+    });
+
+    console.warn(
+      `⚠️ [CANCEL] aucun barème CANCELLATION ne couvre ${senderCountryCode || "?"}/` +
+        `${sourceCurrency} — repli sur la table statique (${rule.source}). ` +
+        "CONSÉQUENCE : ces frais ne sont pas gouvernés et ne se modifient pas " +
+        "sans déploiement. Déposer les règles : npm run seed:cancellation-pricing"
+    );
+  }
 
   let cancellationFee = roundMoney(rule.amount, rule.currency);
   let feeSourceCurrency = normalizeCurrency(rule.currency || sourceCurrency);
@@ -155,6 +218,9 @@ async function resolveCancellationFeeAmounts({
     feeSourceCurrency &&
     feeSourceCurrency !== sourceCurrency
   ) {
+    /** Montant AVANT conversion : il sert à déduire le taux réellement appliqué. */
+    const fraisAvantConversion = cancellationFee;
+
     const converted = await convertAmount(
       feeSourceCurrency,
       sourceCurrency,
@@ -172,7 +238,21 @@ async function resolveCancellationFeeAmounts({
     }
 
     cancellationFee = roundMoney(convertedAmount, sourceCurrency);
-    feeConversionRateToSource = convertedRate || 1;
+
+    /**
+     * ⚠️ `convertedRate || 1` ÉCRIVAIT UN TAUX FAUX DANS UN CHAMP D'AUDIT.
+     *
+     * On vient de convertir entre deux devises DIFFÉRENTES : inscrire « 1 pour
+     * 1 » parce que le fournisseur n'a pas rendu de taux lisible contredit la
+     * ligne du dessus, et le fait avec un chiffre parfaitement plausible.
+     *
+     * Le taux n'est pas à deviner : la conversion a réussi, on a le montant
+     * avant et après. Voir `utils/money.js:tauxEffectif`.
+     */
+    feeConversionRateToSource =
+      tauxEffectif(convertedAmount, fraisAvantConversion, convertedRate) ??
+      feeConversionRateToSource;
+
     feeSourceCurrency = sourceCurrency;
   } else {
     cancellationFee = roundMoney(cancellationFee, sourceCurrency);
@@ -231,7 +311,11 @@ async function resolveTreasuryCreditAmount({
         FEES_TREASURY_DEFAULT_CURRENCY
       );
       treasuryFeeCurrency = FEES_TREASURY_DEFAULT_CURRENCY;
-      treasuryConversionRate = convertedRate || 1;
+
+      /* Même raison qu'au-dessus : le taux se déduit, il ne se suppose pas. */
+      treasuryConversionRate =
+        tauxEffectif(convertedAmount, cancellationFee, convertedRate) ??
+        treasuryConversionRate;
     }
   }
 

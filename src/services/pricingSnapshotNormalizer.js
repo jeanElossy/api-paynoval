@@ -9,12 +9,12 @@ function upper(v) {
   return String(v || "").trim().toUpperCase();
 }
 
-function roundMoney(amount, currency) {
-  const c = upper(currency);
-  const decimals = ["XOF", "XAF", "JPY"].includes(c) ? 0 : 2;
-  const p = 10 ** decimals;
-  return Math.round((Number(amount || 0) + Number.EPSILON) * p) / p;
-}
+/**
+ * ⚠️ Arrondi délégué à `utils/money` depuis le 2026-09-16 : ce fichier portait
+ * sa propre copie, avec une liste de devises sans décimale plus courte que
+ * celle des autres couches (voir l'en-tête de `utils/money.js`).
+ */
+const { roundMoney } = require("../utils/money");
 
 function normalizePricingSnapshot(pricingSnapshot = {}) {
   const request = pricingSnapshot?.request || {};

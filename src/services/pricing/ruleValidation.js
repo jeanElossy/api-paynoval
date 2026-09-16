@@ -30,6 +30,51 @@ const FX_MODES = [
   "DELTA_ABS",
 ];
 
+/**
+ * ============================================================================
+ * LES BORNES — CE QUI SÉPARE UN TARIF D'UNE FAUTE DE FRAPPE
+ * ============================================================================
+ *
+ * Jusqu'au 2026-09-16, ce module contrôlait les FORMES et les cohérences, mais
+ * aucun ordre de grandeur. Quatre saisies passaient donc l'approbation :
+ *
+ *   · une marge NÉGATIVE — le client obtient mieux que le marché, PayNoval perd
+ *     de l'argent sur chaque opération, en silence ;
+ *   · une marge ≥ 100 % — le taux appliqué devient nul ou négatif, et le défaut
+ *     n'apparaît qu'au premier DEVIS, en erreur 500, barème déjà publié ;
+ *   · un pourcentage de frais aberrant (150 %) — chaque cotation échoue sur
+ *     « les frais dépassent le montant », après publication ;
+ *   · un montant fixe négatif — des « frais » qui créditent l'expéditeur.
+ *
+ * Le point commun : le refus arrivait APRÈS la publication, ou jamais. Une
+ * borne franchie doit être refusée au moment de l'approbation, quand un humain
+ * regarde encore.
+ *
+ * ── Ce que ces bornes ne prétendent pas faire ───────────────────────────────
+ *
+ * Elles ne remplacent pas le jugement : 9 % de marge est accepté ici, et serait
+ * sans doute une erreur commerciale. Elles arrêtent l'accident, pas la
+ * mauvaise décision.
+ *
+ * Deux contrôles restent hors de portée d'une fonction PURE, et c'est assumé :
+ * un `overrideRate` mal saisi d'un facteur dix (655,957 → 6 559,57) ne peut se
+ * juger que contre le marché, et `DELTA_ABS` dépend de l'échelle du corridor.
+ * L'aperçu chiffré du back-office, calculé sur le vrai moteur, reste le filet
+ * pour ces deux-là.
+ */
+const BORNES = Object.freeze({
+  /** Frais en pourcentage du montant. */
+  FEE_PERCENT_MAX: Number(process.env.PRICING_FEE_PERCENT_MAX || 20),
+
+  /** Marge de change prise par PayNoval sur le taux de marché. */
+  FX_MARKUP_PERCENT_MAX: Number(process.env.PRICING_FX_MARKUP_PERCENT_MAX || 10),
+
+  /** Ajustement relatif au marché, dans un sens comme dans l'autre. */
+  FX_DELTA_PERCENT_ABS_MAX: Number(
+    process.env.PRICING_FX_DELTA_PERCENT_MAX || 10
+  ),
+});
+
 const upper = (v) => String(v ?? "").trim().toUpperCase();
 const lower = (v) => String(v ?? "").trim().toLowerCase();
 
@@ -98,8 +143,37 @@ function validateProposedRule(proposed) {
     return fail("Un mode de frais avec part fixe exige un montant fixe.");
   }
 
+  const feePercent = num(fee.percent);
+  const feeFixed = num(fee.fixed);
+
+  if (feePercent !== null && feePercent < 0) {
+    return fail("Des frais en pourcentage ne peuvent pas être négatifs.");
+  }
+
+  if (feePercent !== null && feePercent > BORNES.FEE_PERCENT_MAX) {
+    return fail(
+      `Des frais de ${feePercent} % dépassent la borne de ${BORNES.FEE_PERCENT_MAX} %. ` +
+        "Si le tarif est voulu, relevez la borne explicitement."
+    );
+  }
+
+  if (feeFixed !== null && feeFixed < 0) {
+    return fail(
+      "Un montant fixe négatif ne serait pas des frais : il créditerait l'expéditeur."
+    );
+  }
+
   const minFee = num(fee.minFee);
   const maxFee = num(fee.maxFee);
+
+  if (minFee !== null && minFee < 0) {
+    return fail("Les frais minimum ne peuvent pas être négatifs.");
+  }
+
+  if (maxFee !== null && maxFee < 0) {
+    return fail("Les frais maximum ne peuvent pas être négatifs.");
+  }
+
   if (minFee !== null && maxFee !== null && minFee > maxFee) {
     return fail("Les frais minimum ne peuvent pas dépasser les frais maximum.");
   }
@@ -119,16 +193,74 @@ function validateProposedRule(proposed) {
     return fail("Le mode « Taux imposé » exige un taux strictement positif.");
   }
 
-  if (fxMode === "MARKUP_PERCENT" && num(fx.markupPercent) === null) {
-    return fail("Le mode « Marge plateforme » exige une marge en pourcentage.");
+  if (fxMode === "MARKUP_PERCENT") {
+    const marge = num(fx.markupPercent);
+
+    if (marge === null) {
+      return fail("Le mode « Marge plateforme » exige une marge en pourcentage.");
+    }
+
+    if (marge < 0) {
+      return fail(
+        "Une marge négative donnerait au client un taux MEILLEUR que le marché : " +
+          "PayNoval perdrait de l'argent sur chaque opération du corridor."
+      );
+    }
+
+    /**
+     * Le taux appliqué vaut `marché × (1 − marge/100)`. À 100 %, il tombe à
+     * zéro ; au-delà, il devient négatif. Le moteur le refuserait — mais en
+     * erreur 500, au premier devis, barème déjà publié.
+     */
+    if (marge >= 100) {
+      return fail(
+        "Une marge de 100 % ou plus annulerait le taux appliqué : le " +
+          "bénéficiaire ne recevrait rien."
+      );
+    }
+
+    if (marge > BORNES.FX_MARKUP_PERCENT_MAX) {
+      return fail(
+        `Une marge de ${marge} % dépasse la borne de ${BORNES.FX_MARKUP_PERCENT_MAX} %. ` +
+          "Si elle est voulue, relevez la borne explicitement."
+      );
+    }
   }
 
-  if (fxMode === "DELTA_PERCENT" && num(fx.percent) === null) {
-    return fail("Le mode « Ajustement (%) » exige une valeur d'ajustement.");
+  if (fxMode === "DELTA_PERCENT") {
+    const ajustement = num(fx.percent);
+
+    if (ajustement === null) {
+      return fail("Le mode « Ajustement (%) » exige une valeur d'ajustement.");
+    }
+
+    if (ajustement <= -100) {
+      return fail(
+        "Un ajustement de −100 % ou moins annulerait le taux appliqué."
+      );
+    }
+
+    if (Math.abs(ajustement) > BORNES.FX_DELTA_PERCENT_ABS_MAX) {
+      return fail(
+        `Un ajustement de ${ajustement} % s'écarte du marché de plus de ` +
+          `${BORNES.FX_DELTA_PERCENT_ABS_MAX} %. Si c'est voulu, relevez la borne explicitement.`
+      );
+    }
   }
 
-  if (fxMode === "DELTA_ABS" && num(fx.deltaAbs) === null) {
-    return fail("Le mode « Ajustement (valeur absolue) » exige une valeur.");
+  if (fxMode === "DELTA_ABS") {
+    const delta = num(fx.deltaAbs);
+
+    if (delta === null) {
+      return fail("Le mode « Ajustement (valeur absolue) » exige une valeur.");
+    }
+
+    /**
+     * Aucune borne numérique ici : un delta se juge à l'échelle du corridor
+     * (0,01 sur EUR→USD, 10 sur EUR→XOF). Le prétendre bornable produirait
+     * soit des refus absurdes, soit une borne si large qu'elle ne protège de
+     * rien. L'aperçu chiffré du back-office est le contrôle qui vaut ici.
+     */
   }
 
   if (fxMode === "PASS_THROUGH" && (num(fx.markupPercent) || 0) > 0) {
