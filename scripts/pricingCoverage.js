@@ -34,6 +34,16 @@
  *   · « ce corridor précis n'est pas couvert » — une décision commerciale à
  *     prendre, ou pas.
  *
+ * ── ⚠️ LE SECOND DÉFAUT, CORRIGÉ LE 2026-09-16 AU SOIR ──────────────────────
+ *
+ * Le rapport annonçait « 525 non couvertes » et s'arrêtait là : il détaillait
+ * les combinaisons COUVERTES, règle par règle, et laissait les découvertes à
+ * l'état de nombre. Or c'est l'inverse qui sert. Un chiffre sans liste ne
+ * permet ni de décider quoi tarifer, ni de vérifier qu'un trou a été comblé —
+ * il informe qu'un problème existe en retenant ce qu'il faudrait pour le
+ * traiter. Les découvertes sont désormais ventilées par type × rail, avec des
+ * exemples nommés.
+ *
  * ⚠️ LECTURE SEULE, strictement. Il n'écrit rien et ne corrige rien : combler un
  * trou est une DÉCISION de prix, qui passe par le circuit gouverné
  * (`/api/v1/pricing-change-requests`).
@@ -123,6 +133,18 @@ function etiquette(c) {
   return `${c.txType} · ${c.method}/${c.provider} · ${pays} · ${c.fromCurrency}→${c.toCurrency}`;
 }
 
+/** Combinaisons regroupées par type × rail, du plus gros trou au plus petit. */
+function repartition(combinaisons) {
+  const parRail = new Map();
+
+  for (const c of combinaisons) {
+    const cle = `${c.txType} · ${c.method}`;
+    parRail.set(cle, (parRail.get(cle) || 0) + 1);
+  }
+
+  return [...parRail.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
 async function main() {
   config.load({ strict: false });
   await connectTransactionsDB();
@@ -197,7 +219,9 @@ async function main() {
           railsSansAucuneRegle,
           couverts: couverts.length,
           decouverts: decouverts.length,
+          decouvertsParRail: Object.fromEntries(repartition(decouverts)),
           exemplesCouverts: couverts.slice(0, 20).map(etiquette),
+          exemplesDecouverts: decouverts.slice(0, 20).map(etiquette),
         },
         null,
         2
@@ -238,6 +262,29 @@ async function main() {
     console.log(`\n  Ce qui EST tarifé, par règle :`);
     for (const [code, n] of [...parRegle.entries()].sort()) {
       console.log(`    · ${code} — ${n} combinaison(s)`);
+    }
+  }
+
+  /**
+   * Le décompte qui SERT : sans lui, « 525 non couvertes » n'est qu'une
+   * inquiétude. Avec lui, c'est une liste de décisions de prix à prendre.
+   */
+  if (decouverts.length) {
+    console.log(`\n  ⛔ Ce qui n'est PAS tarifé — ces combinaisons refusent en 404 :`);
+    for (const [cle, n] of repartition(decouverts)) {
+      console.log(`    · ${cle} — ${n} combinaison(s)`);
+    }
+
+    console.log(`\n  Exemples (3 par type × rail) :`);
+    const vus = new Map();
+    for (const c of decouverts) {
+      const cle = `${c.txType} · ${c.method}`;
+      const n = vus.get(cle) || 0;
+
+      if (n < 3) {
+        console.log(`    · ${etiquette(c)}`);
+        vus.set(cle, n + 1);
+      }
     }
   }
 
