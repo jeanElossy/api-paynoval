@@ -42,6 +42,12 @@
  *   node scripts/seedRailPricingRules.js                              # simulation
  *   node scripts/seedRailPricingRules.js --apply --requested-by=<staffId>
  *   options : --fee-percent=1 --markup-percent=1.5
+ *
+ * ⚠️ PAR NPM, LE SÉPARATEUR `--` EST OBLIGATOIRE. Sans lui, npm garde les
+ * options pour lui et le script simule sans rien déposer :
+ *   npm run seed:rail-pricing -- --apply --requested-by=<staffId>
+ *
+ * `<staffId>` est un ObjectId complet (24 caractères hexadécimaux).
  */
 
 const mongoose = require("mongoose");
@@ -55,6 +61,28 @@ const APPLY = process.argv.includes("--apply");
 function arg(name) {
   const found = process.argv.find((a) => a.startsWith(`--${name}=`));
   return found ? found.slice(name.length + 3).trim() : null;
+}
+
+/**
+ * npm CONFISQUE les options qui ne lui sont pas adressées : `npm run x --apply`
+ * ne transmet rien à `process.argv`, il pose `npm_config_apply` dans
+ * l'environnement. Le script simulait alors en silence alors que l'intention
+ * était de déposer — deux exécutions perdues le 2026-09-16 sans qu'une seule
+ * ligne ne le signale.
+ *
+ * Un dépôt tarifaire qui n'a pas lieu doit le DIRE. Ressembler à une simulation
+ * demandée est exactement la forme de repli silencieux que la règle B.1
+ * interdit.
+ */
+function optionsConfisqueesParNpm() {
+  const confisquees = [];
+
+  if (!APPLY && process.env.npm_config_apply) confisquees.push("--apply");
+  if (!arg("requested-by") && process.env.npm_config_requested_by) {
+    confisquees.push("--requested-by");
+  }
+
+  return confisquees;
 }
 
 function pourcentage(nom, defaut) {
@@ -130,6 +158,15 @@ function construireRegle({ txType, method, libelle, feePercent, markupPercent })
 
 async function main() {
   config.load({ strict: false });
+
+  const confisquees = optionsConfisqueesParNpm();
+  if (confisquees.length > 0) {
+    throw new Error(
+      `npm a intercepté ${confisquees.join(" et ")} au lieu de le transmettre ` +
+        "au script : il manque le séparateur `--`. Rien n'a été écrit.\n" +
+        "  npm run seed:rail-pricing -- --apply --requested-by=<staffId>"
+    );
+  }
 
   const requestedBy = arg("requested-by");
 
