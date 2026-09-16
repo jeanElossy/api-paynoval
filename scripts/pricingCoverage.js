@@ -288,10 +288,27 @@ async function main() {
     }
   }
 
+  /**
+   * ⚠️ Cet avertissement disait « un corridor non couvert REFUSE (404) », sans
+   * nuance. C'est vrai des virements, dépôts et retraits — pas de l'ANNULATION,
+   * qui replie délibérément sur la table statique de `config/cancellationFees`
+   * plutôt que de refuser : bloquer une annulation reviendrait à retenir les
+   * fonds d'un utilisateur qui demande à les libérer.
+   *
+   * Conséquence à connaître, car elle est silencieuse pour l'utilisateur : hors
+   * CA/CI et hors CAD/XOF/XAF, ce repli rend des frais de ZÉRO
+   * (`NO_STATIC_CANCEL_FEE`). L'annulation aboutit, sans frais perçus.
+   *
+   * Un outil de diagnostic qui généralise une règle souffrant une exception sur
+   * le chemin de l'argent trompe celui qui le lit.
+   */
   console.log(
-    "\n  ⚠️ Un corridor non couvert REFUSE la transaction (404). Combler un trou " +
-      "est une décision\n     de prix : elle passe par /api/v1/pricing-change-requests " +
-      "(demande, puis approbation\n     par un second membre du staff).\n"
+    "\n  ⚠️ TRANSFER / DEPOSIT / WITHDRAW : un corridor non couvert REFUSE la " +
+      "transaction (404).\n     CANCELLATION : repli sur la table statique — hors " +
+      "CA/CI et hors CAD/XOF/XAF, les frais\n     valent ZÉRO et l'annulation " +
+      "aboutit quand même.\n\n     Combler un trou est une décision de prix : elle " +
+      "passe par /api/v1/pricing-change-requests\n     (demande, puis approbation " +
+      "par un second membre du staff).\n"
   );
 }
 
