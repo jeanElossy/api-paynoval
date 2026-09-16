@@ -41,6 +41,7 @@ const mongoose = require("mongoose");
 
 const { validateProposedRule } = require("../../services/pricing/ruleValidation");
 const { computeRuleDiff } = require("../../services/pricing/diff");
+const { fusionnerProposed } = require("../../services/pricing/proposedMerge");
 const {
   applyChangeRequest,
   retryApply: retryApplyRequest,
@@ -197,7 +198,24 @@ exports.create = async (req, res) => {
     let proposed = null;
 
     if (action !== "archive") {
-      proposed = normalizeProposed(req.body?.proposed || req.body);
+      /**
+       * Sémantique de FUSION sur une mise à jour : un champ non transmis reste
+       * inchangé. Mesuré le 2026-09-16 — une modification de marge avait effacé
+       * le code et la description d'un barème, et rétréci son périmètre
+       * fournisseur, parce que `normalizeProposed` fabrique un document COMPLET
+       * là où le client n'envoyait qu'un champ.
+       *
+       * La fusion intervient AVANT la validation et AVANT le différentiel : la
+       * demande enregistrée doit annoncer ce qu'elle fera réellement, et le
+       * contrôle doit porter sur l'état final, pas sur un fragment.
+       */
+      const brut = req.body?.proposed || req.body;
+      const normalise = normalizeProposed(brut);
+
+      proposed =
+        action === "update"
+          ? fusionnerProposed({ base: buildSnapshot(existing), brut, normalise })
+          : normalise;
 
       const validation = validateProposedRule(proposed);
       if (!validation.ok) {
