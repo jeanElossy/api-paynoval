@@ -2,106 +2,44 @@
 "use strict";
 
 const AMLLog = require("../models/AMLLog");
-const TransactionModule = require("../models/Transaction");
 
 const { getSingleTxLimit } = require("../tools/amlLimits");
 const { getCurrencySymbolByCode } = require("../tools/currency");
-
-/**
- * --------------------------------------------------------------------------
- * AML Service
- * --------------------------------------------------------------------------
- *
- * Correction principale :
- * - certains projets exportent Transaction directement
- * - d'autres exportent { Transaction }, { default }, { model }, etc.
- * - donc on résout le vrai modèle avant countDocuments/find/aggregate
- *
- * Objectif :
- * - ne plus avoir : Transaction.countDocuments is not a function
- * - garder les stats AML fiables : lastHour, dailyTotal, sameDestShortTime
- * --------------------------------------------------------------------------
- */
 
 /* -------------------------------------------------------------------------- */
 /* Model helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Modèle `Transaction` de la base TRANSACTIONS, résolu au premier usage.
+ *
+ * ⚠️ Défaut fermé le 2026-09-17. `models/Transaction.js` exporte une FABRIQUE
+ * `(conn) => model`. L'ancien résolveur cherchait `countDocuments` / `find` /
+ * `aggregate` sur l'export, puis sur `.Transaction`, `.default`… : il ne
+ * trouvait jamais rien et levait `TRANSACTION_MODEL_UNAVAILABLE` à CHAQUE appel.
+ *
+ * Tant que le cumul retombait à 0 (jusqu'au 2026-09-15), le plafond journalier
+ * n'a donc JAMAIS été vérifié ; depuis l'échec en fermeture, toute opération
+ * passant par `middleware/aml.js` répondait `503 AML_STATS_UNAVAILABLE`
+ * (participation de cagnotte, transferts). Même motif que
+ * `resolveCagnotteSettlementModel` ci-dessous.
+ */
 function resolveTransactionModel() {
-  const candidates = [
-    TransactionModule,
-    TransactionModule?.Transaction,
-    TransactionModule?.default,
-    TransactionModule?.model,
-    TransactionModule?.TxTransaction,
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (
-      typeof candidate?.countDocuments === "function" ||
-      typeof candidate?.find === "function" ||
-      typeof candidate?.aggregate === "function"
-    ) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function getTransactionModelOrThrow() {
-  const Transaction = resolveTransactionModel();
-
-  if (!Transaction) {
-    const err = new Error(
-      "Transaction model indisponible ou export invalide dans ../models/Transaction"
-    );
-    err.code = "TRANSACTION_MODEL_UNAVAILABLE";
-    throw err;
-  }
-
-  return Transaction;
+  const { getTxConn } = require("../config/db");
+  const conn = getTxConn();
+  return conn.models.Transaction || require("../models/Transaction")(conn);
 }
 
 async function safeCountDocuments(Model, query) {
-  if (typeof Model.countDocuments === "function") {
-    return Model.countDocuments(query);
-  }
-
-  if (typeof Model.count === "function") {
-    return Model.count(query);
-  }
-
-  if (typeof Model.find === "function") {
-    const docs = await Model.find(query).select("_id").lean();
-    return Array.isArray(docs) ? docs.length : 0;
-  }
-
-  return 0;
-}
-
-async function safeAggregate(Model, pipeline) {
-  if (typeof Model.aggregate === "function") {
-    return Model.aggregate(pipeline);
-  }
-
-  return null;
+  return Model.countDocuments(query);
 }
 
 async function safeFind(Model, query, select = "") {
-  if (typeof Model.find !== "function") return [];
-
   let q = Model.find(query);
 
-  if (select && typeof q.select === "function") {
-    q = q.select(select);
-  }
+  if (select) q = q.select(select);
 
-  if (typeof q.lean === "function") {
-    q = q.lean();
-  }
-
-  const out = await q;
+  const out = await q.lean();
   return Array.isArray(out) ? out : [];
 }
 
@@ -456,7 +394,7 @@ async function getCagnotteParticipationStats({ userId, currency, provider, since
   return { dailyTotal: safeNumber(row?.total), lastHour: Number(row?.lastHour || 0) };
 }
 
-async function getUserTransactionsStats(userId, provider, currencyISO = null) {
+async function getUserTransactionsStats(userId, provider, currencyISO = null, { Model = null, CagnotteModel = null } = {}) {
   const uid = String(userId || "").trim();
 
   if (!uid) {
@@ -467,7 +405,7 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
     };
   }
 
-  const Transaction = getTransactionModelOrThrow();
+  const Transaction = Model || resolveTransactionModel();
 
   const currency = normalizeIso(currencyISO);
   const currencyMatch = currency ? buildCurrencyOrMatch(currency) : {};
@@ -493,46 +431,28 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
 
   const lastHour = await safeCountDocuments(Transaction, lastHourQuery);
 
-  let dailyTotal = 0;
-
-  try {
-    const dailyTotalAgg = await safeAggregate(Transaction, [
-      { $match: dailyQuery },
-      {
-        $group: {
-          _id: null,
-          total: {
-            $sum: buildAmountExpression(),
-          },
+  /**
+   * Aucune erreur avalée (règle B.2) : l'ancien code retombait à 0 si
+   * l'agrégation levait, puis encore à 0 si la relecture levait — un cumul
+   * illisible devenait « rien dépensé aujourd'hui ». L'erreur remonte au
+   * middleware, qui refuse en `503 AML_STATS_UNAVAILABLE`.
+   */
+  const dailyTotalAgg = await Transaction.aggregate([
+    { $match: dailyQuery },
+    {
+      $group: {
+        _id: null,
+        total: {
+          $sum: buildAmountExpression(),
         },
       },
-    ]);
+    },
+  ]);
 
-    if (Array.isArray(dailyTotalAgg) && dailyTotalAgg.length) {
-      dailyTotal = safeNumber(dailyTotalAgg[0].total);
-    }
-  } catch {
-    dailyTotal = 0;
-  }
-
-  if (!dailyTotal) {
-    try {
-      const txs = await safeFind(
-        Transaction,
-        dailyQuery,
-        "amount amountSource money"
-      );
-
-      dailyTotal = txs.reduce((acc, tx) => {
-        const txAmount =
-          tx?.amountSource ?? tx?.amount ?? tx?.money?.source?.amount ?? 0;
-
-        return acc + safeNumber(txAmount);
-      }, 0);
-    } catch {
-      dailyTotal = 0;
-    }
-  }
+  const dailyTotal =
+    Array.isArray(dailyTotalAgg) && dailyTotalAgg.length
+      ? safeNumber(dailyTotalAgg[0].total)
+      : 0;
 
   const recentTx = await safeFind(
     Transaction,
@@ -568,6 +488,7 @@ async function getUserTransactionsStats(userId, provider, currencyISO = null) {
     provider,
     since24h: last24hDate,
     since1h: lastHourDate,
+    Model: CagnotteModel,
   });
 
   return {
@@ -633,6 +554,7 @@ async function getBusinessKYBStatus() {
 module.exports = {
   logTransaction,
   getUserTransactionsStats,
+  resolveTransactionModel,
   getPEPOrSanctionedStatus,
   getBusinessKYBStatus,
 
