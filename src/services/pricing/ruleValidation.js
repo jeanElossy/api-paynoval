@@ -21,6 +21,8 @@
  * Fonction pure : aucun accès base, aucun accès réseau, testable seule.
  */
 
+const { borne, validateFxModeShape } = require("./fxModes");
+
 const FEE_MODES = ["NONE", "FIXED", "PERCENT", "MIXED"];
 const FX_MODES = [
   "PASS_THROUGH",
@@ -56,23 +58,25 @@ const FX_MODES = [
  * sans doute une erreur commerciale. Elles arrêtent l'accident, pas la
  * mauvaise décision.
  *
- * Deux contrôles restent hors de portée d'une fonction PURE, et c'est assumé :
- * un `overrideRate` mal saisi d'un facteur dix (655,957 → 6 559,57) ne peut se
- * juger que contre le marché, et `DELTA_ABS` dépend de l'échelle du corridor.
- * L'aperçu chiffré du back-office, calculé sur le vrai moteur, reste le filet
- * pour ces deux-là.
+ * Deux contrôles demandent le taux du marché : un `overrideRate` mal saisi
+ * (655,957 au lieu de 0,001524) et l'échelle d'un `DELTA_ABS`. Ils ne sont plus
+ * laissés au seul aperçu du back-office depuis le 2026-09-16 :
+ * `fxModes.assertFxWithinMarket` les juge au dépôt ET à l'approbation. Ce
+ * module-ci garde ce qui se décide sans marché (`fxModes.validateFxModeShape`).
+ *
+ * Les bornes se lisent par `fxModes.borne` : une variable illisible rendait
+ * `NaN`, et toute comparaison à `NaN` est fausse — la borne disparaissait sans
+ * bruit.
  */
 const BORNES = Object.freeze({
   /** Frais en pourcentage du montant. */
-  FEE_PERCENT_MAX: Number(process.env.PRICING_FEE_PERCENT_MAX || 20),
+  FEE_PERCENT_MAX: borne("PRICING_FEE_PERCENT_MAX", 20),
 
   /** Marge de change prise par PayNoval sur le taux de marché. */
-  FX_MARKUP_PERCENT_MAX: Number(process.env.PRICING_FX_MARKUP_PERCENT_MAX || 10),
+  FX_MARKUP_PERCENT_MAX: borne("PRICING_FX_MARKUP_PERCENT_MAX", 10),
 
-  /** Ajustement relatif au marché, dans un sens comme dans l'autre. */
-  FX_DELTA_PERCENT_ABS_MAX: Number(
-    process.env.PRICING_FX_DELTA_PERCENT_MAX || 10
-  ),
+  /** Ajustement relatif au marché — vers le bas seulement (`fxModes`). */
+  FX_DELTA_PERCENT_ABS_MAX: borne("PRICING_FX_DELTA_PERCENT_MAX", 10),
 });
 
 const upper = (v) => String(v ?? "").trim().toUpperCase();
@@ -267,6 +271,11 @@ function validateProposedRule(proposed) {
     return fail(
       "Une marge est saisie alors que le mode retenu applique le taux du marché sans marge : choisissez « Marge plateforme (%) »."
     );
+  }
+
+  const formeChange = validateFxModeShape(proposed);
+  if (!formeChange.ok) {
+    return fail(formeChange.message);
   }
 
   const startsAt = toTime(proposed.startsAt);

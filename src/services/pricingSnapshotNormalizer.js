@@ -16,6 +16,28 @@ function upper(v) {
  */
 const { roundMoney } = require("../utils/money");
 
+/**
+ * Mesure et sens de la marge de change, recopiés SANS valeur de repli.
+ *
+ * Ce normalisateur reconstruit `fxRevenue` champ par champ : tout champ qu'il
+ * ne nomme pas disparaît. Depuis le 2026-09-16 le moteur rend une marge SIGNÉE
+ * (une perte n'est plus un zéro) ; sans ces lignes elle s'arrêtait ici, avant
+ * d'atteindre la transaction. Absent reste absent (`null`) — un devis ancien ne
+ * doit pas se mettre à affirmer « marge mesurée, aucune perte ».
+ */
+function sensDeLaMarge(fx = {}) {
+  const signe = Number(fx?.signedAmount);
+
+  return {
+    measured: typeof fx?.measured === "boolean" ? fx.measured : null,
+    signedAmount:
+      fx?.signedAmount === null || fx?.signedAmount === undefined || !Number.isFinite(signe)
+        ? null
+        : signe,
+    favorsCustomer: typeof fx?.favorsCustomer === "boolean" ? fx.favorsCustomer : null,
+  };
+}
+
 function normalizePricingSnapshot(pricingSnapshot = {}) {
   const request = pricingSnapshot?.request || {};
   const result = pricingSnapshot?.result || {};
@@ -72,6 +94,7 @@ function normalizePricingSnapshot(pricingSnapshot = {}) {
       upper(result?.fxRevenue?.toCurrency || toCurrency)
     ),
     rawAmount: toNum(result?.fxRevenue?.rawAmount, 0),
+    ...sensDeLaMarge(result?.fxRevenue),
     idealNetTo: roundMoney(
       toNum(result?.fxRevenue?.idealNetTo, 0),
       upper(result?.fxRevenue?.toCurrency || toCurrency)
@@ -165,6 +188,7 @@ function buildTreasuryRevenueBreakdown(pricingSnapshot = {}) {
       snap?.result?.fxRevenue?.toCurrency || snap?.request?.toCurrency
     ),
     rawAmount: toNum(snap?.result?.fxRevenue?.rawAmount, 0),
+    ...sensDeLaMarge(snap?.result?.fxRevenue),
   };
 
   return {

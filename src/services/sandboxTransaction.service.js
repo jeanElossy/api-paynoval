@@ -2,6 +2,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const { formatRate } = require("../utils/money");
 
 const runtime = require("./transactions/shared/runtime");
 const db = require("../config/db");
@@ -76,6 +77,17 @@ function toDecimal128(amount, currency = "CAD") {
   return mongoose.Types.Decimal128.fromString(
     rounded.toFixed(currencyDecimals(currency))
   );
+}
+
+/**
+ * Un taux ne s'arrondit pas à la précision d'une devise : `toDecimal128(taux,
+ * "XOF")` rendait 0 pour tout taux inférieur à 0,5. Même défaut que celui fermé
+ * le 2026-09-16 sur les handlers réels — voir `utils/money.formatRate`.
+ * Un taux illisible s'inscrit `null`, jamais 0.
+ */
+function toRateDecimal128(rate) {
+  const texte = formatRate(rate);
+  return texte === null ? null : mongoose.Types.Decimal128.fromString(texte);
 }
 
 function decimalToNumber(value) {
@@ -753,8 +765,8 @@ async function createSandboxTransaction({ user, body = {}, metadata = {} }) {
     amountTarget: toDecimal128(targetAmount, currency),
     localAmount: toDecimal128(targetAmount, currency),
 
-    exchangeRate: toDecimal128(exchangeRate, currency),
-    fxRateSourceToTarget: toDecimal128(exchangeRate, currency),
+    exchangeRate: toRateDecimal128(exchangeRate),
+    fxRateSourceToTarget: toRateDecimal128(exchangeRate),
 
     currency,
     currencySource: currency,

@@ -58,6 +58,11 @@ Surfaces utiles au runtime : `/docs` (Swagger, protégé par JWT + rôle admin/d
 - Deux variables **optionnelles** introduites le 2026-08-19, volontairement **absentes de `.env.example`** (les y mettre les rendrait obligatoires et casserait le démarrage) :
   - `MONGO_SHARE_CLIENT=off` — rétablit deux `MongoClient` distincts, donc l'ancien mode sans transaction. Bascule de secours.
   - `WEBHOOK_ALLOW_UNSIGNED=true` — accepte les webhooks non signés **hors production uniquement**. Sans elle, un webhook sans secret configuré est refusé (voir ci-dessous).
+- Tarification (2026-09-16), toutes **optionnelles** et absentes de `.env.example` pour la même raison :
+  - `PRICING_QUOTE_REQUIRED` — le devis est **exigé par défaut**. `false` n'est une dérogation qu'**hors production** ; en production elle est ignorée et le démarrage le dit (`quoteConsumption.regimeDevis`).
+  - `PRICING_FX_MARKET_DEVIATION_MAX_PERCENT` (défaut 10) — écart maximal au marché d'un taux imposé (`OVERRIDE`) ou d'un ajustement absolu (`DELTA_ABS`), jugé au dépôt ET à l'approbation (`fxModes.assertFxWithinMarket`). Un taux client supérieur au marché est toujours refusé.
+  - `PRICING_QUOTE_RETENTION_DAYS` (défaut 540) — conservation d'un devis **consommé** (l'index TTL ne l'efface plus avec l'offre).
+  - Un taux de change ne s'écrit **jamais** par `dec2` (helper des montants) : `decRate` / `utils/money.formatRate`. Garde : `test/pricing/rateStorage.test.js`. Rattrapage : `npm run backfill:transaction-rates` (simulation), `-- --apply` pour écrire.
 
 ## Les deux bases MongoDB (point le plus structurant)
 

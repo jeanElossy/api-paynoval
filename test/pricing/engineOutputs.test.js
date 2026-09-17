@@ -148,17 +148,45 @@ test("MARKUP_PERCENT retient la marge pour PayNoval", async () => {
   assert.equal(q.result.fxRevenue.amount, Math.round(98 * (450 - 441)));
 });
 
-test("OVERRIDE impose le taux et ne cite aucun taux de marché", async () => {
+test("OVERRIDE impose le taux ET cite le marché : la marge du taux imposé est mesurée", async () => {
+  const q = await computeQuote({
+    req: demande,
+    rules: [regle({ fx: { mode: "OVERRIDE", overrideRate: 400 } })],
+    getMarketRate: marcheA450,
+  });
+
+  assert.equal(q.result.appliedRate, 400);
+  assert.equal(q.result.marketRate, 450);
+  assert.equal(q.result.fxRevenue.measured, true);
+  // 98 CAD nets × (450 − 400) : c'est la marge que le taux imposé contient.
+  assert.equal(q.result.fxRevenue.amount, 4900);
+});
+
+test("OVERRIDE sans taux de marché cote quand même, et DIT que la marge n'est pas mesurée", async () => {
   const q = await computeQuote({
     req: demande,
     rules: [regle({ fx: { mode: "OVERRIDE", overrideRate: 400 } })],
     getMarketRate: async () => {
-      throw new Error("le marché ne doit pas être interrogé");
+      throw new Error("fournisseur en panne");
     },
   });
 
   assert.equal(q.result.appliedRate, 400);
   assert.equal(q.result.marketRate, null);
+  assert.equal(q.result.fxRevenue.measured, false);
+  assert.equal(q.result.fxRevenue.signedAmount, null, "inconnu n'est pas zéro");
+});
+
+test("une marge de change NÉGATIVE se voit : elle ne se confond plus avec zéro", async () => {
+  const q = await computeQuote({
+    req: demande,
+    rules: [regle({ fx: { mode: "OVERRIDE", overrideRate: 460 } })],
+    getMarketRate: marcheA450,
+  });
+
+  assert.equal(q.result.fxRevenue.amount, 0, "on ne crédite pas une trésorerie d'une perte");
+  assert.equal(q.result.fxRevenue.signedAmount, -980); // 98 × (450 − 460)
+  assert.equal(q.result.fxRevenue.favorsCustomer, true);
 });
 
 test("DELTA_PERCENT et DELTA_ABS ajustent le taux du marché", async () => {

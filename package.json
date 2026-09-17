@@ -28,7 +28,8 @@
     "seed:rail-pricing": "node scripts/seedRailPricingRules.js",
     "seed:corridor-pricing": "node scripts/seedCorridorPricingRules.js",
     "pricing:coverage": "node scripts/pricingCoverage.js",
-    "backfill:cagnotte-positions": "node scripts/backfillCagnotteVaultPositions.js"
+    "backfill:cagnotte-positions": "node scripts/backfillCagnotteVaultPositions.js",
+    "backfill:transaction-rates": "node scripts/backfillTransactionRates.js"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

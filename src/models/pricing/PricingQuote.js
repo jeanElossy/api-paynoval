@@ -201,6 +201,27 @@ const PricingQuoteSchema = new mongoose.Schema(
           uppercase: true,
         },
 
+        /**
+         * Sens et mesure de la marge (2026-09-16). Sans ces champs DÉCLARÉS,
+         * le schéma strict les écartait à l'écriture du devis : la perte de
+         * change calculée par le moteur disparaissait au verrou, et la
+         * transaction qui consomme le devis ne la portait jamais.
+         */
+        measured: {
+          type: Boolean,
+          default: null,
+        },
+
+        signedAmount: {
+          type: Number,
+          default: null,
+        },
+
+        favorsCustomer: {
+          type: Boolean,
+          default: null,
+        },
+
         amount: {
           type: Number,
           default: 0,

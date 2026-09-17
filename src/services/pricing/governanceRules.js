@@ -113,7 +113,32 @@ function assertVersionMatches({ request, rule }) {
   }
 }
 
+/**
+ * Défense en profondeur sur le RÔLE, dans Tx-Core.
+ *
+ * La passerelle exige déjà admin/superadmin avant de relayer. Mais les routes
+ * de gouvernance de Tx-Core ne vérifiaient que le jeton interne : quiconque le
+ * détient (un autre service, une fuite) pouvait déposer ou approuver une
+ * tarification au nom de n'importe quel utilisateur, y compris sans rôle. Le
+ * rôle relu en base (`internalProtect` recharge l'utilisateur) est donc
+ * contrôlé ici aussi — c'est la règle de Stripe : chaque service vérifie
+ * l'autorisation qui le concerne, il n'hérite pas de celle du bord.
+ */
+const STAFF_PRICING_ROLES = Object.freeze(["admin", "superadmin"]);
+
+function assertStaffRole(actor, roles = STAFF_PRICING_ROLES) {
+  if (!actorId(actor)) {
+    throw httpError(401, "Utilisateur non authentifié.");
+  }
+
+  if (!roles.includes(normalizeRole(actor))) {
+    throw httpError(403, "Rôle insuffisant pour la gouvernance tarifaire.");
+  }
+}
+
 module.exports = {
+  assertStaffRole,
+  STAFF_PRICING_ROLES,
   assertCanApprove,
   assertVersionMatches,
   isSameActor,

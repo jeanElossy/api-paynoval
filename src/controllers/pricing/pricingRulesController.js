@@ -24,6 +24,7 @@
  * une collection vide au lieu d'échouer.
  */
 const { getPricingModel } = require("../../config/db");
+const { appliedRateFor } = require("../../services/pricing/fxModes");
 
 const modelePricingRule = () => getPricingModel("PricingRule");
 const modelePricingRuleVersion = () => getPricingModel("PricingRuleVersion");
@@ -79,24 +80,13 @@ async function buildFxPreview(item) {
     }
 
     const mode = String(item?.fx?.mode || "PASS_THROUGH").toUpperCase();
-    let clientRate = marketRate;
 
-    if (mode === "OVERRIDE") {
-      const out = Number(item?.fx?.overrideRate);
-      if (Number.isFinite(out) && out > 0) clientRate = out;
-    } else if (mode === "MARKUP_PERCENT") {
-      const pct = Number(item?.fx?.markupPercent || 0);
-      clientRate = marketRate * (1 - pct / 100);
-    } else if (mode === "DELTA_PERCENT") {
-      const pct = Number(item?.fx?.percent || 0);
-      clientRate = marketRate * (1 + pct / 100);
-    } else if (mode === "DELTA_ABS") {
-      clientRate = marketRate + Number(item?.fx?.deltaAbs || 0);
-    }
-
-    if (!Number.isFinite(clientRate) || clientRate <= 0) {
-      clientRate = null;
-    }
+    /**
+     * La formule du MOTEUR, pas une copie : l'aperçu du back-office recalculait
+     * le taux client à sa façon, et deux formules finissent toujours par
+     * diverger — l'écran montrerait alors un autre prix que celui facturé.
+     */
+    const clientRate = appliedRateFor({ mode, fx: item?.fx, marketRate });
 
     return {
       marketRate,

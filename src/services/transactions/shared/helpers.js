@@ -23,6 +23,7 @@ const {
   ZERO_DECIMAL_CURRENCIES,
   currencyHasDecimals,
   roundMoney,
+  formatRate,
 } = require("../../../utils/money");
 
 function sanitize(text, maxLen = MAX_DESC_LENGTH) {
@@ -61,6 +62,25 @@ function round2(n) {
 
 function dec2(n) {
   return mongoose.Types.Decimal128.fromString(round2(n).toFixed(2));
+}
+
+/**
+ * Taux de change en Decimal128, à pleine précision (`utils/money.formatRate`).
+ *
+ * ⚠️ Ne JAMAIS passer un taux à `dec2` : c'est l'helper des montants, il
+ * arrondit au centime et écrasait XOF → EUR (0,0015) à « 0.00 ». Un taux
+ * illisible LÈVE — l'appelant a déjà contrôlé qu'il est fini et positif, donc
+ * arriver ici avec autre chose est une faute de programmation, pas un cas
+ * métier à replier (règle B.2).
+ */
+function decRate(n) {
+  const texte = formatRate(n);
+
+  if (texte === null) {
+    throw new Error(`Taux de change non inscriptible : ${n}`);
+  }
+
+  return mongoose.Types.Decimal128.fromString(texte);
 }
 
 function decMoney(n, currency = "CAD") {
@@ -285,6 +305,7 @@ module.exports = {
   round2,
   roundMoney,
   dec2,
+  decRate,
   decMoney,
   clampMoneyMin0,
   normalizeCurrencyCode,

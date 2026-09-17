@@ -74,7 +74,56 @@ function coverageKey(request = {}) {
  * Consigne un échec de matching. Ne lève jamais.
  * @returns {Promise<void>}
  */
+/**
+ * Un corridor ne s'enregistre que s'il a la FORME d'un corridor (2026-09-16).
+ *
+ * `/pricing/quote` est public (le simulateur du site en dépend). Chaque 404
+ * écrivait en base, par `upsert`, une clé bâtie sur des champs que le visiteur
+ * choisit librement : n'importe qui pouvait faire croître cette collection sans
+ * borne, et remplir le bandeau « ce qui refuse faute de tarif » du back-office
+ * de corridors qui n'existent pas — noyant les vrais. Un signal d'exploitation
+ * qu'un anonyme peut fabriquer n'est plus un signal.
+ *
+ * On n'enregistre donc que des valeurs d'un vocabulaire fermé : types et
+ * méthodes connus, devises ISO à trois lettres, pays ISO à deux lettres,
+ * identifiants de prestataire courts. Le reste est ignoré — la réponse 404,
+ * elle, reste servie.
+ */
+const TYPES_CONNUS = new Set(["TRANSFER", "DEPOSIT", "WITHDRAW", "CANCELLATION", "CAGNOTTE_PARTICIPATION", "CAGNOTTE_CLOSURE"]);
+const METHODES_CONNUES = new Set(["INTERNAL", "MOBILEMONEY", "CARD"]);
+
+function estCorridorEnregistrable(request = {}) {
+  const facultatif = (v, motif) =>
+    v === null || v === undefined || String(v).trim() === "" || motif.test(String(v).trim());
+
+  return (
+    TYPES_CONNUS.has(String(request.txType ?? "").trim().toUpperCase()) &&
+    (String(request.method ?? "").trim() === "" ||
+      METHODES_CONNUES.has(String(request.method).trim().toUpperCase())) &&
+    /^[A-Z]{3}$/.test(String(request.fromCurrency ?? "").trim().toUpperCase()) &&
+    /^[A-Z]{3}$/.test(String(request.toCurrency ?? "").trim().toUpperCase()) &&
+    facultatif(request.fromCountry, /^[A-Za-z]{2}$/) &&
+    facultatif(request.toCountry, /^[A-Za-z]{2}$/) &&
+    facultatif(request.country, /^[A-Za-z]{2}$/) &&
+    facultatif(request.provider, /^[a-z0-9_]{1,24}$/i) &&
+    facultatif(request.operator, /^[a-z0-9_ -]{1,24}$/i)
+  );
+}
+
+/** Seuls les champs du corridor sont stockés — jamais l'objet reçu tel quel. */
+function champsDuCorridor(request = {}) {
+  const out = {};
+  for (const k of ["txType", "method", "provider", "operator", "fromCurrency", "toCurrency", "country", "fromCountry", "toCountry"]) {
+    out[k] = request[k] ?? null;
+  }
+  return out;
+}
+
 async function recordCoverageGap(request = {}) {
+  if (!estCorridorEnregistrable(request)) return;
+
+  request = champsDuCorridor(request);
+
   try {
     const key = coverageKey(request);
     const now = new Date();
@@ -97,4 +146,4 @@ async function recordCoverageGap(request = {}) {
   }
 }
 
-module.exports = { coverageKey, recordCoverageGap };
+module.exports = { coverageKey, recordCoverageGap, estCorridorEnregistrable, champsDuCorridor };

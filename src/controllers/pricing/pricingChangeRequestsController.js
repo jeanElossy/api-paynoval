@@ -48,7 +48,11 @@ const {
   toActor,
   buildSnapshot,
 } = require("../../services/pricing/governanceService");
-const { isSameActor } = require("../../services/pricing/governanceRules");
+const {
+  isSameActor,
+  assertStaffRole,
+} = require("../../services/pricing/governanceRules");
+const { assertFxWithinMarket } = require("../../services/pricing/fxModes");
 
 const { computeQuote } = require("../../services/pricing/pricingEngine");
 const { getExchangeRate } = require("../../services/pricing/exchangeRateService");
@@ -161,6 +165,8 @@ function normalizeProposed(body = {}) {
 /** POST /pricing-change-requests */
 exports.create = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const action = lower(req.body?.action);
 
     if (!["create", "update", "archive"].includes(action)) {
@@ -221,6 +227,21 @@ exports.create = async (req, res) => {
       if (!validation.ok) {
         return fail(res, 400, validation.message);
       }
+
+      /**
+       * Un taux imposé ou un ajustement absolu se juge CONTRE LE MARCHÉ, dès le
+       * dépôt : c'est le seul moyen d'arrêter 655,957 saisi sur une règle
+       * XOF→EUR avant qu'un valideur n'ait à le repérer. Rejugé à l'approbation
+       * (`governanceService.assertPublishable`), le marché ayant pu bouger.
+       */
+      const marche = await assertFxWithinMarket({
+        proposed,
+        getMarketRate: async (from, to) =>
+          Number((await getExchangeRate(from, to, { mode: "live" }))?.rate),
+      });
+      if (!marche.ok) {
+        return fail(res, marche.status || 400, marche.message);
+      }
     }
 
     const before = existing ? buildSnapshot(existing) : null;
@@ -257,6 +278,8 @@ exports.create = async (req, res) => {
 /** GET /pricing-change-requests?status=&ruleId=&page=&limit= */
 exports.list = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const { status, ruleId, page = 1, limit = 50 } = req.query;
 
     const safePage = Math.max(1, Number(page) || 1);
@@ -306,6 +329,8 @@ exports.list = async (req, res) => {
 /** GET /pricing-change-requests/:id */
 exports.getById = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -343,6 +368,8 @@ exports.getById = async (req, res) => {
 /** POST /pricing-change-requests/:id/cancel — par l'auteur uniquement. */
 exports.cancel = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -385,6 +412,8 @@ exports.cancel = async (req, res) => {
 /** POST /pricing-change-requests/:id/reject */
 exports.reject = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -442,6 +471,8 @@ exports.reject = async (req, res) => {
 /** POST /pricing-change-requests/:id/approve */
 exports.approve = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -483,6 +514,9 @@ exports.approve = async (req, res) => {
  */
 exports.retryApply = async (req, res) => {
   try {
+    // Rejeu d'une publication interrompue : même réserve que la passerelle.
+    assertStaffRole(req.user, ["superadmin"]);
+
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -513,6 +547,8 @@ exports.retryApply = async (req, res) => {
  */
 exports.preview = async (req, res) => {
   try {
+    assertStaffRole(req.user);
+
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {

@@ -15,6 +15,7 @@ const {
   toFloat,
   round2,
   dec2,
+  decRate,
   sha256Hex,
   hashSecurityAnswer,
   MAX_DESC_LENGTH,
@@ -24,6 +25,7 @@ const {
   pickBodyPricingInput,
   resolvePricingPayload,
   extractPricingBundle,
+  buildInitiationMoney,
 } = require("../shared/pricing");
 
 const {
@@ -761,7 +763,7 @@ async function initiateInternal(req, res, next) {
       amount: dec2(amountSourceStd),
       transactionFees: dec2(feeSourceStd),
       netAmount: dec2(netFromStd),
-      exchangeRate: dec2(rateUsed),
+      exchangeRate: decRate(rateUsed),
       localAmount: dec2(amountTargetStd),
 
       senderCurrencySymbol: currencySourceISO,
@@ -770,7 +772,7 @@ async function initiateInternal(req, res, next) {
       amountSource: dec2(amountSourceStd),
       amountTarget: dec2(amountTargetStd),
       feeSource: dec2(feeSourceStd),
-      fxRateSourceToTarget: dec2(rateUsed),
+      fxRateSourceToTarget: decRate(rateUsed),
       currencySource: currencySourceISO,
       currencyTarget: currencyTargetISO,
 
@@ -1019,10 +1021,25 @@ async function initiateInternal(req, res, next) {
         targetCurrency: currencyTargetISO,
         marketRate: pricingSnapshot?.result?.marketRate ?? null,
         appliedRate: pricingSnapshot?.result?.appliedRate ?? null,
-        feeRevenue: pricingSnapshot?.result?.feeRevenue ?? null,
-        fxRevenue: pricingSnapshot?.result?.fxRevenue ?? null,
       },
-      treasuryRevenue,
+      /**
+       * ⚠️ RÉPONSE À L'UTILISATEUR : ce qu'il paie, ce qui est réservé, ce qui
+       * sera reçu — jamais la comptabilité de PayNoval (2026-09-16).
+       * `pricing.feeRevenue`, `pricing.fxRevenue` et `treasuryRevenue` (revenus
+       * de trésorerie, en CAD) partaient ici vers l'application ; aucun client
+       * ne les lisait. Ils restent sur la transaction, pour le back-office.
+       *
+       * `money.source` est le montant RÉSERVÉ par le serveur : c'est la seule
+       * valeur sur laquelle un client peut mettre à jour un solde affiché.
+       */
+      money: buildInitiationMoney({
+        sourceAmount: amountSourceStd,
+        sourceCurrency: currencySourceISO,
+        feeAmount: feeSourceStd,
+        targetAmount: amountTargetStd,
+        targetCurrency: currencyTargetISO,
+        rate: rateUsed,
+      }),
       fundsReserved: true,
       treasuryCreditedAtInitiate: false,
       corridorLock: corridorLock.snapshot,

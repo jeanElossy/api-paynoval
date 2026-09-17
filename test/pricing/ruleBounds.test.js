@@ -153,27 +153,50 @@ test("refuse un ajustement relatif hors borne, dans les deux sens", () => {
   );
 });
 
-test("un ajustement absolu reste accepté : il se juge à l'échelle du corridor", () => {
+test("un ajustement qui FAVORISE le client est refusé — il ferait perdre PayNoval", () => {
+  const paire = { txType: "TRANSFER", method: "INTERNAL", provider: "paynoval", fromCurrency: "EUR", toCurrency: "XOF" };
+
   assert.equal(
-    validateProposedRule(
-      baseRule({ fx: { mode: "DELTA_ABS", deltaAbs: 12.5 } })
-    ).ok,
+    validateProposedRule(baseRule({ scope: paire, fx: { mode: "DELTA_ABS", deltaAbs: 12.5 } })).ok,
+    false
+  );
+  assert.equal(
+    validateProposedRule(baseRule({ fx: { mode: "DELTA_PERCENT", percent: 2 } })).ok,
+    false
+  );
+  assert.equal(
+    validateProposedRule(baseRule({ scope: paire, fx: { mode: "DELTA_ABS", deltaAbs: -5 } })).ok,
     true
   );
 });
 
-test("le mode « taux imposé » exige toujours un taux strictement positif", () => {
+test("un taux imposé ou un ajustement absolu exige une paire de devises précise", () => {
+  // `baseRule` vise XOF→XOF : aucun taux ne s'y applique.
+  assert.equal(
+    validateProposedRule(baseRule({ fx: { mode: "DELTA_ABS", deltaAbs: -5 } })).ok,
+    false
+  );
   assert.equal(
     validateProposedRule(
-      baseRule({ fx: { mode: "OVERRIDE", overrideRate: 0 } })
+      baseRule({
+        scope: { ...baseRule().scope, fromCurrency: "ALL", toCurrency: "EUR" },
+        fx: { mode: "OVERRIDE", overrideRate: 0.0015 },
+      })
     ).ok,
+    false
+  );
+});
+
+test("le mode « taux imposé » exige toujours un taux strictement positif", () => {
+  const paire = { ...baseRule().scope, fromCurrency: "XOF", toCurrency: "EUR" };
+
+  assert.equal(
+    validateProposedRule(baseRule({ scope: paire, fx: { mode: "OVERRIDE", overrideRate: 0 } })).ok,
     false
   );
 
   assert.equal(
-    validateProposedRule(
-      baseRule({ fx: { mode: "OVERRIDE", overrideRate: 655.957 } })
-    ).ok,
+    validateProposedRule(baseRule({ scope: paire, fx: { mode: "OVERRIDE", overrideRate: 0.0015 } })).ok,
     true
   );
 });

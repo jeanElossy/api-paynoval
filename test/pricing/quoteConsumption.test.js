@@ -34,6 +34,7 @@ const {
   construireFiltreConsommation,
   diagnostiquerEchec,
   devisEstExige,
+  regimeDevis,
 } = require("../../src/services/pricing/quoteConsumption");
 
 const { consumeQuote } = require("../../src/services/pricing/quoteService");
@@ -270,11 +271,29 @@ test("paramètres divergents → 409 QUOTE_MISMATCH, avec les écarts nommés", 
 /* Exigence progressive                                                       */
 /* -------------------------------------------------------------------------- */
 
-test("le devis n'est pas exigé par défaut, et l'est sur PRICING_QUOTE_REQUIRED=true", () => {
-  assert.equal(devisEstExige({}), false);
-  assert.equal(devisEstExige({ PRICING_QUOTE_REQUIRED: "false" }), false);
+test("le devis est EXIGÉ par défaut — une variable oubliée ne désarme rien", () => {
+  assert.equal(devisEstExige({}), true);
+  assert.equal(devisEstExige({ PRICING_QUOTE_REQUIRED: "" }), true);
   assert.equal(devisEstExige({ PRICING_QUOTE_REQUIRED: "true" }), true);
   assert.equal(devisEstExige({ PRICING_QUOTE_REQUIRED: "TRUE" }), true);
+  assert.equal(devisEstExige({ NODE_ENV: "production" }), true);
+});
+
+test("une valeur illisible exige le devis, et le dit", () => {
+  const r = regimeDevis({ PRICING_QUOTE_REQUIRED: "non" });
+  assert.equal(r.exige, true);
+  assert.equal(r.source, "valeur-illisible");
+  assert.ok(r.avertissement);
+});
+
+test("la dérogation n'existe qu'hors production, et elle s'annonce", () => {
+  const dev = regimeDevis({ PRICING_QUOTE_REQUIRED: "false", NODE_ENV: "development" });
+  assert.equal(dev.exige, false);
+  assert.match(dev.avertissement, /CONSÉQUENCE/);
+
+  const prod = regimeDevis({ PRICING_QUOTE_REQUIRED: "false", NODE_ENV: "production" });
+  assert.equal(prod.exige, true);
+  assert.match(prod.avertissement, /IGNORÉE en production/);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -296,6 +315,28 @@ test("un devis conforme est consommé une fois, et passe à USED", async () => {
   assert.equal(out.status, "USED");
   assert.equal(out.usedByReference, "TX-1");
   assert.equal(modele.etat.doc.status, "USED");
+});
+
+test("un devis consommé est CONSERVÉ : l'index TTL ne l'efface plus avec l'offre", async () => {
+  const { retentionDevisMs } = require("../../src/services/pricing/quoteService");
+  const modele = fauxModele(devisActif());
+  const avant = Date.now();
+
+  await consumeQuote({
+    quoteId: "q-1",
+    userId: "u-1",
+    request: REQUETE,
+    reference: "TX-1",
+    model: modele,
+  });
+
+  const conserveJusqua = new Date(modele.etat.doc.expiresAt).getTime();
+  assert.ok(
+    conserveJusqua >= avant + retentionDevisMs() - 5000,
+    "la pièce du prix accepté doit survivre à la fin de l'offre"
+  );
+  assert.ok(retentionDevisMs() >= 365 * 24 * 3600 * 1000);
+  assert.equal(retentionDevisMs({ PRICING_QUOTE_RETENTION_DAYS: "abc" }), retentionDevisMs({}));
 });
 
 test("le second usage est refusé — un devis n'engage PayNoval qu'une fois", async () => {

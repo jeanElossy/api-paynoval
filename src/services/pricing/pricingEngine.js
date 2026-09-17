@@ -191,6 +191,8 @@ const {
   roundMoney,
 } = require("../../utils/money");
 
+const { appliedRateFor } = require("./fxModes");
+
 function inRange(amount, range) {
   const a = Number(amount);
   const min = Number(range?.min ?? 0);
@@ -421,10 +423,19 @@ function pegRate(from, to) {
 }
 
 /**
- * ✅ Gain FX en devise de réception
- * idéal = netFrom * marketRate
- * réel  = netFrom * appliedRate
- * gain  = max(0, idéal - réel)
+ * Revenu de change, en devise de réception.
+ *
+ *   idéal   = netFrom × marketRate
+ *   réel    = netFrom × appliedRate
+ *   signé   = idéal − réel          (négatif : le client a reçu PLUS que le marché)
+ *   amount  = max(0, signé)         (seul un gain se crédite à la trésorerie)
+ *
+ * ⚠️ JUSQU'AU 2026-09-16, SEUL LE PLANCHER EXISTAIT. Une marge négative
+ * devenait `amount: 0`, exactement comme une absence de marge : la perte ne
+ * figurait ni au devis, ni sur la transaction, ni à la réconciliation. On garde
+ * le plancher pour le CRÉDIT (on ne crédite pas une trésorerie d'un montant
+ * négatif), mais la valeur signée et le sens de l'écart voyagent désormais avec
+ * le devis — une perte se voit, elle ne se confond plus avec un zéro.
  */
 function computeFxRevenue({ netFrom, marketRate, appliedRate, toCurrency }) {
   const safeNetFrom = Number(netFrom || 0);
@@ -433,12 +444,17 @@ function computeFxRevenue({ netFrom, marketRate, appliedRate, toCurrency }) {
 
   const idealNetTo = safeNetFrom * safeMarket;
   const actualNetTo = safeNetFrom * safeApplied;
-  const rawAmount = Math.max(0, idealNetTo - actualNetTo);
+  const signedRaw = idealNetTo - actualNetTo;
+  const rawAmount = Math.max(0, signedRaw);
+  const signedAmount = roundMoney(signedRaw, toCurrency);
 
   return {
     toCurrency: upper(toCurrency),
+    measured: true,
     rawAmount,
     amount: roundMoney(rawAmount, toCurrency),
+    signedAmount,
+    favorsCustomer: signedAmount < 0,
     idealNetTo: roundMoney(idealNetTo, toCurrency),
     actualNetTo: roundMoney(actualNetTo, toCurrency),
   };
@@ -568,11 +584,31 @@ async function computeQuote({ req, rules, getMarketRate }) {
     marketRate = 1;
     appliedRate = 1;
   } else if (fxMode === "OVERRIDE") {
-    appliedRate = Number(rule?.fx?.overrideRate);
-    if (!Number.isFinite(appliedRate) || appliedRate <= 0) {
+    appliedRate = appliedRateFor({ mode: fxMode, fx: rule?.fx });
+
+    if (appliedRate === null) {
       const err = new Error("Invalid overrideRate");
       err.status = 500;
       throw err;
+    }
+
+    /**
+     * Le taux du marché est CITÉ même quand une règle impose le taux
+     * (2026-09-16). Sans lui, la marge contenue dans un taux imposé n'était
+     * jamais mesurée — donc jamais créditée à la trésorerie de marge — et un
+     * taux imposé au-dessus du marché perdait de l'argent sans que rien ne le
+     * montre. Son absence n'arrête PAS la cotation : le taux client est connu,
+     * seule la mesure de la marge manque, et le devis le dit (`measured: false`).
+     */
+    try {
+      marketRate = await getMarketRate(fromCurrency, toCurrency);
+    } catch {
+      marketRate = null;
+    }
+
+    if (!Number.isFinite(marketRate) || marketRate <= 0) {
+      const peg = pegRate(fromCurrency, toCurrency);
+      marketRate = Number.isFinite(peg) && peg > 0 ? peg : null;
     }
   } else {
     marketRate = await getMarketRate(fromCurrency, toCurrency);
@@ -589,18 +625,8 @@ async function computeQuote({ req, rules, getMarketRate }) {
       throw err;
     }
 
-    if (fxMode === "MARKUP_PERCENT") {
-      const mp = Number(rule?.fx?.markupPercent ?? 0);
-      appliedRate = marketRate * (1 - mp / 100);
-    } else if (fxMode === "DELTA_PERCENT") {
-      const p = Number(rule?.fx?.percent ?? 0);
-      appliedRate = marketRate * (1 + p / 100);
-    } else if (fxMode === "DELTA_ABS") {
-      const d = Number(rule?.fx?.deltaAbs ?? 0);
-      appliedRate = marketRate + d;
-    } else {
-      appliedRate = marketRate;
-    }
+    // Une seule formule pour le moteur et pour les contrôles de gouvernance.
+    appliedRate = appliedRateFor({ mode: fxMode, fx: rule?.fx, marketRate });
   }
 
   if (!Number.isFinite(appliedRate) || appliedRate <= 0) {
@@ -617,9 +643,12 @@ async function computeQuote({ req, rules, getMarketRate }) {
       ? computeFxRevenue({ netFrom, marketRate, appliedRate, toCurrency })
       : {
           toCurrency,
+          measured: false,
           rawAmount: 0,
           amount: 0,
-          idealNetTo: netTo,
+          signedAmount: null,
+          favorsCustomer: null,
+          idealNetTo: null,
           actualNetTo: netTo,
         };
 

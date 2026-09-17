@@ -160,10 +160,52 @@ function tauxEffectif(converti, base, annonce) {
   return apres / avant;
 }
 
+/**
+ * ============================================================================
+ * UN TAUX N'EST PAS UN MONTANT — IL NE S'ARRONDIT PAS AU CENTIME
+ * ============================================================================
+ *
+ * ── Le défaut fermé le 2026-09-16 ───────────────────────────────────────────
+ *
+ * Les deux handlers d'initiation écrivaient `exchangeRate` et
+ * `fxRateSourceToTarget` par `dec2(rateUsed)` — l'helper des MONTANTS. Mesuré :
+ *
+ *     XOF → EUR  0,0015244901…  →  "0.00"
+ *     XOF → CAD  0,00221        →  "0.00"
+ *     EUR → CAD  1,4823         →  "1.48"
+ *
+ * Sur le corridor principal, chaque transaction inscrivait donc un taux NUL
+ * dans les deux champs que le back-office et l'application lisent en premier.
+ * L'argent n'était pas touché (les montants viennent du devis, qui garde le
+ * taux exact) ; la pièce consultée en litige, elle, était fausse.
+ *
+ * ── La règle ────────────────────────────────────────────────────────────────
+ *
+ * Un taux se conserve à `RATE_DECIMALS` décimales, zéros de queue retirés :
+ * dix chiffres significatifs sur un taux de l'ordre de 0,0015, ce que publient
+ * les fournisseurs de change. Un taux que cette précision rendrait nul n'est
+ * pas écrit : `null`, jamais « 0 » (règle B.2).
+ *
+ * @param {number} rate
+ * @returns {string|null} représentation décimale exacte à écrire, ou `null`.
+ */
+const RATE_DECIMALS = 12;
+
+function formatRate(rate) {
+  const n = Number(rate);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  const texte = n.toFixed(RATE_DECIMALS).replace(/\.?0+$/, "");
+
+  return Number(texte) > 0 ? texte : null;
+}
+
 module.exports = {
   ZERO_DECIMAL_CURRENCIES,
+  RATE_DECIMALS,
   decimalsForCurrency,
   currencyHasDecimals,
   roundMoney,
   tauxEffectif,
+  formatRate,
 };

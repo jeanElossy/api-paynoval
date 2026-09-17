@@ -50,6 +50,39 @@ const {
   httpError,
 } = require("./governanceRules");
 
+const { validateProposedRule } = require("./ruleValidation");
+const { assertFxWithinMarket } = require("./fxModes");
+
+/** Taux du marché pour juger une règle. Résolu à l'appel (réseau). */
+async function tauxDuMarche(from, to) {
+  const { getExchangeRate } = require("./exchangeRateService");
+  const out = await getExchangeRate(from, to, { mode: "live" });
+  return Number(out?.rate);
+}
+
+/**
+ * Une demande se RE-VALIDE au moment de l'approbation.
+ *
+ * Elle a été validée au dépôt — mais avec les bornes et le marché de ce
+ * moment-là. Entre les deux, une borne a pu être resserrée, le marché a pu
+ * bouger, et une demande déposée avant l'existence d'un contrôle n'y a jamais
+ * été soumise. Approuver, c'est publier : le contrôle se fait sur ce qui sera
+ * publié, à l'instant où il l'est.
+ */
+async function assertPublishable({ request, getMarketRate = tauxDuMarche }) {
+  if (request.action === "archive") return;
+
+  const validation = validateProposedRule(request.proposed);
+  if (!validation.ok) {
+    throw httpError(400, `Demande non publiable : ${validation.message}`);
+  }
+
+  const marche = await assertFxWithinMarket({ proposed: request.proposed, getMarketRate });
+  if (!marche.ok) {
+    throw httpError(marche.status || 400, `Demande non publiable : ${marche.message}`);
+  }
+}
+
 const { invalidateRuleCache } = require("./ruleCache");
 
 /** `req.user` -> acteur stockable. */
@@ -187,7 +220,7 @@ async function publish({ request, actor }) {
 /**
  * @param {{requestId: string, actor: object, breakGlass: {used: boolean, reason: string}|null}} params
  */
-async function applyChangeRequest({ requestId, actor, breakGlass }) {
+async function applyChangeRequest({ requestId, actor, breakGlass, getMarketRate }) {
   const staffActor = toActor(actor);
 
   const pending = await modelePricingChangeRequest().findById(requestId);
@@ -196,6 +229,10 @@ async function applyChangeRequest({ requestId, actor, breakGlass }) {
   const rule =
     pending.ruleId != null ? await modelePricingRule().findById(pending.ruleId) : null;
   assertVersionMatches({ request: pending, rule });
+
+  // Avant la réservation : un refus laisse la demande en attente, lisible et
+  // retirable, au lieu de la faire passer en `failed`.
+  await assertPublishable({ request: pending, getMarketRate });
 
   // Étape 1 — réservation atomique. Un `null` signifie qu'un autre
   // administrateur a traité la demande entre la lecture et l'écriture.
@@ -329,6 +366,7 @@ async function retryApply({ requestId, actor }) {
 
 module.exports = {
   applyChangeRequest,
+  assertPublishable,
   retryApply,
   toActor,
   buildSnapshot,

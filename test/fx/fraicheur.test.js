@@ -28,6 +28,7 @@ const {
   FX_LIVE_MAX_AGE_MS,
   FX_DB_SNAPSHOT_MAX_AGE_MS,
   fournisseurConfigure,
+  isSnapshotFreshEnough,
 } = require("../../src/services/pricing/exchangeRateService");
 
 test("l'âge d'un taux se mesure depuis sa date d'émission", () => {
@@ -82,4 +83,88 @@ test("le fournisseur réellement branché s'annonce, avec sa conséquence", () =
         "doit être énoncée, pas devinée (règle B.6)"
     );
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Instantané de repli : l'âge est celui de la PUBLICATION                     */
+/* -------------------------------------------------------------------------- */
+
+const HEURE = 3600 * 1000;
+const SEUIL = Math.min(FX_LIVE_MAX_AGE_MS, FX_DB_SNAPSHOT_MAX_AGE_MS);
+
+test("un instantané enregistré À L'INSTANT mais publié il y a trop longtemps est périmé", () => {
+  const snap = {
+    rate: 0.0015,
+    updatedAt: new Date(),
+    asOfDate: new Date(Date.now() - SEUIL - HEURE),
+  };
+
+  assert.equal(
+    isSnapshotFreshEnough(snap),
+    false,
+    "la date d'enregistrement ne rajeunit pas un taux : la borne doublerait"
+  );
+});
+
+test("un instantané publié récemment reste utilisable", () => {
+  assert.equal(
+    isSnapshotFreshEnough({ rate: 0.0015, asOfDate: new Date(Date.now() - HEURE) }),
+    true
+  );
+});
+
+test("un instantané sans date de publication n'a pas d'âge connu : refusé", () => {
+  assert.equal(isSnapshotFreshEnough({ rate: 0.0015, updatedAt: new Date() }), false);
+  assert.equal(isSnapshotFreshEnough({ rate: 0.0015, asOfDate: "pas une date" }), false);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Une table fournisseur par période, pas un appel par paire                  */
+/* -------------------------------------------------------------------------- */
+
+const { creerCacheDeTable } = require("../../src/services/pricing/exchangeRateService");
+
+test("mille paires demandées dans la période = UN appel fournisseur", async () => {
+  let appels = 0;
+  const lire = creerCacheDeTable({
+    fetcher: async () => {
+      appels += 1;
+      return { rates: { USD: 1 }, asOfDate: new Date().toISOString() };
+    },
+    ttlMs: 60_000,
+  });
+
+  await Promise.all(Array.from({ length: 1000 }, () => lire()));
+  await lire();
+
+  assert.equal(appels, 1, "une lecture publique ne doit pas pouvoir épuiser le quota du fournisseur");
+});
+
+test("la table se relit après la période, et un échec n'est pas mis en cache", async () => {
+  let horloge = 0;
+  let appels = 0;
+  let echouer = true;
+
+  const lire = creerCacheDeTable({
+    fetcher: async () => {
+      appels += 1;
+      if (echouer) throw new Error("429");
+      return { rates: {} };
+    },
+    ttlMs: 1000,
+    now: () => horloge,
+  });
+
+  await assert.rejects(lire());
+  echouer = false;
+  await lire();
+  assert.equal(appels, 2, "l'échec ne doit pas rester en cache");
+
+  horloge = 500;
+  await lire();
+  assert.equal(appels, 2);
+
+  horloge = 1500;
+  await lire();
+  assert.equal(appels, 3);
 });

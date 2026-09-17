@@ -534,21 +534,6 @@ exports.simulateFee = async (req, res) => {
           country: normalizedCountry,
           toCountry: normalizedToCountry,
           snapshot: usedBareme || null,
-          debug: {
-            requestNormalized: {
-              type: lower(type) || null,
-              txType: null,
-              method: null,
-              provider: normalizedProvider || null,
-              country: normalizedCountry || null,
-              toCountry: normalizedToCountry || null,
-              amount: amountNum,
-              currency: fromCur,
-            },
-            feeRuleApplied: usedBareme || null,
-            feeBreakdown: feeBreakdown || null,
-            feeSource: feeValue,
-          },
         },
       });
     }
@@ -617,11 +602,26 @@ exports.simulateFee = async (req, res) => {
 
     const result = quote.result || {};
 
-    const fees = Number(result.fee || 0);
-    const appliedRate = Number(result.appliedRate || 0);
+    /**
+     * ⚠️ AUCUNE VALEUR DE REPLI (règle B.2), et c'est une route PUBLIQUE.
+     *
+     * Chaque champ était lu en `|| 0` : un devis incomplet s'affichait « frais
+     * 0 » ou « taux 0 » sur l'écran de saisie. Le moteur les produit toujours ;
+     * s'il ne l'a pas fait, il n'y a pas de prix à montrer — on le dit.
+     */
+    const fees = Number(result.fee);
+    const appliedRate = Number(result.appliedRate);
     const marketRate = result.marketRate == null ? null : Number(result.marketRate);
-    const netAfterFees = Number(result.netFrom || 0);
-    const convertedNet = Number(result.netTo || 0);
+    const netAfterFees = Number(result.netFrom);
+    const convertedNet = Number(result.netTo);
+
+    if (![fees, appliedRate, netAfterFees, convertedNet].every(Number.isFinite)) {
+      return res.status(502).json({
+        success: false,
+        code: "PRICING_QUOTE_INCOMPLETE",
+        message: "Tarification momentanément indisponible.",
+      });
+    }
     const convertedAmount = roundMoney(amountNum * appliedRate, toCur);
 
     // Les deux moteurs expriment déjà le pourcentage en pourcentage :
@@ -643,10 +643,6 @@ exports.simulateFee = async (req, res) => {
 
         fxBaseRate: marketRate,
         exchangeRate: appliedRate,
-        fxRuleApplied: quote.ruleApplied || null,
-        fxSource: "pricing-engine",
-        fxStale: false,
-        fxWarning: null,
 
         feeSource: fees,
         feePercent,
@@ -657,19 +653,14 @@ exports.simulateFee = async (req, res) => {
         convertedAmount,
         convertedNetAfterFees: convertedNet,
 
-        // Champs conservés pour compatibilité, désormais alimentés par la règle
-        // de tarification. Obsolètes : ils disparaîtront quand plus aucun client
-        // ne les lira.
-        baremeId: quote.ruleApplied?.ruleId || null,
-        baremeSnapshot: null,
-
-        debug: {
-          engine: "pricing-engine",
-          requestNormalized: quote.request || null,
-          ruleApplied: quote.ruleApplied || null,
-          feeBreakdown: result.feeBreakdown || null,
-          fxRevenue: result.fxRevenue || null,
-        },
+        /**
+         * Retirés le 2026-09-16 : `baremeId`, `fxRuleApplied` et le bloc `debug`
+         * (règle appliquée, `fxRevenue`). Cette route est publique — c'était la
+         * marge de PayNoval et l'identifiant de ses règles, servis à qui les
+         * demande. `fxStale: false` et `fxSource` étaient écrits en dur, donc
+         * affirmés sans avoir été mesurés. Aucun client ne les lisait (vérifié
+         * sur les cinq dépôts).
+         */
       },
     });
   } catch (e) {
@@ -684,9 +675,10 @@ exports.simulateFee = async (req, res) => {
       res.setHeader("Retry-After", String(e.debug.blocked.retryAfterSec));
     }
 
+    // Route publique : un 5xx ne renvoie pas le message interne (base, réseau).
     return res.status(status).json({
       success: false,
-      message: e.message,
+      message: status >= 500 ? "Tarification momentanément indisponible." : e.message,
     });
   }
 };

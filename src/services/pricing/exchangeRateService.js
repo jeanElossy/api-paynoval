@@ -228,11 +228,23 @@ async function getSnapshotFromDb(fromCur, toCur) {
   return doc;
 }
 
+/**
+ * ⚠️ LA FRAÎCHEUR D'UN INSTANTANÉ SE MESURE À LA PUBLICATION DU TAUX.
+ *
+ * Jusqu'au 2026-09-16, ce contrôle lisait `updatedAt` — la date à laquelle
+ * PayNoval a ENREGISTRÉ le taux, pas celle où le fournisseur l'a PUBLIÉ. Un
+ * taux déjà vieux de 23 h au moment de l'enregistrement restait « frais » 24 h
+ * de plus : la borne de 24 h valait 48 h dans les faits, précisément quand le
+ * fournisseur est en panne.
+ *
+ * On mesure donc `asOfDate`, et le seuil est le plus strict des deux bornes
+ * (instantané, taux vivant). Un instantané sans date de publication n'a pas
+ * d'âge connu : il n'est pas retenu (règle B.2).
+ */
 function isSnapshotFreshEnough(doc) {
-  const ts = doc?.updatedAt || doc?.createdAt;
-  if (!ts) return false;
-  const age = Date.now() - new Date(ts).getTime();
-  return Number.isFinite(age) && age >= 0 && age <= FX_DB_SNAPSHOT_MAX_AGE_MS;
+  const age = ageDuTaux(doc?.asOfDate);
+  if (age === null) return false;
+  return age <= Math.min(FX_DB_SNAPSHOT_MAX_AGE_MS, FX_LIVE_MAX_AGE_MS);
 }
 
 async function saveSnapshotToDb(fromCur, toCur, payload) {
@@ -285,7 +297,7 @@ async function saveSnapshotToDb(fromCur, toCur, payload) {
  * External live market
  * ========================================================= */
 
-async function fetchLiveCrossRates() {
+async function fetchLiveCrossRatesFromProvider() {
   // 1) Provider avec clé
   if (FX_API_KEY && FX_API_KEY !== "REPLACE_ME") {
     const url = `${FX_API_BASE_WITH_KEY}/${encodeURIComponent(
@@ -307,10 +319,12 @@ async function fetchLiveCrossRates() {
           rates,
           provider: "exchangerate-api",
           source: "live-market",
-          asOfDate:
-            data.time_last_update_utc ||
-            data.time_next_update_utc ||
-            new Date().toISOString(),
+          /**
+           * La date de PUBLICATION, et elle seule. `time_next_update_utc` (une
+           * date FUTURE, que `ageDuTaux` ramène à un âge nul) et l'heure
+           * courante faisaient passer pour frais un taux d'âge inconnu.
+           */
+          asOfDate: data.time_last_update_utc || null,
         };
       }
     } catch (err) {
@@ -338,12 +352,60 @@ async function fetchLiveCrossRates() {
     rates: rates2,
     provider: "open.er-api",
     source: "live-market",
-    asOfDate:
-      data2.time_last_update_utc ||
-      data2.time_last_update_unix ||
-      new Date().toISOString(),
+    asOfDate: data2.time_last_update_utc || data2.time_last_update_unix || null,
   };
 }
+
+/**
+ * ============================================================================
+ * UNE TABLE DE TAUX PAR PÉRIODE — PAS UN APPEL FOURNISSEUR PAR PAIRE
+ * ============================================================================
+ *
+ * ── Le défaut fermé le 2026-09-16 ───────────────────────────────────────────
+ *
+ * Le cache était indexé par PAIRE, mais chaque paire absente retéléchargeait la
+ * TABLE entière du fournisseur (toutes les devises contre USD). Or
+ * `/exchange-rates/rate` est public : faire défiler les paires suffisait à
+ * enchaîner les appels fournisseur, jusqu'à épuiser le quota. Le fournisseur
+ * répond alors 429, le service passe en refroidissement — et ce sont les DEVIS
+ * DES VRAIES TRANSACTIONS qui échouent. Une lecture publique pouvait couper le
+ * chemin de l'argent.
+ *
+ * La table est désormais mise en cache elle-même (`FX_CACHE_TTL_MS`), et les
+ * demandes simultanées partagent le même appel en vol : au plus un appel
+ * fournisseur par période, quel que soit le nombre de paires demandées. Un
+ * échec n'est pas mis en cache (le refroidissement par paire s'en charge). La
+ * fraîcheur reste contrôlée sur la date de PUBLICATION de la table, à chaque
+ * paire (`FX_LIVE_MAX_AGE_MS`).
+ */
+function creerCacheDeTable({ fetcher, ttlMs, now = () => Date.now() }) {
+  let table = null;
+  let obtenueA = 0;
+  let enVol = null;
+
+  return async function lireTable() {
+    if (table && now() - obtenueA < ttlMs) return table;
+    if (enVol) return enVol;
+
+    enVol = (async () => {
+      try {
+        const fraiche = await fetcher();
+        table = fraiche;
+        obtenueA = now();
+        return fraiche;
+      } finally {
+        enVol = null;
+      }
+    })();
+
+    return enVol;
+  };
+}
+
+const fetchLiveCrossRates = creerCacheDeTable({
+  fetcher: () => fetchLiveCrossRatesFromProvider(),
+  ttlMs: FX_CACHE_TTL_MS,
+});
 
 function computeCrossRateFromTable(fromCur, toCur, crossTable) {
   const rates = crossTable?.rates || null;
@@ -382,7 +444,7 @@ async function fetchLiveRate(fromCur, toCur) {
         source: snap.source || "db-snapshot",
         provider: snap.provider || "snapshot",
         stale: true,
-        asOfDate: snap.asOfDate || snap.updatedAt || null,
+        asOfDate: snap.asOfDate || null,
         warning: "provider_cooldown_snapshot_fallback",
         retryAfterSec: blocked.retryAfterSec,
       };
@@ -419,7 +481,7 @@ async function fetchLiveRate(fromCur, toCur) {
       throw e;
     }
 
-    const asOfDate = crossTable.asOfDate || new Date().toISOString();
+    const asOfDate = crossTable.asOfDate || null;
 
     /**
      * ⚠️ LA FRAÎCHEUR SE CONTRÔLE AUSSI À LA SOURCE, PAS SEULEMENT AU REPLI.
@@ -438,7 +500,17 @@ async function fetchLiveRate(fromCur, toCur) {
      */
     const age = ageDuTaux(asOfDate);
 
-    if (age !== null && age > FX_LIVE_MAX_AGE_MS) {
+    if (age === null) {
+      const e = new Error(
+        `Taux ${fromCur}→${toCur} sans date de publication lisible : son âge est ` +
+          "inconnu, aucun taux n'est appliqué."
+      );
+      e.status = 503;
+      e.code = "FX_RATE_UNDATED";
+      throw e;
+    }
+
+    if (age > FX_LIVE_MAX_AGE_MS) {
       const e = new Error(
         `Taux ${fromCur}→${toCur} trop ancien : ${Math.round(age / 3600000)} h ` +
           `(maximum ${Math.round(FX_LIVE_MAX_AGE_MS / 3600000)} h). ` +
@@ -495,7 +567,7 @@ async function fetchLiveRate(fromCur, toCur) {
         source: snap.source || "db-snapshot",
         provider: snap.provider || "snapshot",
         stale: true,
-        asOfDate: snap.asOfDate || snap.updatedAt || null,
+        asOfDate: snap.asOfDate || null,
         warning: "snapshot_fallback_used",
       };
       pairCache.set(pairKey, out);
@@ -644,6 +716,8 @@ module.exports = {
    * vérifie (règle B.5).
    */
   ageDuTaux,
+  isSnapshotFreshEnough,
+  creerCacheDeTable,
   FX_LIVE_MAX_AGE_MS,
   FX_DB_SNAPSHOT_MAX_AGE_MS,
   fournisseurConfigure,

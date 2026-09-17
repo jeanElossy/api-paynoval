@@ -29,7 +29,7 @@ const {
   validateRequest,
   computeFullQuote,
   lockQuote,
-  buildQuoteResponsePayload,
+  buildPublicQuotePayload,
   buildLockResponsePayload,
   recordCoverageGap,
 } = require("../services/pricing/quoteService");
@@ -75,16 +75,24 @@ function traduireErreur(res, e, next) {
      */
     recordCoverageGap(e.details.normalizedRequest || {});
 
-    return sendPricingError(
-      res,
-      404,
-      e.message || "No pricing rule matched",
-      e.details
-    );
+    /**
+     * Seul le périmètre normalisé est rendu : `details` portait aussi le nombre
+     * de règles chargées et une consigne interne (« Crée une PricingRule… »),
+     * servis à un visiteur anonyme.
+     */
+    return sendPricingError(res, 404, "No pricing rule matched", {
+      code: "PRICING_CORRIDOR_NOT_COVERED",
+      normalizedRequest: e.details.normalizedRequest || null,
+    });
   }
 
   if (e && (e.status === 503 || e.message === "FX rate unavailable")) {
-    return sendPricingError(res, 503, "FX rate unavailable", e.details || null);
+    // Le mode de change de la règle n'a rien à faire dans une réponse publique.
+    return sendPricingError(res, 503, "FX rate unavailable", {
+      code: e.code || "FX_RATE_UNAVAILABLE",
+      fromCurrency: e.details?.fromCurrency ?? null,
+      toCurrency: e.details?.toCurrency ?? null,
+    });
   }
 
   if (e && e.status === 401) {
@@ -106,7 +114,8 @@ async function quote(req, res, next) {
       requestId: pickRequestId(req),
     });
 
-    return res.status(200).json(buildQuoteResponsePayload({ quote: resultat }));
+    // Route publique : projection par liste blanche, jamais la réponse interne.
+    return res.status(200).json(buildPublicQuotePayload({ quote: resultat }));
   } catch (e) {
     return traduireErreur(res, e, next);
   }

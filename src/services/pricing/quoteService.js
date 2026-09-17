@@ -74,6 +74,28 @@ const modelePricingQuote = () => getPricingModel("PricingQuote");
 
 const uuidv4 = () => crypto.randomUUID();
 
+/**
+ * ⚠️ UN DEVIS CONSOMMÉ EST UNE PIÈCE, IL NE S'EFFACE PAS AVEC L'OFFRE.
+ *
+ * L'index TTL de `PricingQuote` porte sur `expiresAt`, qui est aussi la fin de
+ * validité de l'OFFRE (10 min). Jusqu'au 2026-09-16, un devis utilisé
+ * disparaissait donc dix minutes après son émission : la trace de « quel prix
+ * l'utilisateur a accepté, quand, pour quelle transaction » (`usedAt`,
+ * `usedByReference`) était détruite avant même qu'un litige puisse l'invoquer.
+ *
+ * À la consommation, `expiresAt` devient la fin de CONSERVATION. La validité de
+ * l'offre n'a plus d'objet à ce stade : le filtre de consommation l'a vérifiée
+ * à l'instant même. Défaut : 540 jours, la plus longue fenêtre de contestation
+ * des réseaux de cartes. Aucun index n'est modifié.
+ */
+const RETENTION_JOURS_DEFAUT = 540;
+
+function retentionDevisMs(env = process.env) {
+  const n = Number(env.PRICING_QUOTE_RETENTION_DAYS);
+  const jours = Number.isFinite(n) && n >= 1 ? n : RETENTION_JOURS_DEFAUT;
+  return jours * 24 * 60 * 60 * 1000;
+}
+
 const LOCK_TTL_MIN_RAW = Number(process.env.PRICING_LOCK_TTL_MIN || 10);
 const LOCK_TTL_MIN =
   Number.isFinite(LOCK_TTL_MIN_RAW) && LOCK_TTL_MIN_RAW > 0
@@ -515,6 +537,30 @@ async function computeFullQuote({ request, requestId }) {
     calculatedAt: new Date().toISOString(),
   };
 
+  /**
+   * Règle B.1 — une perte de change ou une marge non mesurée ne passe pas en
+   * silence. Le devis la porte (`fxRevenue.favorsCustomer`, `measured`), et le
+   * journal la signale au moment où elle se forme, avec la règle qui l'a
+   * produite : c'est elle qu'il faudra corriger.
+   */
+  const fx = quote.result.fxRevenue || {};
+
+  if (fx.favorsCustomer === true || fx.measured === false) {
+    console.warn(
+      fx.favorsCustomer === true
+        ? "⚠️ [PRICING] marge de change NÉGATIVE : le client reçoit plus que le marché"
+        : "⚠️ [PRICING] marge de change NON MESURÉE : taux du marché indisponible",
+      {
+        requestId: requestId || null,
+        fromCurrency: request.fromCurrency,
+        toCurrency: request.toCurrency,
+        signedAmount: fx.signedAmount ?? null,
+        ruleId: quote?.ruleApplied?.ruleId ? String(quote.ruleApplied.ruleId) : null,
+        ruleVersion: quote?.ruleApplied?.currentVersion ?? null,
+      }
+    );
+  }
+
   quote.debug = buildDebugPayload({
     request,
     quote,
@@ -535,6 +581,62 @@ function buildQuoteResponsePayload({ quote, mode = "QUOTE" }) {
     ruleApplied: quote.ruleApplied || null,
     fxRuleApplied: quote.fxRuleApplied || null,
     debug: quote.debug || null,
+  };
+}
+
+/**
+ * ============================================================================
+ * LE DEVIS PUBLIC — CE QU'UN VISITEUR ANONYME A LE DROIT DE VOIR
+ * ============================================================================
+ *
+ * `/pricing/quote` est ouvert sans session : le simulateur du site et l'écran
+ * de saisie de l'application l'appellent avant toute authentification. Jusqu'au
+ * 2026-09-16 il rendait la réponse INTERNE complète : identifiant et version de
+ * la règle appliquée, revenus de PayNoval convertis en CAD (`feeRevenue`,
+ * `fxRevenue`), et le bloc `debug` avec ses formules.
+ *
+ * C'est la grille de marge de PayNoval, règle par règle, servie à qui la
+ * demande. Wise affiche au client ses frais, son taux et le taux du marché —
+ * ce qu'il paie et ce qu'il reçoit —, pas sa comptabilité. On fait de même :
+ * une projection par LISTE BLANCHE, pour qu'un champ interne ajouté demain au
+ * moteur ne devienne pas public par défaut.
+ */
+function buildPublicQuotePayload({ quote }) {
+  const r = quote?.result || {};
+  const q = quote?.request || {};
+  const fb = r.feeBreakdown || {};
+
+  return {
+    success: true,
+    ok: true,
+    mode: "QUOTE",
+    request: {
+      txType: q.txType ?? null,
+      method: q.method ?? null,
+      amount: q.amount ?? null,
+      fromCurrency: q.fromCurrency ?? null,
+      toCurrency: q.toCurrency ?? null,
+      country: q.country ?? null,
+      fromCountry: q.fromCountry ?? null,
+      toCountry: q.toCountry ?? null,
+      provider: q.provider ?? null,
+      operator: q.operator ?? null,
+    },
+    result: {
+      marketRate: r.marketRate ?? null,
+      appliedRate: r.appliedRate ?? null,
+      fee: r.fee ?? null,
+      feeBreakdown: {
+        mode: fb.mode ?? null,
+        percent: fb.percent ?? null,
+        fixed: fb.fixed ?? null,
+        minFee: fb.minFee ?? null,
+        maxFee: fb.maxFee ?? null,
+      },
+      grossFrom: r.grossFrom ?? null,
+      netFrom: r.netFrom ?? null,
+      netTo: r.netTo ?? null,
+    },
   };
 }
 
@@ -734,6 +836,7 @@ async function consumeQuote({
       $set: {
         status: "USED",
         usedAt: maintenant,
+        expiresAt: new Date(maintenant.getTime() + retentionDevisMs()),
         usedByReference: reference ? String(reference) : null,
         usedByIdempotencyKey: idempotencyKey ? String(idempotencyKey) : null,
       },
@@ -777,8 +880,10 @@ module.exports = {
   consumeQuote,
   buildPayloadFromQuote,
   buildQuoteResponsePayload,
+  buildPublicQuotePayload,
   buildLockResponsePayload,
   recordCoverageGap,
   normalizeCountryForStore,
   LOCK_TTL_MIN,
+  retentionDevisMs,
 };

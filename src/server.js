@@ -1272,6 +1272,35 @@ async function bootstrap() {
     }
 
     /**
+     * Règle B.6 — le régime des prix s'annonce AVEC sa conséquence.
+     *
+     * `fournisseurConfigure()` existait depuis le 2026-09-16 pour dire sur quelle
+     * source de change PayNoval tarife, mais personne ne l'appelait : le
+     * démarrage restait muet sur le point qui décide de la justesse d'un taux.
+     */
+    try {
+      const { regimeDevis } = require("./services/pricing/quoteConsumption");
+      const { fournisseurConfigure } = require("./services/pricing/exchangeRateService");
+
+      const devis = regimeDevis();
+      if (devis.avertissement) logger.warn(`[pricing] ${devis.avertissement}`);
+      logger.info(
+        `[pricing] devis ${devis.exige ? "EXIGÉ" : "NON exigé"} à l'initiation (${devis.source})`
+      );
+
+      const fx = fournisseurConfigure();
+      if (fx.consequence) {
+        logger.warn(
+          `[pricing] taux de change : ${fx.nom} (cadence ${fx.cadence}) — CONSÉQUENCE : ${fx.consequence}`
+        );
+      } else {
+        logger.info(`[pricing] taux de change : ${fx.nom} (cadence ${fx.cadence})`);
+      }
+    } catch (err) {
+      logger.warn(`[pricing] régime tarifaire non annoncé : ${err?.message || err}`);
+    }
+
+    /**
      * L'index de déduplication du grand livre est-il bien en place ?
      *
      * Il se crée à la main (`scripts/ensure-ledger-indexes.js`). S'il manque,

@@ -279,13 +279,13 @@ function extractPricingBundle(pricingPayload, pricingInput = {}) {
  * Trois situations, trois réponses :
  *
  *   · un `quoteId` est fourni  → on CONSOMME le devis, et on écrit SES montants
- *   · aucun devis, exigence active (`PRICING_QUOTE_REQUIRED=true`) → 400
- *   · aucun devis, exigence souple → on calcule, et on le JOURNALISE
+ *   · aucun devis, cas normal  → 400 `QUOTE_REQUIRED`
+ *   · aucun devis, dérogation de DÉVELOPPEMENT (`PRICING_QUOTE_REQUIRED=false`
+ *     hors production) → on calcule, et on le JOURNALISE
  *
- * La troisième branche est une TRANSITION, pas un mode de fonctionnement : elle
- * existe le temps que le parc mobile installé envoie tous un devis. Elle se
- * ferme par variable d'environnement, sans redéploiement — même motif que
- * `IDEMPOTENCY_REQUIRED`. Ce qu'elle ne fait pas : se taire.
+ * Depuis le 2026-09-16 le devis est exigé PAR DÉFAUT et la dérogation est
+ * ignorée en production (`quoteConsumption.regimeDevis`) : l'exigence ne
+ * dépend plus d'une variable qu'un déploiement pourrait oublier.
  */
 async function resolvePricingPayload({
   pricingInput,
@@ -346,10 +346,9 @@ async function resolvePricingPayload({
   }
 
   /**
-   * ⚠️ On ne se tait pas (règle B.1). Cette ligne est la seule façon de savoir
-   * quand `PRICING_QUOTE_REQUIRED=true` deviendra sans risque : tant qu'elle
-   * apparaît, des clients initient encore sans devis, et pour ceux-là le prix
-   * affiché n'engage PayNoval à rien.
+   * ⚠️ On ne se tait pas (règle B.1). Cette branche n'existe qu'en dérogation
+   * de développement : chaque passage le rappelle, parce que pour ce virement
+   * le prix affiché n'engage PayNoval à rien.
    */
   logger?.warn?.("[TX-CORE][PRICING][SANS_DEVIS]", {
     contexte,
@@ -362,7 +361,34 @@ async function resolvePricingPayload({
   return computePricingQuote({ pricingInput });
 }
 
+/**
+ * Les montants d'une initiation, tels que l'UTILISATEUR a le droit de les lire.
+ *
+ * Liste blanche, comme le devis public (`quoteService.buildPublicQuotePayload`) :
+ * source réservée, frais, montant reçu, taux — chacun avec sa devise. Un montant
+ * illisible sort `null`, jamais 0 : un client qui mettrait à jour un solde sur un
+ * zéro fabriqué afficherait un solde faux (règle B.2).
+ */
+function buildInitiationMoney({
+  sourceAmount,
+  sourceCurrency,
+  feeAmount,
+  targetAmount,
+  targetCurrency,
+  rate,
+}) {
+  const lu = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+  return {
+    source: { amount: lu(sourceAmount), currency: sourceCurrency || null },
+    feeSource: { amount: lu(feeAmount), currency: sourceCurrency || null },
+    target: { amount: lu(targetAmount), currency: targetCurrency || null },
+    fxRateSourceToTarget: lu(rate),
+  };
+}
+
 module.exports = {
+  buildInitiationMoney,
   pickBodyPricingInput,
   computePricingQuote,
   resolvePricingPayload,

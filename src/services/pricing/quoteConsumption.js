@@ -244,19 +244,65 @@ function diagnostiquerEchec(devis, { userId, requete, maintenant }) {
 }
 
 /**
- * Le devis est-il EXIGÉ pour initier ?
+ * ============================================================================
+ * LE DEVIS EST EXIGÉ — PAR DÉFAUT, ET SANS DÉROGATION EN PRODUCTION
+ * ============================================================================
  *
- * Exigence progressive, même motif que `IDEMPOTENCY_REQUIRED` : le drapeau
- * n'est pas déclaré dans `.env.example` — l'y mettre le rendrait obligatoire
- * dans le `.env` de développement et casserait le démarrage (`dotenv-safe`).
- * Le basculement se fait dans l'environnement de déploiement, sans redéployer.
+ * ── Le défaut fermé le 2026-09-16 ───────────────────────────────────────────
  *
- * Tant qu'il vaut `false`, une initiation sans devis reste servie — mais elle
- * est JOURNALISÉE, parce qu'un défaut qu'on ne compte pas est un défaut qu'on
- * ne saura jamais refermer.
+ * L'exigence valait `false` tant que `PRICING_QUOTE_REQUIRED` n'était pas posée.
+ * Elle ne l'était que dans le `.env` local : un déploiement qui l'oubliait
+ * servait les initiations sans devis, donc RECALCULAIT le prix au moment
+ * d'écrire — l'écart entre prix affiché et prix débité redevenait possible, sur
+ * la foi d'une variable absente. Une protection qui dépend d'un oubli n'en est
+ * pas une.
+ *
+ * ── La règle (celle de Stripe et Wise) ──────────────────────────────────────
+ *
+ *   · aucune variable, ou une valeur illisible  → EXIGÉ (échec en fermeture) ;
+ *   · `PRICING_QUOTE_REQUIRED=false` hors production → dérogation de
+ *     développement, annoncée au démarrage et journalisée à chaque initiation ;
+ *   · `PRICING_QUOTE_REQUIRED=false` EN production → IGNORÉE, et annoncée
+ *     comme telle : un prix non engagé n'a pas de mode d'exploitation.
+ *
+ * @returns {{exige: boolean, source: string, avertissement: string|null}}
  */
+function regimeDevis(env = process.env) {
+  const brut = String(env.PRICING_QUOTE_REQUIRED ?? "").trim().toLowerCase();
+  const production = String(env.NODE_ENV || "").trim().toLowerCase() === "production";
+
+  if (brut === "false") {
+    if (production) {
+      return {
+        exige: true,
+        source: "production",
+        avertissement:
+          "PRICING_QUOTE_REQUIRED=false est IGNORÉE en production : toute initiation exige un devis.",
+      };
+    }
+
+    return {
+      exige: false,
+      source: "derogation-developpement",
+      avertissement:
+        "PRICING_QUOTE_REQUIRED=false — CONSÉQUENCE : une initiation sans devis est servie et son " +
+        "prix RECALCULÉ ; il peut différer de celui affiché à l'utilisateur. Interdit en production.",
+    };
+  }
+
+  if (brut !== "" && brut !== "true") {
+    return {
+      exige: true,
+      source: "valeur-illisible",
+      avertissement: `PRICING_QUOTE_REQUIRED="${env.PRICING_QUOTE_REQUIRED}" est illisible : le devis est exigé.`,
+    };
+  }
+
+  return { exige: true, source: brut === "true" ? "variable" : "defaut", avertissement: null };
+}
+
 function devisEstExige(env = process.env) {
-  return String(env.PRICING_QUOTE_REQUIRED || "false").trim().toLowerCase() === "true";
+  return regimeDevis(env).exige;
 }
 
 module.exports = {
@@ -266,5 +312,6 @@ module.exports = {
   construireFiltreConsommation,
   diagnostiquerEchec,
   devisEstExige,
+  regimeDevis,
   valeurComparable,
 };

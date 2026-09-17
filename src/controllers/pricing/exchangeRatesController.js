@@ -29,7 +29,6 @@ const modeleExchangeRate = () => getPricingModel("ExchangeRate");
 
 const {
   getExchangeRate,
-  getEffectiveExchangeRate,
   getSupportedCurrencies,
 } = require("../../services/pricing/exchangeRateService");
 const logger = require("../../logger");
@@ -211,6 +210,25 @@ exports.getRatePublic = async (req, res) => {
   const { from, to } = req.query;
   const mode = String(req.query.mode || "live").trim().toLowerCase();
 
+  /**
+   * ⚠️ ROUTE PUBLIQUE : LE TAUX DU MARCHÉ, ET RIEN D'AUTRE (2026-09-16).
+   *
+   * `mode=effective` servait le « taux personnalisé » hérité de la collection
+   * `ExchangeRate` — un taux qu'aucun devis n'applique (écriture en 410 depuis
+   * ce matin) — sous l'étiquette `marketRate`. Un visiteur pouvait donc lire,
+   * présenté comme taux du marché, un chiffre qui n'est ni le marché ni le prix
+   * PayNoval. Aucun client ne l'utilisait. Refusé nommément plutôt qu'ignoré :
+   * rendre silencieusement le mode `live` à qui demande `effective` serait un
+   * repli qui ment sur ce qu'il sert.
+   */
+  if (mode !== "live") {
+    return res.status(400).json({
+      success: false,
+      code: "FX_MODE_UNSUPPORTED",
+      message: "Seul le taux du marché (mode=live) est publié.",
+    });
+  }
+
   if (!from || !to) {
     return res.status(400).json({
       success: false,
@@ -225,10 +243,7 @@ exports.getRatePublic = async (req, res) => {
       mode,
     });
 
-    const fx =
-      mode === "effective"
-        ? await getEffectiveExchangeRate(from, to)
-        : await getExchangeRate(from, to, { mode: "live" });
+    const fx = await getExchangeRate(from, to, { mode: "live" });
 
     const rate = Number(fx?.rate);
 
@@ -254,7 +269,7 @@ exports.getRatePublic = async (req, res) => {
       rate,
       inverseRate,
 
-      source: fx?.source || (mode === "effective" ? "effective" : "live-market"),
+      source: fx?.source || "live-market",
       provider: fx?.provider || null,
       stale: !!fx?.stale,
       asOfDate: fx?.asOfDate || null,
@@ -269,7 +284,7 @@ exports.getRatePublic = async (req, res) => {
         marketRate: rate,
         inverseRate,
         inverseMarketRate: inverseRate,
-        source: fx?.source || (mode === "effective" ? "effective" : "live-market"),
+        source: fx?.source || "live-market",
         provider: fx?.provider || null,
         stale: !!fx?.stale,
         asOfDate: fx?.asOfDate || null,
@@ -290,10 +305,14 @@ exports.getRatePublic = async (req, res) => {
       res.setHeader("Retry-After", String(e.cooldown.retryAfterSec));
     }
 
-    return res.status(e?.status || 500).json({
+    const status = e?.status || 500;
+
+    // Route publique : un 5xx ne renvoie ni le message interne ni `debug`
+    // (statut et message du fournisseur de change).
+    return res.status(status).json({
       success: false,
-      message: e?.message || "Taux de change indisponible",
-      debug: process.env.NODE_ENV === "production" ? undefined : e?.debug,
+      code: e?.code || null,
+      message: status >= 500 ? "Taux de change indisponible" : e?.message,
     });
   }
 };

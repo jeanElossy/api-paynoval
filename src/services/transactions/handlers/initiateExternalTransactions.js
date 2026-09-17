@@ -23,6 +23,7 @@ const {
   toFloat,
   round2,
   dec2,
+  decRate,
   sha256Hex,
   hashSecurityAnswer,
   MAX_DESC_LENGTH,
@@ -32,6 +33,7 @@ const {
   pickBodyPricingInput,
   resolvePricingPayload,
   extractPricingBundle,
+  buildInitiationMoney,
 } = require("../shared/pricing");
 
 const {
@@ -826,7 +828,7 @@ async function initiateOutboundExternal(req, res, next) {
             amount: dec2(pricingCtx.amountSourceStd),
             transactionFees: dec2(pricingCtx.feeSourceStd),
             netAmount: dec2(pricingCtx.netFrom),
-            exchangeRate: dec2(pricingCtx.rateUsed),
+            exchangeRate: decRate(pricingCtx.rateUsed),
             localAmount: dec2(pricingCtx.amountTargetStd),
 
             senderCurrencySymbol: currencySourceISO,
@@ -835,7 +837,7 @@ async function initiateOutboundExternal(req, res, next) {
             amountSource: dec2(pricingCtx.amountSourceStd),
             amountTarget: dec2(pricingCtx.amountTargetStd),
             feeSource: dec2(pricingCtx.feeSourceStd),
-            fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
+            fxRateSourceToTarget: decRate(pricingCtx.rateUsed),
             currencySource: currencySourceISO,
             currencyTarget: currencyTargetISO,
 
@@ -1037,10 +1039,17 @@ async function initiateOutboundExternal(req, res, next) {
         targetCurrency: currencyTargetISO,
         marketRate: pricingCtx.pricingSnapshot?.result?.marketRate ?? null,
         appliedRate: pricingCtx.pricingSnapshot?.result?.appliedRate ?? null,
-        feeRevenue: pricingCtx.pricingSnapshot?.result?.feeRevenue || null,
-        fxRevenue: pricingCtx.pricingSnapshot?.result?.fxRevenue || null,
       },
-      treasuryRevenue: pricingCtx.treasuryRevenue,
+      // Montants de l'utilisateur, jamais la comptabilité de PayNoval : voir
+      // `shared/pricing.buildInitiationMoney` (2026-09-16).
+      money: buildInitiationMoney({
+        sourceAmount: pricingCtx.amountSourceStd,
+        sourceCurrency: currencySourceISO,
+        feeAmount: pricingCtx.feeSourceStd,
+        targetAmount: pricingCtx.amountTargetStd,
+        targetCurrency: currencyTargetISO,
+        rate: pricingCtx.rateUsed,
+      }),
       fundsReserved: true,
       treasuryCreditedAtInitiate: false,
       externalRecipient: redactSensitiveFields(externalRecipientMeta),
@@ -1332,7 +1341,7 @@ async function initiateInboundExternal(req, res, next) {
             amount: dec2(pricingCtx.amountSourceStd),
             transactionFees: dec2(pricingCtx.feeSourceStd),
             netAmount: dec2(pricingCtx.netFrom),
-            exchangeRate: dec2(pricingCtx.rateUsed),
+            exchangeRate: decRate(pricingCtx.rateUsed),
             localAmount: dec2(pricingCtx.amountTargetStd),
 
             senderCurrencySymbol: currencySourceISO,
@@ -1341,7 +1350,7 @@ async function initiateInboundExternal(req, res, next) {
             amountSource: dec2(pricingCtx.amountSourceStd),
             amountTarget: dec2(pricingCtx.amountTargetStd),
             feeSource: dec2(pricingCtx.feeSourceStd),
-            fxRateSourceToTarget: dec2(pricingCtx.rateUsed),
+            fxRateSourceToTarget: decRate(pricingCtx.rateUsed),
             currencySource: currencySourceISO,
             currencyTarget: currencyTargetISO,
 
@@ -1493,10 +1502,17 @@ async function initiateInboundExternal(req, res, next) {
         targetCurrency: currencyTargetISO,
         marketRate: pricingCtx.pricingSnapshot?.result?.marketRate ?? null,
         appliedRate: pricingCtx.pricingSnapshot?.result?.appliedRate ?? null,
-        feeRevenue: pricingCtx.pricingSnapshot?.result?.feeRevenue || null,
-        fxRevenue: pricingCtx.pricingSnapshot?.result?.fxRevenue || null,
       },
-      treasuryRevenue: pricingCtx.treasuryRevenue,
+      // Montants de l'utilisateur, jamais la comptabilité de PayNoval : voir
+      // `shared/pricing.buildInitiationMoney` (2026-09-16).
+      money: buildInitiationMoney({
+        sourceAmount: pricingCtx.amountSourceStd,
+        sourceCurrency: currencySourceISO,
+        feeAmount: pricingCtx.feeSourceStd,
+        targetAmount: pricingCtx.amountTargetStd,
+        targetCurrency: currencyTargetISO,
+        rate: pricingCtx.rateUsed,
+      }),
       externalSource: redactSensitiveFields(externalSourceMeta),
       corridorLock: corridorLock.snapshot,
       message: "Demande créée. En attente de confirmation provider.",
