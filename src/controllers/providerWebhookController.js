@@ -616,7 +616,6 @@ const {
   markFailed,
 } = require("../services/webhooks/webhookEventStore");
 
-const { getTransactionsConnection } = require("../config/db");
 const {
   confirmCollection,
   markCollectionSettled,
@@ -651,7 +650,11 @@ const { guestRefundDeps } = require("../services/cagnotte/guestRefundRepo");
  * son chemin habituel.
  */
 async function traiterCommeEncaissement(charge) {
-  const conn = await getTransactionsConnection();
+  // `getTxConn` résolu à l'appel. ⚠️ `getTransactionsConnection` n'a jamais
+  // existé dans `config/db.js` : l'appel levait `TypeError` (2026-09-17).
+  // Garde : `test/configDbImports.test.js`.
+  const { getTxConn } = require("../config/db");
+  const conn = getTxConn();
 
   const confirmation = await confirmCollection(conn, {
     reference: charge.reference,

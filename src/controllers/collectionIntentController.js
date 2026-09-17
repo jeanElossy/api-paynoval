@@ -17,7 +17,6 @@
  * pour qu'aucun appelant ne puisse se tromper en lisant un code HTTP.
  */
 
-const { getTransactionsConnection } = require("../config/db");
 const logger = require("../logger");
 const {
   CollectionError,
@@ -52,7 +51,11 @@ async function initiate(req, res) {
   const corps = req.body || {};
 
   try {
-    const conn = await getTransactionsConnection();
+    // `getTxConn` résolu à l'appel. ⚠️ `getTransactionsConnection` n'a jamais
+    // existé dans `config/db.js` : l'appel levait `TypeError` (2026-09-17).
+    // Garde : `test/configDbImports.test.js`.
+    const { getTxConn } = require("../config/db");
+    const conn = getTxConn();
 
     const { intent, replayed } = await initiateCollection(conn, {
       idempotencyKey: extraireCleIdempotence(req),

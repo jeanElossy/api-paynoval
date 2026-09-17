@@ -47,7 +47,6 @@
 
 const mongoose = require("mongoose");
 
-const { getTransactionsConnection } = require("../config/db");
 const logger = require("../logger");
 
 function norm(v) {
@@ -82,7 +81,18 @@ async function ensureWallet(req, res) {
   }
 
   try {
-    const conn = await getTransactionsConnection();
+    /**
+     * `getTxConn` résolu À L'APPEL (même motif que `services/aml.js`).
+     *
+     * ⚠️ Défaut fermé le 2026-09-17 : ce fichier importait
+     * `getTransactionsConnection`, qui n'a JAMAIS existé dans `config/db.js`.
+     * Chaque appel levait `TypeError`, attrapé ici en `500
+     * WALLET_ENSURE_FAILED` ; le backend annulait alors l'utilisateur créé.
+     * Mesuré en production : AUCUNE inscription n'aboutissait depuis
+     * `6feb096` (2026-09-10). Garde : `test/configDbImports.test.js`.
+     */
+    const { getTxConn } = require("../config/db");
+    const conn = getTxConn();
     const TxWalletBalance = conn.models.TxWalletBalance;
 
     if (!TxWalletBalance) {
