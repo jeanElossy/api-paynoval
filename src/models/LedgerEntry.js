@@ -36,6 +36,13 @@ const ENTRY_TYPES = [
   // Conversion de devise d'une participation de cagnotte : le lot en devise
   // cible, qui vide la position de change vers le coffre.
   "FX_CONVERSION",
+  // REPRISE DE SOLDE (2026-09-22). Un solde qui existait AVANT que le grand
+  // livre ne le suive — comptes internes hérités d'une base antérieure — est
+  // porté par une écriture d'ouverture, en contrepartie de
+  // `system_clearing:OPENING_BALANCE:<DEVISE>`. C'est ce que fait toute reprise
+  // comptable : on n'invente pas l'historique, on déclare le point de départ,
+  // daté et motivé, et il reste annulable par contre-écriture.
+  "OPENING_BALANCE",
 ];
 
 const ledgerEntrySchema = new mongoose.Schema(

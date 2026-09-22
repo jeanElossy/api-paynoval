@@ -14,7 +14,15 @@
 const router = require("express").Router();
 const { internalProtect } = require("../middleware/authMiddleware");
 const { ensureWallet } = require("../controllers/internalWallets.controller");
+const { ensureTreasury } = require("../controllers/internalTreasuries.controller");
 
 router.post("/wallets/ensure", internalProtect, ensureWallet);
+
+/**
+ * `POST /api/v1/internal/treasuries/ensure` — le backend DEMANDE l'ouverture
+ * d'un compte interne ; Tx-Core l'écrit. Fin du second écrivain sur
+ * `txsystembalances` (2026-09-22). À zéro, sans aucun montant.
+ */
+router.post("/treasuries/ensure", internalProtect, ensureTreasury);
 
 module.exports = router;

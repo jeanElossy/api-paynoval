@@ -32,7 +32,8 @@
     "backfill:transaction-rates": "node scripts/backfillTransactionRates.js",
     "treasuries:repair": "node scripts/repairSystemTreasuries.js",
     "reconcile:treasuries": "node scripts/reconcileTreasuries.js",
-    "migrate:system-balances": "node scripts/migrateSystemBalancesToDecimal.js"
+    "migrate:system-balances": "node scripts/migrateSystemBalancesToDecimal.js",
+    "treasuries:opening-balances": "node scripts/postTreasuryOpeningBalances.js"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",

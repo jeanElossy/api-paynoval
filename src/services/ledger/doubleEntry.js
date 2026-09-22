@@ -211,6 +211,20 @@ function systemClearingAccountId(currency) {
  *
  * Un écart entre les deux est un défaut de règlement, et il devient mesurable.
  */
+/**
+ * REPRISE DE SOLDE — contrepartie des écritures d'ouverture (2026-09-22).
+ *
+ * Un solde qui existait AVANT que le grand livre ne le suive (comptes internes
+ * hérités d'une base antérieure) n'a pas d'origine comptable. On ne l'invente
+ * pas : on déclare un point de départ daté, en contrepartie d'un compte de
+ * compensation DÉDIÉ. Son solde mesure alors exactement « ce qui est entré sans
+ * histoire » — un chiffre qu'on peut montrer, pas une dilution dans la
+ * compensation générale.
+ */
+function openingBalanceClearingAccountId(currency) {
+  return `system_clearing:OPENING_BALANCE:${normCurrency(currency)}`;
+}
+
 function cagnotteVaultClearingAccountId(currency) {
   return `system_clearing:CAGNOTTE_VAULT:${normCurrency(currency)}`;
 }
@@ -668,6 +682,7 @@ module.exports = {
   providerInboundClearingAccountId,
   providerOutboundClearingAccountId,
   treasuryAccountId,
+  openingBalanceClearingAccountId,
 
   summarizeLegs,
   checkBalanced,
