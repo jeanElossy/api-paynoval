@@ -14,6 +14,7 @@ const { debitReceiverFunds, refundSenderFunds, chargeCancellationFee, startTxSes
 const { Transaction, User } = runtime.lazyModels(["Transaction", "User"]);
 
 const { sanitize, toFloat, round2, isEmailLike } = require("../shared/helpers");
+const { publishDomainEvent } = require("../../events/publisher");
 
 const INTERNAL_FLOW = "PAYNOVAL_INTERNAL_TRANSFER";
 const EXTERNAL_FLOWS = new Set([
@@ -115,6 +116,7 @@ async function refundController(req, res, next) {
           "+flow",
           "+status",
           "+sender",
+          "+userId",
           "+receiver",
           "+localAmount",
           "+localCurrencySymbol",
@@ -195,6 +197,40 @@ async function refundController(req, res, next) {
       tx.reversedAt = new Date();
       tx.cancellationFeeResult = cancellationFeeResult || null;
       await tx.save(sessOpts);
+
+      /**
+       * PARRAINAGE — l'activité qualifiante peut disparaître.
+       *
+       * Une transaction remboursée ne compte plus comme activité : si elle a
+       * servi à ouvrir un bonus, ce bonus n'est plus dû. L'événement est écrit
+       * DANS la transaction du remboursement — même équivalence que pour la
+       * confirmation : remboursement validé ⟺ événement existant. Le principal
+       * réévalue et reprend le bonus s'il y a lieu (contre-écriture).
+       *
+       * Aucun `catch` ici : si l'événement ne peut pas être écrit, le
+       * remboursement est annulé plutôt que de laisser un bonus indûment acquis
+       * sans que personne ne le sache.
+       */
+      const initiatorId = String(tx.userId || tx.sender || "").trim();
+
+      if (initiatorId) {
+        await publishDomainEvent(
+          {
+            name: "referral.activity.reversed.v1",
+            aggregateId: String(tx._id),
+            occurredAt: tx.refundedAt,
+            payload: {
+              refereeId: initiatorId,
+              reversedTxId: String(tx._id),
+              reference: String(tx.reference || ""),
+              flow: String(tx.flow || ""),
+              reversedAt: tx.refundedAt.toISOString(),
+              correlationId: `referral-reversal-${String(tx._id)}`,
+            },
+          },
+          sessOpts.session || null
+        );
+      }
 
       return {
         transactionId: tx._id.toString(),

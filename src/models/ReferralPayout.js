@@ -159,8 +159,40 @@ referralPayoutSchema.index(
   { unique: true, name: "uniq_referral_payout_idempotency_key" }
 );
 
-/** Supervision : les versements d'une récompense, dans l'ordre. */
-referralPayoutSchema.index({ rewardId: 1, beneficiaryRole: 1 });
+/**
+ * UN VERSEMENT PAR RÔLE POUR UNE RÉCOMPENSE.
+ *
+ * Une récompense a au plus un parrain et un filleul. Unique : si le parrain
+ * d'une récompense changeait (donc la clé `{rewardId}:{beneficiaryId}`), le
+ * second parrain ne pourrait pas être payé sur la même récompense.
+ */
+referralPayoutSchema.index(
+  { rewardId: 1, beneficiaryRole: 1 },
+  { unique: true, name: "uniq_referral_payout_reward_role" }
+);
+
+/**
+ * UN BONUS DE BIENVENUE PAR PERSONNE, À VIE.
+ *
+ * La clé d'idempotence protège UNE récompense. Elle ne protège pas contre une
+ * SECONDE récompense créée pour le même filleul — ce qui arrivait quand son
+ * lien de parrainage était modifié après un premier versement : nouveau
+ * `rewardId`, nouvelle clé, second bonus. Revolut et Wise appliquent la même
+ * règle : un compte ne peut être « filleul récompensé » qu'une seule fois.
+ *
+ * Partiel sur `beneficiaryRole: "referee"` : un parrain, lui, est payé une fois
+ * PAR filleul. Posé côté Tx-Core parce que c'est ici que l'argent bouge — la
+ * même règle existe côté principal (`ReferralReward` unique par filleul), mais
+ * une garantie financière ne dépend pas d'un autre service.
+ */
+referralPayoutSchema.index(
+  { beneficiaryId: 1, beneficiaryRole: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { beneficiaryRole: "referee" },
+    name: "uniq_referral_payout_referee_lifetime",
+  }
+);
 
 /** Réconciliation : retrouver les versements en cours ou en échec. */
 referralPayoutSchema.index({ status: 1, createdAt: -1 });

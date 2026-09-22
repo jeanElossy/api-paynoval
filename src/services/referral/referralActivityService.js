@@ -42,8 +42,32 @@ const ALLOWED_FLOWS = new Set([
 /** Statuts considérés comme un succès définitif côté Tx-Core. */
 const CONFIRMED_STATUSES = ["confirmed"];
 
-/** Bornes de la fenêtre interrogeable, en jours. */
+/** Borne de sécurité : une fenêtre ne peut pas dépasser ~13 mois. */
 const MAX_WINDOW_DAYS = 400;
+
+/**
+ * Nombre maximal de transactions RENDUES en détail. Au-delà, la liste est
+ * tronquée et la réponse le DIT (`transactionsTruncated`) — un juge qui ne
+ * verrait qu'une partie des faits sans le savoir jugerait faux. Les agrégats,
+ * eux, portent toujours sur la totalité.
+ */
+const MAX_DETAILED_TRANSACTIONS = 200;
+
+/** Nombre maximal de contreparties à exclure qu'un appelant peut fournir. */
+const MAX_EXCLUDED_COUNTERPARTIES = 1000;
+
+/**
+ * Types et contextes qui ne sont JAMAIS une activité, quoi que demande
+ * l'appelant : un bonus, ou sa reprise, ne peut pas ouvrir droit à un bonus.
+ * Posé ici en dur — en plus de `excludeTypes` fourni par le principal — parce
+ * qu'une garantie de ce genre ne dépend pas du bon paramétrage d'un autre
+ * service.
+ */
+const ALWAYS_EXCLUDED_TYPES = Object.freeze([
+  "referral_bonus",
+  "referral_bonus_reversal",
+]);
+const ALWAYS_EXCLUDED_CONTEXTS = Object.freeze(["referral_bonus"]);
 
 function asObjectId(value) {
   if (!value) return null;
@@ -53,6 +77,10 @@ function asObjectId(value) {
 }
 
 function safeNumber(value) {
+  if (value && typeof value === "object" && typeof value.toString === "function") {
+    const n = Number(value.toString());
+    return Number.isFinite(n) ? n : 0;
+  }
   const n =
     typeof value === "number"
       ? value
@@ -73,10 +101,6 @@ function parseDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/**
- * Valide et normalise les paramètres reçus.
- * Lève une erreur portant un `code` exploitable par le contrôleur HTTP.
- */
 function normalizeQuery(input = {}) {
   const userId = asObjectId(input.userId);
 
@@ -125,33 +149,66 @@ function normalizeQuery(input = {}) {
     });
   }
 
-  const excludeTypes = (Array.isArray(input.excludeTypes) ? input.excludeTypes : [])
-    .map((t) => String(t || "").trim())
+  const excludeTypes = [
+    ...new Set([
+      ...ALWAYS_EXCLUDED_TYPES,
+      ...(Array.isArray(input.excludeTypes) ? input.excludeTypes : [])
+        .map((t) => String(t || "").trim())
+        .filter(Boolean),
+    ]),
+  ];
+
+  const rawCounterparties = [
+    input.excludeCounterpartyUserId,
+    ...(Array.isArray(input.excludeCounterpartyUserIds)
+      ? input.excludeCounterpartyUserIds
+      : []),
+  ].filter(Boolean);
+
+  if (rawCounterparties.length > MAX_EXCLUDED_COUNTERPARTIES) {
+    throw Object.assign(new Error("TOO_MANY_EXCLUDED_COUNTERPARTIES"), {
+      code: "TOO_MANY_EXCLUDED_COUNTERPARTIES",
+      status: 400,
+    });
+  }
+
+  const excludeCounterparties = rawCounterparties
+    .map(asObjectId)
     .filter(Boolean);
 
-  const excludeCounterpartyUserId = asObjectId(input.excludeCounterpartyUserId);
+  return { userId, flows, since, until, excludeTypes, excludeCounterparties };
+}
 
-  return { userId, flows, since, until, excludeTypes, excludeCounterpartyUserId };
+/** Filtre temporel commun : date de confirmation, à défaut date de création. */
+function windowClause(since, until) {
+  return {
+    $or: [
+      { confirmedAt: { $gte: since, $lte: until } },
+      {
+        $and: [
+          { confirmedAt: { $in: [null, undefined] } },
+          { createdAt: { $gte: since, $lte: until } },
+        ],
+      },
+    ],
+  };
 }
 
 /**
- * Agrège l'activité qualifiante d'un utilisateur.
+ * Faits d'activité d'un utilisateur sur une fenêtre.
  *
- * LE CHOIX DE LA DATE. On filtre sur `confirmedAt` et non `createdAt` : ce qui
- * compte est le moment où l'argent est réellement parti, pas celui où
- * l'utilisateur a rempli le formulaire. Une transaction créée avant le
- * parrainage mais confirmée après ne doit pas ouvrir de droit — d'où le repli
- * sur `createdAt` uniquement quand `confirmedAt` est absent, afin qu'aucune
- * transaction ancienne ne se glisse dans la fenêtre par le seul fait d'un champ
- * manquant.
+ * Rend, SANS JAMAIS JUGER :
+ *   - `count`, `totalsByCurrency`         agrégats sur la totalité ;
+ *   - `transactions`                      le détail, dans l'ordre chronologique
+ *                                         (borné, et la troncature est dite) ;
+ *   - `inboundCounterparties`             les comptes qui ont ENVOYÉ de l'argent
+ *                                         à cet utilisateur par virement interne
+ *                                         sur la même fenêtre.
  *
- * LE CHOIX DE L'ACTEUR. `userId` OU `sender` : les deux champs coexistent dans
- * l'historique selon l'ancienneté du document. Interroger un seul des deux
- * ferait manquer des transactions et priverait injustement un filleul de son
- * bonus.
- *
- * @returns {Promise<{count:number, totalsByCurrency:Array, firstAt:Date|null,
- *                    lastAt:Date|null, window:{since:Date,until:Date}}>}
+ * Le dernier point sert au principal à neutraliser la « circulation » : envoyer
+ * 30 000 à un complice qui les renvoie, deux fois, remplit les conditions sans
+ * qu'un franc n'ait quitté le duo. Tx-Core ne dit pas « c'est une fraude » — il
+ * dit qui a envoyé quoi. Le juge décide.
  */
 async function getQualifyingActivity(rawInput = {}) {
   const {
@@ -160,37 +217,21 @@ async function getQualifyingActivity(rawInput = {}) {
     since,
     until,
     excludeTypes,
-    excludeCounterpartyUserId,
+    excludeCounterparties,
   } = normalizeQuery(rawInput);
 
   const match = {
     status: { $in: CONFIRMED_STATUSES },
     flow: { $in: flows },
-    $and: [
-      { $or: [{ userId }, { sender: userId }] },
-      {
-        $or: [
-          { confirmedAt: { $gte: since, $lte: until } },
-          {
-            $and: [
-              { confirmedAt: { $in: [null, undefined] } },
-              { createdAt: { $gte: since, $lte: until } },
-            ],
-          },
-        ],
-      },
-    ],
+    type: { $nin: excludeTypes },
+    context: { $nin: ALWAYS_EXCLUDED_CONTEXTS },
+    $and: [{ $or: [{ userId }, { sender: userId }] }, windowClause(since, until)],
   };
 
-  if (excludeTypes.length) {
-    match.type = { $nin: excludeTypes };
-  }
-
-  if (excludeCounterpartyUserId) {
-    // Le bénéficiaire ne doit pas être la contrepartie exclue (le parrain) :
-    // sans cela, l'aller-retour d'une même somme entre parrain et filleul
-    // suffit à remplir les conditions.
-    match.receiver = { $ne: excludeCounterpartyUserId };
+  if (excludeCounterparties.length) {
+    // Le bénéficiaire ne doit pas être une contrepartie exclue (le parrain et
+    // son réseau) : sans cela, l'aller-retour d'une même somme suffit.
+    match.receiver = { $nin: excludeCounterparties };
   }
 
   const pipeline = [
@@ -208,7 +249,23 @@ async function getQualifyingActivity(rawInput = {}) {
     { $sort: { total: -1 } },
   ];
 
-  const rows = await Transaction.aggregate(pipeline);
+  const [rows, detailed, inbound] = await Promise.all([
+    Transaction.aggregate(pipeline),
+    Transaction.find(match)
+      .select("_id reference flow amount currency receiver confirmedAt createdAt")
+      .sort({ confirmedAt: 1, createdAt: 1, _id: 1 })
+      .limit(MAX_DETAILED_TRANSACTIONS + 1)
+      .lean(),
+    Transaction.distinct("sender", {
+      status: { $in: CONFIRMED_STATUSES },
+      flow: "PAYNOVAL_INTERNAL_TRANSFER",
+      receiver: userId,
+      sender: { $ne: userId },
+      type: { $nin: ALWAYS_EXCLUDED_TYPES },
+      context: { $nin: ALWAYS_EXCLUDED_CONTEXTS },
+      ...windowClause(since, until),
+    }),
+  ]);
 
   const totalsByCurrency = rows.map((row) => ({
     currency: normalizeCurrency(row._id),
@@ -225,17 +282,68 @@ async function getQualifyingActivity(rawInput = {}) {
     .map((d) => new Date(d).getTime())
     .filter((t) => Number.isFinite(t));
 
+  const truncated = detailed.length > MAX_DETAILED_TRANSACTIONS;
+
+  const transactions = detailed.slice(0, MAX_DETAILED_TRANSACTIONS).map((tx) => ({
+    id: String(tx._id),
+    reference: String(tx.reference || ""),
+    flow: String(tx.flow || ""),
+    amount: safeNumber(tx.amount),
+    currency: normalizeCurrency(tx.currency),
+    receiverId: tx.receiver ? String(tx.receiver) : null,
+    confirmedAt: tx.confirmedAt || tx.createdAt || null,
+  }));
+
   return {
     count,
     totalsByCurrency,
+    transactions,
+    transactionsTruncated: truncated,
+    inboundCounterparties: (inbound || []).filter(Boolean).map(String),
     firstAt: dates.length ? new Date(Math.min(...dates)) : null,
     lastAt: dates.length ? new Date(Math.max(...dates)) : null,
     window: { since, until },
   };
 }
 
+/**
+ * Statut ACTUEL d'un lot de transactions — lecture seule, bornée.
+ *
+ * Filet de la reprise de bonus : l'événement `referral.activity.reversed.v1`
+ * peut finir en lettre morte. Le principal relit donc périodiquement le statut
+ * des transactions qui ont ouvert un bonus ; une transaction qui n'est plus
+ * `confirmed` doit déclencher une réévaluation. Seuls l'identifiant et le
+ * statut sortent — aucun montant, aucune contrepartie.
+ */
+async function getTransactionStatuses({ txIds = [] } = {}) {
+  const ids = [...new Set((Array.isArray(txIds) ? txIds : []).map(String))]
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .slice(0, 1000);
+
+  if (!ids.length) return { statuses: [] };
+
+  const rows = await Transaction.find({ _id: { $in: ids.map((id) => new mongoose.Types.ObjectId(id)) } })
+    .select("_id status refundedAt")
+    .lean();
+
+  const found = new Map(rows.map((r) => [String(r._id), r]));
+
+  return {
+    statuses: ids.map((id) => ({
+      id,
+      status: found.get(id)?.status || "not_found",
+      refundedAt: found.get(id)?.refundedAt || null,
+    })),
+  };
+}
+
 module.exports = {
   getQualifyingActivity,
+  getTransactionStatuses,
+  normalizeQuery,
   ALLOWED_FLOWS,
+  ALWAYS_EXCLUDED_TYPES,
   MAX_WINDOW_DAYS,
+  MAX_DETAILED_TRANSACTIONS,
+  MAX_EXCLUDED_COUNTERPARTIES,
 };

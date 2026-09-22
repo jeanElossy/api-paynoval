@@ -21,6 +21,11 @@ const requireInternalAuth = require("../middleware/internalAuth");
 const {
   transferBonus,
   getActivity,
+  clawbackBonus,
+  lookupPayouts,
+  reconcile,
+  transactionStatuses,
+  treasuryStatus,
 } = require("../controllers/internalReferralController");
 
 // POST /api/v1/internal/referral/activity
@@ -28,5 +33,24 @@ router.post("/activity", requireInternalAuth("principal"), getActivity);
 
 // POST /api/v1/internal/referral/transfer-bonus
 router.post("/transfer-bonus", requireInternalAuth("principal"), transferBonus);
+
+// POST /api/v1/internal/referral/clawback — reprise d'un bonus, montants relus au registre
+router.post("/clawback", requireInternalAuth("principal"), clawbackBonus);
+
+// POST /api/v1/internal/referral/payouts/lookup — lecture seule (réconciliation)
+router.post("/payouts/lookup", requireInternalAuth("principal"), lookupPayouts);
+
+// POST /api/v1/internal/referral/reconcile — lecture seule
+router.post("/reconcile", requireInternalAuth("principal"), reconcile);
+
+// POST /api/v1/internal/referral/transactions/status — lecture seule, bornée
+router.post("/transactions/status", requireInternalAuth("principal"), transactionStatuses);
+
+/*
+ * GET /api/v1/internal/referral/treasury/status — lecture seule, sans corps.
+ * `GET` et non `POST` : cette route ne prend AUCUN paramètre, et surtout pas
+ * l'identifiant de la trésorerie à inspecter, qui vient de l'environnement.
+ */
+router.get("/treasury/status", requireInternalAuth("principal"), treasuryStatus);
 
 module.exports = router;

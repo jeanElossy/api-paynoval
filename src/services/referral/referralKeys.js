@@ -121,19 +121,155 @@ function normalizeBeneficiaries(rawList, bonusInputCurrency) {
   const list = Array.isArray(rawList) ? rawList : [];
 
   return list
-    .map((b) => ({
-      userId: String(b?.userId || "").trim(),
-      role: String(b?.role || "")
-        .trim()
-        .toLowerCase(),
-      amount: roundForCurrency(b?.amount, bonusInputCurrency),
-      payoutCurrency: normalizeCurrency(b?.payoutCurrency || bonusInputCurrency),
-      label: String(b?.label || "").trim(),
-    }))
+    .map((b) => {
+      /*
+       * ⚠️ DEUX DEVISES DISTINCTES, À NE PAS CONFONDRE.
+       *
+       *   `bonusCurrency`  — celle dans laquelle le MONTANT est exprimé,
+       *                      c'est-à-dire celle du barème appliqué à cette
+       *                      partie. C'est elle qui commande l'arrondi.
+       *   `payoutCurrency` — celle du PORTEFEUILLE du bénéficiaire, dans
+       *                      laquelle le montant sera converti puis crédité.
+       *
+       * `bonusCurrency` est nouvelle (2026-09-22). Auparavant, une seule
+       * devise d'entrée valait pour tous les bénéficiaires — ce qui était
+       * exact tant que les deux parts suivaient le même barème. Depuis que
+       * chacune suit le pays de sa partie, les deux montants ne sont plus dans
+       * la même unité : les traiter comme tels aurait converti 5,00 CAD comme
+       * s'il s'agissait de 5 XOF. Le repli sur la devise d'entrée conserve le
+       * comportement exact des appelants qui ne l'envoient pas encore.
+       */
+      const bonusCurrency = normalizeCurrency(b?.bonusCurrency || bonusInputCurrency);
+
+      return {
+        userId: String(b?.userId || "").trim(),
+        role: String(b?.role || "")
+          .trim()
+          .toLowerCase(),
+        amount: roundForCurrency(b?.amount, bonusCurrency),
+        bonusCurrency,
+        payoutCurrency: normalizeCurrency(b?.payoutCurrency || bonusCurrency),
+        label: String(b?.label || "").trim(),
+      };
+    })
     .filter((b) => b.userId && b.amount > 0 && b.role);
 }
 
+/** Rôles admis dans un versement de parrainage. */
+const BENEFICIARY_ROLES = Object.freeze(["sponsor", "referee"]);
+
+/**
+ * Vérifie la FORME d'une liste de bénéficiaires déjà normalisée.
+ *
+ * Une récompense de parrainage paie au plus UN parrain et UN filleul, deux
+ * personnes distinctes, et jamais la trésorerie qui finance. Tout le reste est
+ * une demande incohérente : on la refuse avant qu'un centime ne bouge, plutôt
+ * que de verser « ce qui ressemble » à un bonus.
+ *
+ * @returns {{ ok: true } | { ok: false, code: string, detail: string }}
+ */
+function validateBeneficiaryRoles(beneficiaries, { treasuryUserId = "" } = {}) {
+  const list = Array.isArray(beneficiaries) ? beneficiaries : [];
+  const seenRoles = new Set();
+  const seenUsers = new Set();
+
+  for (const b of list) {
+    if (!BENEFICIARY_ROLES.includes(b.role)) {
+      return { ok: false, code: "INVALID_BENEFICIARY_ROLE", detail: `rôle « ${b.role} » inconnu` };
+    }
+    if (seenRoles.has(b.role)) {
+      return { ok: false, code: "DUPLICATE_BENEFICIARY_ROLE", detail: `rôle « ${b.role} » répété` };
+    }
+    if (seenUsers.has(b.userId)) {
+      return {
+        ok: false,
+        code: "SELF_REFERRAL_PAYOUT",
+        detail: "le parrain et le filleul sont la même personne",
+      };
+    }
+    if (treasuryUserId && String(b.userId) === String(treasuryUserId)) {
+      return {
+        ok: false,
+        code: "TREASURY_AS_BENEFICIARY",
+        detail: "la trésorerie ne peut pas se verser un bonus",
+      };
+    }
+    seenRoles.add(b.role);
+    seenUsers.add(b.userId);
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Qualifie un refus d'index unique (E11000) survenu pendant un versement.
+ *
+ * ⚠️ Avant le 2026-09-17, TOUT E11000 sans registre `succeeded` était déclaré
+ * « déjà payé (antérieur au registre) » avec `ok: true`. Or la transaction
+ * Mongo venait d'être ANNULÉE : aucun argent n'avait bougé, et le principal
+ * marquait pourtant la récompense `granted`. Un doublon sur la création d'un
+ * portefeuille suffisait à faire disparaître un bonus dû, en silence.
+ *
+ * On ne conclut plus « payé » que sur PREUVE :
+ *   - replay                   : le registre porte ces clés en `succeeded` ;
+ *   - referee_already_rewarded : ce filleul a déjà été payé sur une AUTRE
+ *                                récompense (index « un bonus à vie ») ;
+ *   - legacy_paid              : chaque bénéficiaire a sa transaction de bonus
+ *                                confirmée, antérieure au registre ;
+ *   - unexplained              : rien de tout cela → échec REJOUABLE, bruyant.
+ *
+ * @param {object} facts
+ * @param {number} facts.settledCount            versements `succeeded` pour ces clés
+ * @param {boolean} facts.refereePaidElsewhere   filleul payé sous un autre rewardId
+ * @param {number} facts.legacyTransactionCount  transactions de bonus retrouvées
+ * @param {number} facts.beneficiaryCount        bénéficiaires de la demande
+ */
+function classifyPayoutDuplicate({
+  settledCount = 0,
+  refereePaidElsewhere = false,
+  legacyTransactionCount = 0,
+  beneficiaryCount = 0,
+} = {}) {
+  if (settledCount > 0) return "replay";
+  if (refereePaidElsewhere) return "referee_already_rewarded";
+  if (beneficiaryCount > 0 && legacyTransactionCount >= beneficiaryCount) {
+    return "legacy_paid";
+  }
+  return "unexplained";
+}
+
+/**
+ * Codes d'échec DÉFINITIFS : les rejouer ne changera rien, seule une
+ * intervention humaine le peut. Tout autre échec est rejouable.
+ */
+const PERMANENT_TRANSFER_FAILURES = Object.freeze([
+  "INVALID_BENEFICIARY_ROLE",
+  "DUPLICATE_BENEFICIARY_ROLE",
+  "SELF_REFERRAL_PAYOUT",
+  "TREASURY_AS_BENEFICIARY",
+  "INVALID_REFERRAL_TREASURY_TYPE",
+  "REFERRAL_TREASURY_MUST_BE_CAD",
+  "REFEREE_ALREADY_REWARDED",
+  "REFERRAL_LEGS_INVALID",
+  "REFERRAL_LEGS_INCONSISTENT",
+]);
+
+function isPermanentTransferFailure(code) {
+  return PERMANENT_TRANSFER_FAILURES.includes(String(code || ""));
+}
+
+/** Clé de reprise d'un versement : une seule reprise possible par versement. */
+function buildClawbackIdempotencyKey(rewardId, beneficiaryId) {
+  return `REFERRAL_CLAWBACK:${String(rewardId)}:${String(beneficiaryId)}`;
+}
+
 module.exports = {
+  classifyPayoutDuplicate,
+  PERMANENT_TRANSFER_FAILURES,
+  isPermanentTransferFailure,
+  BENEFICIARY_ROLES,
+  validateBeneficiaryRoles,
+  buildClawbackIdempotencyKey,
   buildPayoutIdempotencyKey,
   computeRequestFingerprint,
   computeBackoffMs,

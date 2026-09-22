@@ -71,6 +71,7 @@ exports.getActivity = async (req, res) => {
       until: req.body?.until,
       excludeTypes: req.body?.excludeTypes,
       excludeCounterpartyUserId: req.body?.excludeCounterpartyUserId,
+      excludeCounterpartyUserIds: req.body?.excludeCounterpartyUserIds,
     });
 
     return res.json({ success: true, data: activity });
@@ -203,6 +204,163 @@ exports.transferBonus = async (req, res) => {
       ok: false,
       code: e?.code || "INTERNAL_REFERRAL_TRANSFER_ERROR",
       error: "Erreur transfert bonus parrainage",
+    });
+  }
+};
+
+/**
+ * Reprise d'un bonus (clawback). Le corps ne porte QUE l'identifiant de la
+ * récompense et le contexte : montants et bénéficiaires sont relus dans le
+ * registre `ReferralPayout` (voir `internalReferralClawbackService`).
+ */
+exports.clawbackBonus = async (req, res) => {
+  const correlationId = getCorrelationId(req) || String(req.body?.correlationId || "");
+
+  try {
+    const { reverseReferralBonus } = require("../services/internalReferralClawbackService");
+
+    const rewardId = String(req.body?.rewardId || "").trim();
+
+    if (!/^[0-9a-f]{24}$/i.test(rewardId)) {
+      return res.status(400).json({
+        success: false,
+        ok: false,
+        retryable: false,
+        code: "REWARD_ID_INVALID",
+        error: "rewardId invalide",
+      });
+    }
+
+    const result = await reverseReferralBonus({
+      rewardId,
+      reversedTxId: String(req.body?.reversedTxId || "").slice(0, 64),
+      reason: String(req.body?.reason || "").slice(0, 200),
+      correlationId,
+    });
+
+    if (!result?.ok) {
+      return res.status(409).json({ success: false, ...result });
+    }
+
+    return res.json({ success: true, ...result });
+  } catch (e) {
+    logger.error?.("[InternalReferral] clawbackBonus error", {
+      correlationId,
+      message: e?.message,
+      code: e?.code,
+    });
+
+    return res.status(500).json({
+      success: false,
+      ok: false,
+      retryable: true,
+      code: "INTERNAL_REFERRAL_CLAWBACK_ERROR",
+      error: "Erreur de reprise du bonus de parrainage",
+    });
+  }
+};
+
+/** Lecture des versements et reprises d'un lot de récompenses (réconciliation). */
+exports.lookupPayouts = async (req, res) => {
+  try {
+    const { lookupReferralPayouts } = require("../services/internalReferralClawbackService");
+
+    const data = await lookupReferralPayouts({ rewardIds: req.body?.rewardIds });
+    return res.json({ success: true, data });
+  } catch (e) {
+    logger.error?.("[InternalReferral] lookupPayouts error", {
+      correlationId: getCorrelationId(req),
+      message: e?.message,
+    });
+
+    return res.status(500).json({
+      success: false,
+      code: "REFERRAL_PAYOUT_LOOKUP_FAILED",
+      error: "Lecture des versements indisponible",
+    });
+  }
+};
+
+/**
+ * État de la trésorerie qui finance les bonus (lecture seule).
+ *
+ * Le principal s'en sert pour DIRE LA VÉRITÉ au démarrage et dans le
+ * back-office : une trésorerie non configurée, non provisionnée ou vide
+ * n'empêche aucun versement de se réclamer correct — elle les empêche tous
+ * de partir. Sans ce point de lecture, cela ne se voit qu'en creux, dans une
+ * file d'attente qui grossit.
+ *
+ * ⚠️ L'identifiant de trésorerie est lu dans l'ENVIRONNEMENT de Tx-Core, pas
+ * dans le corps de la requête : l'appelant ne choisit pas le compte dont on
+ * lui rend le solde.
+ */
+exports.treasuryStatus = async (req, res) => {
+  try {
+    const { getReferralTreasuryStatus } = require("../services/internalReferralTransferService");
+
+    const status = await getReferralTreasuryStatus({
+      treasuryUserId: process.env.REFERRAL_TREASURY_USER_ID,
+    });
+
+    return res.json({ success: true, data: status });
+  } catch (e) {
+    logger.error?.("[InternalReferral] treasuryStatus error", {
+      correlationId: getCorrelationId(req),
+      message: e?.message,
+    });
+
+    return res.status(500).json({
+      success: false,
+      code: "REFERRAL_TREASURY_STATUS_FAILED",
+      error: "Etat de tresorerie indisponible",
+    });
+  }
+};
+
+/** Réconciliation du registre Tx-Core (lecture seule), déclenchée par le principal. */
+exports.reconcile = async (req, res) => {
+  try {
+    const {
+      reconcileReferralPayouts,
+    } = require("../services/referral/referralReconciliationService");
+
+    const sinceHours = Math.min(Math.max(Number(req.body?.sinceHours) || 48, 1), 24 * 60);
+    const result = await reconcileReferralPayouts({ sinceHours, limit: 1000 });
+
+    return res.json({ success: true, data: result });
+  } catch (e) {
+    logger.error?.("[InternalReferral] reconcile error", {
+      correlationId: getCorrelationId(req),
+      message: e?.message,
+    });
+
+    return res.status(500).json({
+      success: false,
+      code: "REFERRAL_RECONCILE_FAILED",
+      error: "Réconciliation indisponible",
+    });
+  }
+};
+
+/** Statut actuel des transactions ayant ouvert un bonus (filet de la reprise). */
+exports.transactionStatuses = async (req, res) => {
+  try {
+    const {
+      getTransactionStatuses,
+    } = require("../services/referral/referralActivityService");
+
+    const data = await getTransactionStatuses({ txIds: req.body?.txIds });
+    return res.json({ success: true, data });
+  } catch (e) {
+    logger.error?.("[InternalReferral] transactionStatuses error", {
+      correlationId: getCorrelationId(req),
+      message: e?.message,
+    });
+
+    return res.status(500).json({
+      success: false,
+      code: "REFERRAL_TX_STATUS_FAILED",
+      error: "Statuts de transaction indisponibles",
     });
   }
 };

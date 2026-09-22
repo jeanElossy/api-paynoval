@@ -159,6 +159,26 @@ const CONTRATS = Object.freeze({
   }),
 
   /**
+   * Une transaction CONFIRMÉE vient d'être remboursée.
+   *
+   * Même règle que `referral.activity.confirmed.v1` : un fait, jamais un ordre.
+   * Le principal relit l'activité à la source et décide s'il y a lieu de
+   * reprendre un bonus — l'événement ne porte ni montant ni récompense.
+   */
+  "referral.activity.reversed.v1": Object.freeze({
+    aggregateType: "transaction",
+    champs: Object.freeze([
+      "refereeId",
+      "reversedTxId",
+      "reference",
+      "flow",
+      "reversedAt",
+      "correlationId",
+    ]),
+    requis: Object.freeze(["refereeId", "reversedTxId"]),
+  }),
+
+  /**
    * ⚠️ LE TEXTE DE LA NOTIFICATION TRANSITE, ET C'EST UN CHOIX ASSUMÉ.
    *
    * `title` et `message` sont rendus par Tx-Core, qui connaît le contexte de

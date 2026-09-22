@@ -225,7 +225,7 @@ const MOTIFS_ECRITURE_SOLDE = [
 
 /** Une référence au grand livre, sous l'une quelconque de ses formes. */
 const MOTIF_GRAND_LIVRE =
-  /(postDoubleEntry|postInternalPaymentEntries|postCagnotte\w+Entries|createLedgerEntry|LedgerEntry)/;
+  /(postDoubleEntry|postInternalPaymentEntries|postCagnotte\w+Entries|postReferralLedgerEntries|createLedgerEntry|LedgerEntry)/;
 
 /**
  * Exemptés : ce sont les DÉFINITIONS de la primitive d'écriture de solde. Leur
@@ -295,6 +295,10 @@ test("les écritures directes de solde restent cantonnées aux chemins connus", 
     "src/services/adminAdjustmentExecutionService.js",
     // 10 références au grand livre ; transferts de parrainage.
     "src/services/internalReferralTransferService.js",
+    // 2026-09-17 : reprise de bonus de parrainage. Débite le portefeuille DANS
+    // la même transaction Mongo que la contre-écriture en partie double
+    // (`writeReferralLedgerEntries` en mode `clawback`, `ledger/referralLegs.js`).
+    "src/services/internalReferralClawbackService.js",
 
     // Vérifiés le 2026-09-09 : chacun pose désormais ses écritures via
     // `postCagnotte*Entries` (ledgerService), DANS `runWithTransaction`, et

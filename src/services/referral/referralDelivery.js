@@ -124,8 +124,9 @@ async function deliverItem(item) {
 
   const payload = item?.payload || {};
   const correlationId = String(payload.correlationId || "");
+  const target = resolveDeliveryTarget(item?.name, payload);
 
-  const url = buildUrl(baseUrl, "/api/v1/internal/referral/award-bonus");
+  const url = buildUrl(baseUrl, target.path);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), getRequestTimeoutMs());
@@ -138,23 +139,14 @@ async function deliverItem(item) {
         "x-internal-token": token,
         "x-correlation-id": correlationId,
       },
-      body: JSON.stringify({
-        refereeId: String(payload.refereeId || ""),
-        triggerTxId: String(payload.triggerTxId || ""),
-        correlationId,
-      }),
+      body: JSON.stringify({ ...target.body, correlationId }),
       signal: controller.signal,
     });
 
     const data = await readJsonSafe(response);
 
     if (!response.ok) {
-      /**
-       * Un 4xx ne se rejoue pas : la demande est malformée ou refusée sur le
-       * fond, la répéter à l'identique donnerait le même résultat. On abandonne
-       * immédiatement plutôt que d'épuiser dix tentatives pour rien.
-       */
-      const permanent = response.status >= 400 && response.status < 500;
+      const permanent = isPermanentHttpStatus(response.status);
 
       throw Object.assign(
         new Error(
@@ -172,8 +164,62 @@ async function deliverItem(item) {
   }
 }
 
+/**
+ * Un refus HTTP est-il DÉFINITIF ?
+ *
+ * ⚠️ Avant le 2026-09-17, TOUT 4xx l'était. Or trois 4xx n'ont rien à voir
+ * avec le contenu de la demande :
+ *   - 401 / 403 : jeton interne absent ou désaligné entre les deux services —
+ *     une erreur de CONFIGURATION, corrigée demain, qui faisait abandonner
+ *     aujourd'hui tous les bonus en transit ;
+ *   - 408 / 425 / 429 : délai ou limitation de débit — par définition passagers.
+ * Seuls les refus portant sur la FORME ou l'EXISTENCE de la demande sont
+ * définitifs : 400, 404, 410, 422. Tout le reste se rejoue.
+ */
+const PERMANENT_HTTP_STATUSES = Object.freeze([400, 404, 410, 422]);
+
+function isPermanentHttpStatus(status) {
+  return PERMANENT_HTTP_STATUSES.includes(Number(status));
+}
+
+/**
+ * Chemin et corps d'une livraison, selon l'événement. Un événement inconnu
+ * est une erreur de programmation : on lève, on ne devine pas.
+ */
+function resolveDeliveryTarget(name, payload = {}) {
+  if (name === "referral.activity.reversed.v1") {
+    return {
+      path: "/api/v1/internal/referral/activity-reversed",
+      body: {
+        refereeId: String(payload.refereeId || ""),
+        reversedTxId: String(payload.reversedTxId || ""),
+      },
+    };
+  }
+
+  // `referral.activity.confirmed.v1`, et les entrées sans nom de l'ancienne
+  // outbox privée, qui ne portaient que des confirmations.
+  if (!name || name === "referral.activity.confirmed.v1") {
+    return {
+      path: "/api/v1/internal/referral/award-bonus",
+      body: {
+        refereeId: String(payload.refereeId || ""),
+        triggerTxId: String(payload.triggerTxId || ""),
+      },
+    };
+  }
+
+  throw Object.assign(new Error(`REFERRAL_EVENT_UNKNOWN:${name}`), {
+    code: "REFERRAL_EVENT_UNKNOWN",
+    permanent: true,
+  });
+}
+
 module.exports = {
   deliverItem,
+  isPermanentHttpStatus,
+  resolveDeliveryTarget,
+  PERMANENT_HTTP_STATUSES,
   getPrincipalBaseUrl,
   getPrincipalInternalToken,
   getRequestTimeoutMs,

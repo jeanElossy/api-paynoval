@@ -110,6 +110,7 @@ function registerTransactionModels(conn) {
   require("../models/LedgerEntry")(conn);
   require("../models/TxWalletBalance")(conn);
   require("../models/ReferralPayout")(conn);
+  require("../models/ReferralClawback")(conn);
   require("../models/IdempotencyRecord")(conn);
 
   /**

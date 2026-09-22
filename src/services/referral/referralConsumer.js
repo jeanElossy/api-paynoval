@@ -45,7 +45,10 @@ const logger = require("../../utils/logger");
 
 const GROUPE = "referral-award";
 
-const EVENEMENTS = Object.freeze(["referral.activity.confirmed.v1"]);
+const EVENEMENTS = Object.freeze([
+  "referral.activity.confirmed.v1",
+  "referral.activity.reversed.v1",
+]);
 
 let _ProcessedEvent = null;
 
@@ -71,7 +74,7 @@ async function handler(message) {
    * pour rien avant la lettre morte, en retardant tous les suivants.
    */
   try {
-    await deliverItem({ payload: charge });
+    await deliverItem({ name: message?.name, payload: charge });
   } catch (err) {
     if (err?.permanent) {
       logger.error("[referral] refus DÉFINITIF du principal — bonus non versé", {

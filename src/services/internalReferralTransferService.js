@@ -5,14 +5,12 @@ try {
   logger = require("../utils/logger");
 } catch {}
 
-const mongoose = require("mongoose");
 
 const { getTxConn } = require("../config/db");
 
 const TxWalletBalanceModel = require("../models/TxWalletBalance");
 const TxSystemBalanceModel = require("../models/TxSystemBalance");
 const TransactionModel = require("../models/Transaction");
-const LedgerEntryModel = require("../models/LedgerEntry");
 const ReferralPayoutModel = require("../models/ReferralPayout");
 
 /**
@@ -25,7 +23,15 @@ const {
   buildPayoutIdempotencyKey,
   computeRequestFingerprint,
   normalizeBeneficiaries,
+  validateBeneficiaryRoles,
+  classifyPayoutDuplicate,
+  isPermanentTransferFailure,
 } = require("./referral/referralKeys");
+
+const {
+  buildReferralPayoutLots,
+  buildReferralClawbackLots,
+} = require("./ledger/referralLegs");
 
 const crypto = require("crypto");
 
@@ -155,30 +161,24 @@ function getTransactionModel() {
 }
 
 /**
- * Double écriture comptable d'un bonus de parrainage.
+ * Écritures comptables d'un bonus de parrainage — EN PARTIE DOUBLE.
  *
- * ⚠️ Jusqu'ici, `transferReferralBonus` débitait la trésorerie et créditait le
- * portefeuille du bénéficiaire **sans jamais écrire au grand livre** : de
- * l'argent bougeait et le registre comptable l'ignorait. Le solde réel de
- * REFERRAL_TREASURY et la somme des écritures divergeaient donc en silence, et
- * l'analytique de trésorerie devait reconstituer la section parrainage depuis
- * les `Transaction` faute d'écritures.
+ * ⚠️ Jusqu'au 2026-09-17, ce service écrivait deux lignes en partie simple,
+ * chacune conditionnée à l'absence d'une ligne de même `reference`/`accountId`
+ * (« garde de rejeu »). Elles ne s'équilibraient pas et ne portaient pas
+ * `ledgerVersion` : la balance de vérification ignorait tout le parrainage.
  *
- * Deux entrées par bénéficiaire, dans la session de la transaction Mongo :
- *   - DEBIT  sur `treasury:<SYSTEM_TYPE>:<uid>:<CUR>` (la trésorerie paie) ;
- *   - CREDIT sur `user_wallet:<uid>:<CUR>` (le bénéficiaire reçoit).
+ * Cette garde n'a plus d'objet : le versement s'exécute dans UNE transaction
+ * Mongo, clé du registre `ReferralPayout` comprise. Soit tout est écrit, soit
+ * rien. Les lots sont construits par le module pur `ledger/referralLegs.js` et
+ * posés par `postDoubleEntry`, qui vérifie l'équilibre par devise et
+ * dédoublonne par `dedupKey` (index unique partiel de `LedgerEntry`).
  *
- * Les deux montants sont dans des devises potentiellement différentes — le
- * bonus peut être converti — donc on n'écrit jamais un montant pour l'autre :
- * chaque entrée porte sa propre devise, et la conversion est tracée en
- * métadonnée.
- *
- * **Rejeu** : les écritures sont conditionnées à l'absence d'une entrée de même
- * `reference` et même `accountId`. `createLedgerEntry` fait un `create()` sec,
- * sans garde d'unicité ; sans ce contrôle, un rejeu du transfert doublerait la
- * comptabilité.
+ * Aucune écriture sans transaction rattachable : on LÈVE, on ne « saute » pas.
+ * Un versement sans trace comptable est exactement ce que l'invariant 2
+ * interdit — l'ancien `ledger:skipped:no-transaction-id` le laissait passer.
  */
-async function writeReferralLedgerEntries({
+async function postReferralLedgerEntries({
   transactionId,
   reference,
   beneficiaryId,
@@ -190,115 +190,54 @@ async function writeReferralLedgerEntries({
   treasuryDebitedAmount,
   session,
   metadata = {},
+  mode = "payout",
 }) {
   if (!transactionId) {
-    // Sans transaction rattachable, une écriture serait orpheline : on préfère
-    // ne rien écrire et le signaler plutôt que polluer le grand livre.
-    logReferral("ledger:skipped:no-transaction-id", { reference });
-    return { written: 0 };
+    throw Object.assign(new Error("REFERRAL_LEDGER_TRANSACTION_MISSING"), {
+      code: "REFERRAL_LEDGER_TRANSACTION_MISSING",
+      details: { reference: String(reference || "") },
+    });
   }
 
   /* ⚠️ `ledgerService` appelle `getTxConn()` **au chargement du module**
      (ledgerService.js, ligne 21) : l'importer en tête de ce fichier ferait
      échouer le démarrage dès que ce service est chargé avant
-     `connectTransactionsDB()`. On le requiert donc ici, à l'usage — c'est le
-     piège documenté dans le CLAUDE.md du dépôt. */
-  /**
-   * ⚠️ CE SERVICE RESTE EN PARTIE SIMPLE, ET C'EST UNE DÉCISION, PAS UN OUBLI.
-   *
-   * Le reste du grand livre est passé en partie double le 2026-08-26
-   * (`services/ledger/doubleEntry.js`). Ce service en est délibérément exclu
-   * pour une raison précise : ses deux jambes sont écrites **conditionnellement
-   * et indépendamment** — chacune n'est posée que si aucune entrée de même
-   * `reference` et même `accountId` n'existe déjà (voir les `already.has(...)`
-   * plus bas). C'est sa garde de rejeu, et elle fonctionne.
-   *
-   * `postDoubleEntry` écrit un LOT équilibré ou rien. L'y brancher tel quel
-   * casserait le rejeu partiel : un versement dont seule la jambe trésorerie
-   * aurait été écrite ne pourrait plus être complété. Or il s'agit de bonus de
-   * parrainage DÉJÀ VERSÉS — le registre `ReferralPayout` n'expire jamais,
-   * précisément parce qu'il protège de l'argent réel.
-   *
-   * S'y ajoute que les deux jambes sont dans des devises potentiellement
-   * DIFFÉRENTES (bonus converti) : elles ne s'équilibrent pas entre elles, et il
-   * faudrait passer par la compensation comme le fait `creditRevenueLineToTreasury`.
-   *
-   * Conséquence assumée : ces écritures ne portent PAS `metadata.ledgerVersion`,
-   * donc `computeTrialBalance()` les ignore. La balance de vérification ne
-   * couvre pas encore le parrainage — c'est un chantier à part, à mener avec sa
-   * propre recette parce qu'il touche à un mécanisme de rejeu éprouvé.
-   */
-  const { createLedgerEntry } = require("./ledgerService");
+     `connectTransactionsDB()`. On le requiert donc ici, à l'usage. */
+  const { postDoubleEntry } = require("./ledgerService");
 
-  const LedgerEntry = LedgerEntryModel(getTxConn());
-
-  const treasuryAccountId = `treasury:${treasurySystemType}:${String(
-    treasuryUserId
-  )}:${treasuryCurrency}`;
-  const walletAccountId = `user_wallet:${String(
-    beneficiaryId
-  )}:${beneficiaryCurrency}`;
-
-  // Une seule requête pour les deux comptes : on saura lequel manque.
-  const existing = await LedgerEntry.find(
-    { reference: String(reference), accountId: { $in: [treasuryAccountId, walletAccountId] } },
-    { accountId: 1 },
-    { session }
-  ).lean();
-
-  const already = new Set(existing.map((e) => e.accountId));
-  let written = 0;
-
-  const sharedMetadata = {
-    ...metadata,
-    referralReference: String(reference),
+  const input = {
+    treasuryUserId,
     treasurySystemType,
+    treasuryCurrency,
+    treasuryAmount: treasuryDebitedAmount,
+    beneficiaryId,
+    beneficiaryCurrency,
+    beneficiaryAmount: creditedAmount,
   };
 
-  if (!already.has(treasuryAccountId) && treasuryDebitedAmount > 0) {
-    await createLedgerEntry({
+  const lots =
+    mode === "clawback"
+      ? buildReferralClawbackLots(input)
+      : buildReferralPayoutLots(input);
+
+  for (const lot of lots) {
+    await postDoubleEntry({
       transactionId,
       reference: String(reference),
-      userId: treasuryUserId,
-      accountType: "TREASURY",
-      accountId: treasuryAccountId,
-      direction: "DEBIT",
-      entryType: "REFERRAL_PAYOUT",
-      amount: treasuryDebitedAmount,
-      currency: treasuryCurrency,
+      entryType: lot.entryType,
+      legs: lot.legs,
       metadata: {
-        ...sharedMetadata,
-        counterpartyUserId: String(beneficiaryId),
-        counterpartyCurrency: beneficiaryCurrency,
-        counterpartyAmount: creditedAmount,
+        ...metadata,
+        referralReference: String(reference),
+        treasurySystemType,
       },
       session,
+      context: lot.scope,
+      dedupScope: lot.scope,
     });
-    written += 1;
   }
 
-  if (!already.has(walletAccountId) && creditedAmount > 0) {
-    await createLedgerEntry({
-      transactionId,
-      reference: String(reference),
-      userId: beneficiaryId,
-      accountType: "USER_WALLET",
-      accountId: walletAccountId,
-      direction: "CREDIT",
-      entryType: "USER_CREDIT",
-      amount: creditedAmount,
-      currency: beneficiaryCurrency,
-      metadata: {
-        ...sharedMetadata,
-        sourceAmount: treasuryDebitedAmount,
-        sourceCurrency: treasuryCurrency,
-      },
-      session,
-    });
-    written += 1;
-  }
-
-  return { written };
+  return { written: lots.reduce((acc, lot) => acc + lot.legs.length, 0) };
 }
 
 function logReferral(label, payload) {
@@ -924,6 +863,120 @@ async function insertReferralHistoryTransaction(doc, session) {
 }
 
 /**
+ * Qualifie un E11000 survenu pendant un versement et répond EN CONSÉQUENCE —
+ * jamais « payé » sans preuve. Voir `classifyPayoutDuplicate`.
+ *
+ * La transaction Mongo est déjà annulée quand on arrive ici : les lectures se
+ * font hors session.
+ */
+async function resolvePayoutDuplicate({
+  error,
+  reward,
+  keys,
+  fingerprint,
+  beneficiaries,
+  payoutRefBase,
+  correlationId,
+}) {
+  const ReferralPayout = getReferralPayout();
+  const Transaction = getTransactionModel();
+
+  const settled = await ReferralPayout.find({
+    idempotencyKey: { $in: keys },
+    status: "succeeded",
+  }).lean();
+
+  const referee = beneficiaries.find((b) => b.role === "referee");
+
+  const refereePaidElsewhere = referee
+    ? Boolean(
+        await ReferralPayout.exists({
+          beneficiaryId: referee.userId,
+          beneficiaryRole: "referee",
+          status: "succeeded",
+          rewardId: { $ne: reward },
+        })
+      )
+    : false;
+
+  const legacyTransactionCount = await Transaction.countDocuments({
+    type: "referral_bonus",
+    status: "confirmed",
+    $or: beneficiaries.map((b) => ({
+      userId: b.userId,
+      reference: `${payoutRefBase}-${b.role.toUpperCase()}`,
+    })),
+  });
+
+  const verdict = classifyPayoutDuplicate({
+    settledCount: settled.length,
+    refereePaidElsewhere,
+    legacyTransactionCount,
+    beneficiaryCount: beneficiaries.length,
+  });
+
+  if (verdict === "replay") {
+    logReferral("transferReferralBonus.already_paid_on_conflict", {
+      rewardId: reward,
+      correlationId,
+    });
+    return buildReplayResponse(settled, { fingerprint });
+  }
+
+  if (verdict === "referee_already_rewarded") {
+    logger.error?.(
+      "[REFERRAL][TX-CORE][TRANSFER] filleul deja recompense sur une autre recompense — versement refuse",
+      { rewardId: reward, correlationId, refereeId: referee?.userId }
+    );
+    return {
+      ok: false,
+      retryable: false,
+      code: "REFEREE_ALREADY_REWARDED",
+      message: "Ce filleul a déjà reçu un bonus de parrainage",
+      rewardId: reward,
+      correlationId: String(correlationId || ""),
+    };
+  }
+
+  if (verdict === "legacy_paid") {
+    logger.warn?.(
+      "[REFERRAL][TX-CORE][TRANSFER] versement anterieur au registre, prouve par ses transactions",
+      { rewardId: reward, correlationId, payoutRefBase }
+    );
+    return {
+      ok: true,
+      alreadyPaid: true,
+      code: "ALREADY_PAID_LEGACY",
+      rewardId: reward,
+      payoutRefBase,
+      beneficiaries: [],
+    };
+  }
+
+  logger.error?.(
+    "[REFERRAL][TX-CORE][TRANSFER] doublon d'index inexplique — AUCUN argent n'a bouge, versement a rejouer",
+    {
+      rewardId: reward,
+      correlationId,
+      keyPattern: error?.keyPattern || null,
+      consequence:
+        "la transaction Mongo est annulee ; le principal doit rejouer. Si cela persiste, " +
+        "examiner l'index cite (keyPattern).",
+    }
+  );
+
+  return {
+    ok: false,
+    retryable: true,
+    code: "DUPLICATE_KEY_UNEXPLAINED",
+    message: "Conflit d'index inexpliqué, aucun mouvement effectué",
+    details: { keyPattern: error?.keyPattern || null },
+    rewardId: reward,
+    correlationId: String(correlationId || ""),
+  };
+}
+
+/**
  * ---------------------------------------------------------------------------
  * VERSEMENT
  * ---------------------------------------------------------------------------
@@ -994,6 +1047,28 @@ async function transferReferralBonus({
     };
   }
 
+  const shape = validateBeneficiaryRoles(beneficiaries, {
+    treasuryUserId: treasuryUser,
+  });
+
+  if (!shape.ok) {
+    logger.error?.("[REFERRAL][TX-CORE][TRANSFER] demande de versement incoherente", {
+      rewardId: reward,
+      correlationId,
+      code: shape.code,
+      detail: shape.detail,
+    });
+
+    return {
+      ok: false,
+      retryable: false,
+      code: shape.code,
+      message: shape.detail,
+      rewardId: reward,
+      correlationId: String(correlationId || ""),
+    };
+  }
+
   const fingerprint = computeRequestFingerprint({
     rewardId: reward,
     treasuryUserId: treasuryUser,
@@ -1051,7 +1126,12 @@ async function transferReferralBonus({
   for (const beneficiary of beneficiaries) {
     const movement = await buildMovement({
       nominalBonusAmount: beneficiary.amount,
-      nominalBonusCurrency: inputBonusCurrency,
+      /*
+       * La devise du BARÈME de cette partie, pas une devise commune : le
+       * parrain peut être récompensé en CAD pendant que le filleul l'est en
+       * XOF (chacun au barème de son pays, 2026-09-22).
+       */
+      nominalBonusCurrency: beneficiary.bonusCurrency,
       creditedCurrency: beneficiary.payoutCurrency,
       treasuryCurrency: treasuryCur,
     });
@@ -1081,7 +1161,17 @@ async function transferReferralBonus({
   const payoutRefBase =
     String(metadata?.payoutRefBase || "").trim() || `REFBONUS-${reward}`;
 
-  const session = await mongoose.startSession();
+  /**
+   * ⚠️ LA SESSION VIENT DE LA CONNEXION DES TRANSACTIONS.
+   *
+   * Elle était ouverte par `mongoose.startSession()`, c'est-à-dire sur le client
+   * de la base UTILISATEURS, alors que tous les modèles écrits ici vivent sur
+   * `getTxConn()`. Cela ne fonctionnait que tant que les deux URI partagent leur
+   * `MongoClient` (`useDb`) ; avec deux clients distincts, le pilote refuse une
+   * session étrangère et TOUS les versements échouent. Les autres chemins
+   * d'argent (`runtime.js`, cagnottes) ouvrent déjà leur session sur `txConn`.
+   */
+  const session = await getTxConn().startSession();
   let result = null;
 
   try {
@@ -1180,7 +1270,7 @@ async function transferReferralBonus({
           session
         );
 
-        await writeReferralLedgerEntries({
+        await postReferralLedgerEntries({
           transactionId: txDoc?._id,
           reference,
           beneficiaryId: beneficiary.userId,
@@ -1267,43 +1357,23 @@ async function transferReferralBonus({
      * son rôle. On relit le registre et on renvoie la réponse d'origine.
      */
     if (e?.code === 11000) {
-      const settled = await ReferralPayout.find({
-        idempotencyKey: { $in: keys },
-        status: "succeeded",
-      }).lean();
-
-      if (settled.length) {
-        logReferral("transferReferralBonus.already_paid_on_conflict", {
-          rewardId: reward,
-          correlationId,
-        });
-
-        return buildReplayResponse(settled, { fingerprint });
-      }
-
-      /**
-       * E11000 sans versement enregistré : c'est l'index unique de
-       * `Transaction` qui a mordu — une récompense accordée AVANT ce
-       * dispositif. L'argent est déjà parti ; il ne doit pas repartir.
-       */
-      logger.warn?.(
-        "[REFERRAL][TX-CORE][TRANSFER] doublon detecte sur l'historique (versement anterieur au registre)",
-        { rewardId: reward, correlationId, payoutRefBase }
-      );
-
-      return {
-        ok: true,
-        alreadyPaid: true,
-        code: "ALREADY_PAID_LEGACY",
-        rewardId: reward,
+      return resolvePayoutDuplicate({
+        error: e,
+        reward,
+        keys,
+        fingerprint,
+        beneficiaries,
         payoutRefBase,
-        beneficiaries: [],
-      };
+        correlationId,
+      });
     }
+
+    const errorCode = e?.code || "TXCORE_REFERRAL_TRANSFER_FAILED";
 
     const errorResult = {
       ok: false,
-      code: e?.code || "TXCORE_REFERRAL_TRANSFER_FAILED",
+      retryable: !isPermanentTransferFailure(errorCode),
+      code: errorCode,
       message: e?.message || "Referral transfer failed",
       details: e?.details || null,
       rewardId: reward,
@@ -1321,8 +1391,100 @@ async function transferReferralBonus({
   }
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ÉTAT DE LA TRÉSORERIE DE PARRAINAGE — LECTURE SEULE
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * POURQUOI CETTE FONCTION EXISTE. Le versement échoue déjà proprement quand
+ * la trésorerie est vide (`REFERRAL_TREASURY_INSUFFICIENT_FUNDS`, plus haut) :
+ * aucun argent n'est inventé, aucune récompense n'est marquée versée à tort.
+ * Mais échouer proprement, personne ne le VOIT — les récompenses restent en
+ * attente, le balayage les reprend, et le programme ne verse rien pendant des
+ * jours sans que rien ne l'annonce.
+ *
+ * C'est la pratique des plateformes de paiement : Stripe et PayPal affichent
+ * le solde qui finance les remises AVANT que les versements échouent, et
+ * préviennent quand il descend. Un contrôle au démarrage et un chiffre dans
+ * le back-office valent mieux qu'une file qui grossit en silence.
+ *
+ * ⚠️ NE CRÉE RIEN. `findSystemWallet`, jamais `ensureSystemWallet` : une
+ * simple lecture d'état ne doit pas pouvoir provisionner une trésorerie.
+ * L'absence de portefeuille est une information, pas quelque chose à réparer
+ * au passage.
+ */
+async function getReferralTreasuryStatus({
+  treasuryUserId,
+  treasurySystemType = "REFERRAL_TREASURY",
+  treasuryCurrency = "CAD",
+  /* Injectable pour les tests : ils vérifient la DÉCISION, sans base. */
+  TxSystemBalance: injectedModel = null,
+} = {}) {
+  const TxSystemBalance = injectedModel || getTxSystemBalance();
+
+  const treasuryUser = String(treasuryUserId || "").trim();
+  const systemType = String(treasurySystemType || "REFERRAL_TREASURY").trim();
+  const cur = normalizeCurrency(treasuryCurrency || "CAD");
+
+  /* Non configurée : ce n'est pas une erreur technique, c'est un état à dire. */
+  if (!treasuryUser) {
+    return {
+      configured: false,
+      provisioned: false,
+      systemType,
+      currency: cur,
+      balance: null,
+      reason: "TREASURY_USER_ID_MISSING",
+    };
+  }
+
+  if (systemType !== "REFERRAL_TREASURY") {
+    return {
+      configured: true,
+      provisioned: false,
+      systemType,
+      currency: cur,
+      balance: null,
+      reason: "INVALID_REFERRAL_TREASURY_TYPE",
+    };
+  }
+
+  const wallet = await TxSystemBalance.findSystemWallet(treasuryUser, systemType);
+
+  if (!wallet) {
+    return {
+      configured: true,
+      provisioned: false,
+      systemType,
+      currency: cur,
+      balance: null,
+      reason: "SYSTEM_WALLET_NOT_PROVISIONED",
+    };
+  }
+
+  const balance = Number(wallet?.balances?.[cur] || 0);
+
+  return {
+    configured: true,
+    provisioned: true,
+    systemType,
+    currency: cur,
+    balance,
+    /*
+     * Un solde nul n'est pas une panne, mais il a exactement la même
+     * conséquence qu'une trésorerie absente : rien ne part. Il se nomme.
+     */
+    reason: balance > 0 ? "" : "TREASURY_EMPTY",
+  };
+}
+
 module.exports = {
   transferReferralBonus,
+  getReferralTreasuryStatus,
+  // Partagés avec la reprise (`internalReferralClawbackService`) : une seule
+  // façon d'écrire le grand livre du parrainage, dans les deux sens.
+  postReferralLedgerEntries,
+  decimalToNumber,
   // Exportés pour les tests d'idempotence : ces deux fonctions définissent
   // la garantie « exactement une fois » et doivent être vérifiables isolément.
   buildPayoutIdempotencyKey,
