@@ -150,3 +150,55 @@ test("aucun compte système en base ⇒ BLOQUÉ : on n'invente pas de propriéta
 
   assert.equal(plan.find((s) => s.systemType === "FEES_TREASURY").action, "BLOQUÉ");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Fusion de deux comptes d'un même rôle                                      */
+/* -------------------------------------------------------------------------- */
+
+const { planTreasuryMerge } = require("../src/services/treasuryRegistry");
+
+test("fusion : l'argent va de l'ancien compte vers le compte OFFICIEL", () => {
+  // Cas mesuré en production le 2026-09-22 sur CAGNOTTE_FEES_TREASURY.
+  const plans = planTreasuryMerge({
+    wallets: [
+      wallet({ _id: "officiel", userId: OWNER.FEES, balances: { CAD: 16.15 }, balanceHistory: [{}] }),
+      wallet({ _id: "ancien", userId: ORPHAN, balances: { XOF: 176, CAD: 0 }, balanceHistory: [{}] }),
+    ],
+    systemUsers,
+  });
+
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].action, "FUSIONNER");
+  assert.equal(plans[0].sourceWalletId, "ancien");
+  assert.equal(plans[0].targetWalletId, "officiel");
+  assert.deepEqual(
+    plans[0].devises,
+    [{ currency: "XOF", amount: "176" }],
+    "une devise à zéro ne produit aucune écriture"
+  );
+});
+
+test("fusion : aucun compte officiel ⇒ BLOQUÉ, on ne choisit pas la cible à la place d'un humain", () => {
+  const plans = planTreasuryMerge({
+    wallets: [
+      wallet({ _id: "a", userId: ORPHAN, balances: { CAD: 5 } }),
+      wallet({ _id: "b", userId: "69c278d1b25becdb388ef999", balances: { CAD: 7 } }),
+    ],
+    systemUsers,
+  });
+
+  assert.equal(plans[0].action, "BLOQUÉ");
+  assert.equal(plans[0].reason, "AUCUNE_CIBLE_OFFICIELLE");
+});
+
+test("fusion : un seul compte actif ⇒ rien à faire ; un archivé ne compte pas", () => {
+  const plans = planTreasuryMerge({
+    wallets: [
+      wallet({ _id: "a", userId: OWNER.FEES, balances: { CAD: 5 } }),
+      wallet({ _id: "vieux", userId: ORPHAN, balances: { CAD: 7 }, isActive: false }),
+    ],
+    systemUsers,
+  });
+
+  assert.deepEqual(plans, []);
+});

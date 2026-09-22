@@ -53,6 +53,7 @@ const STATUS = Object.freeze({
 });
 
 const idOf = (value) => String(value ?? "").trim();
+const curOf = (value) => String(value ?? "").trim().toUpperCase();
 
 /** Un compte interne est vide s'il ne détient rien et n'a jamais rien vu passer. */
 function isEmptyTreasury(wallet) {
@@ -220,6 +221,77 @@ function planTreasuryRepair({ wallets = [], systemUsers = [] } = {}) {
   });
 }
 
+/**
+ * FUSION DE DEUX COMPTES D'UN MÊME RÔLE — plan pur.
+ *
+ * Cas mesuré en PRODUCTION le 2026-09-22 : `CAGNOTTE_FEES_TREASURY` porte deux
+ * comptes actifs qui détiennent tous deux de l'argent (16,15 CAD hérité, 176
+ * XOF actif). `planTreasuryRepair` refuse — et il a raison : réunir deux soldes
+ * DÉPLACE de l'argent, ce n'est pas une réparation de lien.
+ *
+ * Ici on prépare ce déplacement : l'argent va de l'ancien compte vers celui du
+ * compte système réel, par une écriture `SYSTEM_TRANSFER` par devise. Le compte
+ * vidé est ensuite archivé. Rien n'est réécrit ; tout est annulable par
+ * contre-écriture (invariant 4).
+ *
+ * La CIBLE est toujours le compte du compte système réel. S'il n'en existe
+ * aucun, on ne choisit pas à la place d'un humain : le type est BLOQUÉ.
+ */
+function planTreasuryMerge({ wallets = [], systemUsers = [] } = {}) {
+  const ownerByType = new Map();
+
+  for (const user of systemUsers) {
+    const type = idOf(user?.systemType);
+    if (TREASURY_SYSTEM_TYPES.includes(type) && !ownerByType.has(type)) {
+      ownerByType.set(type, idOf(user._id));
+    }
+  }
+
+  const plans = [];
+
+  for (const systemType of TREASURY_SYSTEM_TYPES) {
+    const actifs = activeOnly(wallets).filter((w) => idOf(w?.systemType) === systemType);
+    if (actifs.length < 2) continue;
+
+    const ownerId = ownerByType.get(systemType);
+
+    if (!ownerId) {
+      plans.push({ systemType, action: "BLOQUÉ", reason: "AUCUN_COMPTE_SYSTEME" });
+      continue;
+    }
+
+    const cible = actifs.find((w) => idOf(w.userId) === ownerId);
+
+    if (!cible) {
+      // Aucun des comptes n'appartient au compte système : c'est un
+      // rattachement (`planTreasuryRepair`), pas une fusion.
+      plans.push({ systemType, action: "BLOQUÉ", reason: "AUCUNE_CIBLE_OFFICIELLE" });
+      continue;
+    }
+
+    for (const source of actifs) {
+      if (idOf(source._id) === idOf(cible._id)) continue;
+
+      const devises = Object.entries(source.balances || {})
+        .map(([cur, montant]) => [curOf(cur), montant])
+        .filter(([, montant]) => Number(String(montant)) !== 0)
+        .map(([cur, montant]) => ({ currency: cur, amount: String(montant) }));
+
+      plans.push({
+        systemType,
+        action: "FUSIONNER",
+        sourceWalletId: idOf(source._id),
+        sourceUserId: idOf(source.userId),
+        targetWalletId: idOf(cible._id),
+        targetUserId: ownerId,
+        devises,
+      });
+    }
+  }
+
+  return plans;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Registre en mémoire — chargé au démarrage, relu à la demande               */
 /* -------------------------------------------------------------------------- */
@@ -261,6 +333,7 @@ module.exports = {
   buildRegistry,
   auditTreasuryRegistry,
   planTreasuryRepair,
+  planTreasuryMerge,
   loadTreasuryRegistry,
   treasuryUserIdFromRegistry,
   resetTreasuryRegistry,

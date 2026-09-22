@@ -33,7 +33,8 @@
     "treasuries:repair": "node scripts/repairSystemTreasuries.js",
     "reconcile:treasuries": "node scripts/reconcileTreasuries.js",
     "migrate:system-balances": "node scripts/migrateSystemBalancesToDecimal.js",
-    "treasuries:opening-balances": "node scripts/postTreasuryOpeningBalances.js"
+    "treasuries:opening-balances": "node scripts/postTreasuryOpeningBalances.js",
+    "treasuries:merge": "node scripts/mergeDuplicateTreasuries.js"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",
