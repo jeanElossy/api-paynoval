@@ -2,6 +2,13 @@
 
 const mongoose = require("mongoose");
 
+const {
+  balancesAsNumbers,
+  covers,
+  readExact,
+  toDecimal128,
+} = require("../services/ledger/systemBalanceAmounts");
+
 module.exports = function buildTxSystemBalanceModel(conn) {
   if (!conn) {
     throw new Error("TxSystemBalance: connexion Mongo requise");
@@ -189,9 +196,21 @@ module.exports = function buildTxSystemBalanceModel(conn) {
         default: "CAD",
       },
 
+      /**
+       * MONTANTS EXACTS EN BASE — `Decimal128` (2026-09-22).
+       *
+       * Ils étaient stockés en flottants et incrémentés par `$inc` : mesuré en
+       * base, `CAD: 16.150000000000002` et `97.91000000000001`. Les
+       * portefeuilles clients étaient déjà exacts, pas les comptes internes.
+       *
+       * L'accesseur rend des NOMBRES pour que les lecteurs existants
+       * (`Number(wallet.balances[CUR])`) continuent de fonctionner — les
+       * décisions monétaires, elles, passent par `readExact`.
+       */
       balances: {
         type: mongoose.Schema.Types.Mixed,
         default: {},
+        get: balancesAsNumbers,
       },
 
       isActive: {
@@ -213,6 +232,10 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     {
       timestamps: true,
       collection: "txsystembalances",
+      // Sans cela, une réponse d'API sérialiserait les soldes en `Decimal128`
+      // bruts (`{ $numberDecimal: "97.91" }`) au lieu de nombres.
+      toJSON: { getters: true },
+      toObject: { getters: true },
     }
   );
 
@@ -266,9 +289,11 @@ module.exports = function buildTxSystemBalanceModel(conn) {
         this.balances = {};
       }
 
-      for (const [curRaw, amountRaw] of Object.entries(this.balances)) {
+      const brut = this.get("balances", null, { getters: false }) || this.balances;
+
+      for (const [curRaw, amountRaw] of Object.entries(brut)) {
         const cur = cleanCurrency(curRaw);
-        const amount = cleanAmount(amountRaw, cur, { allowZero: true });
+        const amount = toDecimal128(amountRaw, cur);
 
         if (this.managedCurrency !== "MULTI" && cur !== this.managedCurrency) {
           throw new Error(
@@ -276,12 +301,15 @@ module.exports = function buildTxSystemBalanceModel(conn) {
           );
         }
 
-        this.balances[cur] = amount;
+        brut[cur] = amount;
       }
 
-      if (this.balances[this.defaultCurrency] == null) {
-        this.balances[this.defaultCurrency] = 0;
+      if (brut[this.defaultCurrency] == null) {
+        brut[this.defaultCurrency] = toDecimal128(0, this.defaultCurrency);
       }
+
+      this.set("balances", brut);
+      this.markModified("balances");
 
       next();
     } catch (err) {
@@ -341,8 +369,10 @@ module.exports = function buildTxSystemBalanceModel(conn) {
         doc.balances = {};
       }
 
-      if (doc.balances[cur] == null) {
-        doc.balances[cur] = 0;
+      if (readExact(doc, cur) === "0" && doc.balances?.[cur] == null) {
+        const brut = doc.get("balances", null, { getters: false }) || {};
+        brut[cur] = toDecimal128(0, cur);
+        doc.set("balances", brut);
         doc.markModified("balances");
         await doc.save({ session });
       }
@@ -382,7 +412,7 @@ module.exports = function buildTxSystemBalanceModel(conn) {
           isSystem: true,
           managedCurrency,
           defaultCurrency: cur,
-          balances: { [cur]: 0 },
+          balances: { [cur]: toDecimal128(0, cur) },
           isActive: true,
           metadata,
           balanceHistory: [],
@@ -420,7 +450,9 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     const updated = await this.findOneAndUpdate(
       { _id: wallet._id },
       {
-        $inc: { [balancePath]: amt },
+        // `$inc` avec un `Decimal128` : MongoDB rend un décimal, donc plus
+        // aucune queue de flottant ne s'accumule au fil des mouvements.
+        $inc: { [balancePath]: toDecimal128(amt, cur) },
         $set: {
           updatedAt: new Date(),
           defaultCurrency: wallet.defaultCurrency || cur,
@@ -472,8 +504,20 @@ module.exports = function buildTxSystemBalanceModel(conn) {
 
     assertManagedCurrencyCompatibility(wallet, cur);
 
-    const current = Number(wallet?.balances?.[cur] || 0);
-    if (current < amt) {
+    /**
+     * Comparaison EXACTE (`covers`) : un `Number()` sur un `Decimal128` vaut
+     * `NaN`, et `NaN < amt` est faux — le contrôle de solde aurait donc laissé
+     * passer tous les débits sans jamais lever (règle B.2).
+     */
+    const current = readExact(wallet, cur);
+
+    if (current === null) {
+      throw new Error(
+        `Solde illisible sur ${systemType} en ${cur} : aucun débit n'est effectué.`
+      );
+    }
+
+    if (!covers(current, amt)) {
       throw new Error(
         `Solde insuffisant sur ${systemType} en ${cur}. Disponible=${current}, requis=${amt}`
       );
@@ -484,10 +528,10 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     const updated = await this.findOneAndUpdate(
       {
         _id: wallet._id,
-        [balancePath]: { $gte: amt },
+        [balancePath]: { $gte: toDecimal128(amt, cur) },
       },
       {
-        $inc: { [balancePath]: -amt },
+        $inc: { [balancePath]: toDecimal128(-amt, cur) },
         $set: {
           updatedAt: new Date(),
         },
