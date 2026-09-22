@@ -102,6 +102,8 @@ function systemWalletModel() {
   return _SystemWalletBalance;
 }
 
+const { treasuryUserIdFromRegistry } = require("./treasuryRegistry");
+
 const TREASURY_SYSTEM_TYPES = new Set([
   "REFERRAL_TREASURY",
   "FEES_TREASURY",
@@ -185,14 +187,35 @@ function normalizeTreasurySystemType(value, fieldName = "treasurySystemType") {
   return s;
 }
 
+/**
+ * LE REGISTRE FAIT FOI, L'ENVIRONNEMENT N'EST QU'UN SECOURS (2026-09-22).
+ *
+ * Avant, le rôle (`FEES_TREASURY`) se résolvait uniquement par
+ * `FEES_TREASURY_USER_ID`. Une variable restée sur un identifiant périmé
+ * envoyait donc l'argent sur un compte fabriqué au vol — mesuré sur les bases
+ * -test. Le registre (`services/treasuryRegistry.js`) lit les comptes internes
+ * ACTIFS au démarrage : c'est la base qui dit quel compte porte quel rôle.
+ *
+ * L'environnement ne sert plus que tant que le registre n'est pas chargé
+ * (scripts, tests). Un type introuvable LÈVE : aucun compte par défaut.
+ */
 function getTreasuryUserIdBySystemType(systemType) {
   const normalizedType = normalizeTreasurySystemType(systemType, "systemType");
+
+  const fromRegistry = treasuryUserIdFromRegistry(normalizedType);
+  if (fromRegistry) return fromRegistry;
+
   const treasuryUserId = String(
     TREASURY_ENV_BY_SYSTEM_TYPE[normalizedType] || ""
   ).trim();
 
   if (!treasuryUserId) {
-    throw new Error(`Aucun treasuryUserId configuré pour ${normalizedType}`);
+    const err = new Error(
+      `Aucun compte interne ${normalizedType} : opération refusée (registre vide et variable absente).`
+    );
+    err.code = "TREASURY_NOT_REGISTERED";
+    err.statusCode = 503;
+    throw err;
   }
 
   return treasuryUserId;
@@ -261,70 +284,31 @@ function getSystemWalletModel() {
   return systemWalletModel();
 }
 
-function buildSystemBalanceQuery({ treasuryUserId, treasurySystemType }) {
-  const id = normalizeObjectIdLike(treasuryUserId, "treasuryUserId");
-  const systemType = normalizeTreasurySystemType(treasurySystemType);
-
-  const clauses = [
-    { userId: id, systemType },
-    { ownerId: id, systemType },
-  ];
-
-  if (mongoose.Types.ObjectId.isValid(id)) {
-    const oid = new mongoose.Types.ObjectId(id);
-    clauses.push({ userId: oid, systemType }, { ownerId: oid, systemType });
-  }
-
-  return {
-    $or: clauses,
-  };
-}
-
-async function ensureSystemBalanceDocument({
-  treasuryUserId,
-  treasurySystemType,
-  currency,
-  treasuryLabel = "",
-  session = null,
-}) {
+/**
+ * CRÉDIT / DÉBIT D'UNE TRÉSORERIE — UN SEUL CHEMIN, QUI ÉCHOUE EN FERMETURE.
+ *
+ * ⚠️ Défaut fermé le 2026-09-17. Deux replis existaient :
+ *   - `ensureSystemBalanceDocument` CRÉAIT une trésorerie pour tout
+ *     `treasuryUserId` reçu ;
+ *   - à défaut de modèle système, l'argent partait sur un PORTEFEUILLE CLIENT
+ *     portant l'identifiant de la trésorerie.
+ * Tous deux transformaient une configuration fausse en argent déplacé en
+ * silence. Désormais : modèle système obligatoire, trésorerie provisionnée
+ * obligatoire (`TxSystemBalance.ensureSystemWallet` sans `allowCreate`).
+ */
+function requireSystemWalletModel(operation) {
   const SystemBalance = getSystemWalletModel();
-  if (!SystemBalance) return null;
 
-  const cur = normalizeCurrency(currency);
-  const query = buildSystemBalanceQuery({ treasuryUserId, treasurySystemType });
-
-  let doc = await SystemBalance.findOne(query).session(session || null);
-  if (doc) {
-    if (doc.balances == null || typeof doc.balances !== "object") {
-      doc.balances = {};
-    }
-    if (doc.balances[cur] == null) {
-      doc.balances[cur] = 0;
-    }
-    return doc;
+  if (!SystemBalance || typeof SystemBalance[operation] !== "function") {
+    const err = new Error(
+      `Modèle TxSystemBalance indisponible : ${operation} de trésorerie refusé.`
+    );
+    err.code = "SYSTEM_WALLET_MODEL_UNAVAILABLE";
+    err.statusCode = 503;
+    throw err;
   }
 
-  const seedBalances = { [cur]: 0 };
-  const [created] = await SystemBalance.create(
-    [
-      {
-        userId: treasuryUserId,
-        systemType: normalizeTreasurySystemType(treasurySystemType),
-        fullName: normalizeOptionalLabel(treasuryLabel) || treasurySystemType,
-        isSystem: true,
-        managedCurrency: "MULTI",
-        defaultCurrency: cur,
-        balances: seedBalances,
-        isActive: true,
-        metadata: {
-          source: "ledgerService.ensureSystemBalanceDocument",
-        },
-      },
-    ],
-    maybeSessionOpts(session)
-  );
-
-  return created;
+  return SystemBalance;
 }
 
 async function creditSystemWallet({
@@ -332,67 +316,18 @@ async function creditSystemWallet({
   treasurySystemType,
   amount,
   currency,
-  treasuryLabel = "",
   session = null,
 }) {
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const SystemBalance = getSystemWalletModel();
-
-  if (SystemBalance && typeof SystemBalance.credit === "function") {
-    return SystemBalance.credit(
-      treasuryUserId,
-      normalizeTreasurySystemType(treasurySystemType),
-      cur,
-      amt,
-      maybeSessionOpts(session)
-    );
-  }
-
-  if (SystemBalance) {
-    const doc = await ensureSystemBalanceDocument({
-      treasuryUserId,
-      treasurySystemType,
-      currency: cur,
-      treasuryLabel,
-      session,
-    });
-
-    const balancePath = `balances.${cur}`;
-    return SystemBalance.findOneAndUpdate(
-      { _id: doc._id },
-      {
-        $inc: { [balancePath]: amt },
-        $set: {
-          updatedAt: new Date(),
-          defaultCurrency: doc.defaultCurrency || cur,
-          managedCurrency: doc.managedCurrency || "MULTI",
-          isSystem: true,
-          isActive: doc.isActive !== false,
-        },
-        $push: {
-          balanceHistory: {
-            type: "credit",
-            amount: amt,
-            currency: cur,
-            reason: `ledger:${normalizeTreasurySystemType(treasurySystemType)}`,
-            createdAt: new Date(),
-          },
-        },
-      },
-      { new: true, session }
-    );
-  }
-
-  await userWalletModel().credit(
+  return requireSystemWalletModel("credit").credit(
     treasuryUserId,
+    normalizeTreasurySystemType(treasurySystemType),
     cur,
     amt,
     maybeSessionOpts(session)
   );
-
-  return null;
 }
 
 async function debitSystemWallet({
@@ -400,68 +335,18 @@ async function debitSystemWallet({
   treasurySystemType,
   amount,
   currency,
-  treasuryLabel = "",
   session = null,
 }) {
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
 
-  const SystemBalance = getSystemWalletModel();
-
-  if (SystemBalance && typeof SystemBalance.debit === "function") {
-    return SystemBalance.debit(
-      treasuryUserId,
-      normalizeTreasurySystemType(treasurySystemType),
-      cur,
-      amt,
-      maybeSessionOpts(session)
-    );
-  }
-
-  if (SystemBalance) {
-    const doc = await ensureSystemBalanceDocument({
-      treasuryUserId,
-      treasurySystemType,
-      currency: cur,
-      treasuryLabel,
-      session,
-    });
-
-    const current = Number(doc?.balances?.[cur] || 0);
-    if (current < amt) {
-      throw new Error(
-        `Solde insuffisant sur ${treasurySystemType} en ${cur}. Disponible=${current}, requis=${amt}`
-      );
-    }
-
-    const balancePath = `balances.${cur}`;
-    return SystemBalance.findOneAndUpdate(
-      { _id: doc._id, [balancePath]: { $gte: amt } },
-      {
-        $inc: { [balancePath]: -amt },
-        $set: { updatedAt: new Date() },
-        $push: {
-          balanceHistory: {
-            type: "debit",
-            amount: amt,
-            currency: cur,
-            reason: `ledger:${normalizeTreasurySystemType(treasurySystemType)}`,
-            createdAt: new Date(),
-          },
-        },
-      },
-      { new: true, session }
-    );
-  }
-
-  await userWalletModel().debit(
+  return requireSystemWalletModel("debit").debit(
     treasuryUserId,
+    normalizeTreasurySystemType(treasurySystemType),
     cur,
     amt,
     maybeSessionOpts(session)
   );
-
-  return null;
 }
 
 async function createLedgerEntry({

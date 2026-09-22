@@ -151,7 +151,10 @@ module.exports = function buildTxSystemBalanceModel(conn) {
         enum: SYSTEM_TYPES,
         uppercase: true,
         trim: true,
-        index: true,
+        // Pas d'`index: true` ici : l'index unique partiel déclaré plus bas
+        // porte la même clé, et deux index sur une même clé sont interdits
+        // (`test/indexDeclarations.test.js`). Les lectures par type portent
+        // sur les comptes actifs, que cet index couvre.
       },
 
       fullName: {
@@ -223,6 +226,24 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     { sparse: true }
   );
 
+  /**
+   * UNE SEULE TRÉSORERIE ACTIVE PAR TYPE (2026-09-17).
+   *
+   * Mesuré sur les bases -test : deux `OPERATIONS_TREASURY` actives, et les
+   * frais / la marge de change crédités sur des trésoreries dont le
+   * propriétaire n'existait plus. L'index `{userId, systemType}` n'empêche pas
+   * cela : il suffit d'un autre `userId`. Réparation :
+   * `scripts/relinkSystemTreasuries.js`, puis `npm run indexes:apply`.
+   */
+  TxSystemBalanceSchema.index(
+    { systemType: 1 },
+    {
+      unique: true,
+      partialFilterExpression: { isActive: true },
+      name: "one_active_system_wallet_per_type",
+    }
+  );
+
   TxSystemBalanceSchema.pre("validate", function preValidate(next) {
     try {
       this.systemType = cleanSystemType(this.systemType);
@@ -274,14 +295,29 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     opts = {}
   ) {
     const session = opts.session || null;
-    const query = { $or: buildOwnerClauses(userId, systemType) };
+    // Une trésorerie archivée (`isActive: false`) ne reçoit ni ne rend d'argent.
+    const query = {
+      $and: [{ $or: buildOwnerClauses(userId, systemType) }, { isActive: { $ne: false } }],
+    };
     return this.findOne(query).session(session);
   };
 
+  /**
+   * ⚠️ NE CRÉE RIEN PAR DÉFAUT (2026-09-17).
+   *
+   * Appelée par `credit` et `debit`, elle créait une trésorerie pour N'IMPORTE
+   * QUEL `userId` reçu. Une variable `*_TREASURY_USER_ID` restée sur un ancien
+   * identifiant fabriquait donc, au premier crédit, une trésorerie orpheline —
+   * et l'argent partait dessus, sans erreur. Une trésorerie est un compte
+   * PROVISIONNÉ : absente ⇒ `SYSTEM_WALLET_NOT_PROVISIONED` (règle B.2). Seul
+   * un provisionnement explicite passe `allowCreate: true`.
+   *
+   * Devise obligatoire : plus de repli sur `CAD`.
+   */
   TxSystemBalanceSchema.statics.ensureSystemWallet = async function (
     userId,
     systemType,
-    currency = "CAD",
+    currency,
     opts = {}
   ) {
     const session = opts.session || null;
@@ -292,7 +328,7 @@ module.exports = function buildTxSystemBalanceModel(conn) {
         ? opts.metadata
         : {};
 
-    const cur = cleanCurrency(currency);
+    const cur = cleanCurrency(currency, null);
     const sys = cleanSystemType(systemType);
     const id = cleanId(userId, "userId");
 
@@ -312,6 +348,16 @@ module.exports = function buildTxSystemBalanceModel(conn) {
       }
 
       return doc;
+    }
+
+    if (opts.allowCreate !== true) {
+      const err = new Error(
+        `Trésorerie ${sys} non provisionnée pour ${id} : aucune opération effectuée.`
+      );
+      err.code = "SYSTEM_WALLET_NOT_PROVISIONED";
+      err.statusCode = 503;
+      err.systemType = sys;
+      throw err;
     }
 
     const managedCurrency =
@@ -356,7 +402,7 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     opts = {}
   ) {
     const session = opts.session || null;
-    const cur = cleanCurrency(currency);
+    const cur = cleanCurrency(currency, null);
     const amt = cleanAmount(amount, cur, { allowZero: false });
 
     const wallet = await this.ensureSystemWallet(userId, systemType, cur, {
@@ -413,7 +459,7 @@ module.exports = function buildTxSystemBalanceModel(conn) {
     opts = {}
   ) {
     const session = opts.session || null;
-    const cur = cleanCurrency(currency);
+    const cur = cleanCurrency(currency, null);
     const amt = cleanAmount(amount, cur, { allowZero: false });
 
     const wallet = await this.ensureSystemWallet(userId, systemType, cur, {

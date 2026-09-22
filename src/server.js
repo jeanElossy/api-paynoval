@@ -1102,6 +1102,64 @@ async function bootstrap() {
     auditerIndex(getTxConn(), { logger }).catch(() => {});
 
     /**
+     * REGISTRE DES COMPTES INTERNES — chargé AVANT de servir, et annoncé.
+     *
+     * Le rôle (`FEES_TREASURY`) se résout désormais par la base, plus par une
+     * variable d'environnement qui pouvait pointer vers un compte périmé : le
+     * 2026-09-22, frais et marge de change étaient crédités sur des comptes
+     * sans propriétaire, et deux `OPERATIONS_TREASURY` coexistaient. Un écart
+     * est journalisé AVEC SA CONSÉQUENCE (règle B.6) ; le chemin de l'argent,
+     * lui, refuse déjà toute trésorerie non enregistrée (règle B.2).
+     */
+    try {
+      const {
+        loadTreasuryRegistry,
+        auditTreasuryRegistry,
+        TREASURY_SYSTEM_TYPES,
+        STATUS,
+      } = require("./services/treasuryRegistry");
+
+      const txDb = getTxConn().db;
+      await loadTreasuryRegistry(txDb);
+
+      const wallets = await txDb
+        .collection("txsystembalances")
+        .find({ isActive: { $ne: false } }, { projection: { userId: 1, systemType: 1, isActive: 1 } })
+        .toArray();
+
+      const systemUsers = await getUsersConn()
+        .db.collection("users")
+        .find({ isSystem: true }, { projection: { systemType: 1 } })
+        .toArray();
+
+      const envIds = Object.fromEntries(
+        TREASURY_SYSTEM_TYPES.map((t) => [t, String(process.env[`${t}_USER_ID`] || "").trim()])
+      );
+
+      const rows = auditTreasuryRegistry({ wallets, envIds, systemUsers });
+      const ecarts = rows.filter((r) => r.status !== STATUS.OK);
+
+      if (!ecarts.length) {
+        logger.info(
+          `✅ Comptes internes : ${rows.length} trésoreries enregistrées, propriétaires vérifiés.`
+        );
+      } else {
+        for (const row of ecarts) {
+          logger.error(
+            `❌ Compte interne ${row.systemType} : ${row.status}. Conséquence : ` +
+              "toute opération sur cette trésorerie sera REFUSÉE (aucun compte n'est choisi par défaut). " +
+              "Réparer avec `npm run treasuries:repair`."
+          );
+        }
+      }
+    } catch (err) {
+      logger.error(
+        "❌ Registre des comptes internes ILLISIBLE — les opérations de trésorerie seront refusées : " +
+          (err?.message || err)
+      );
+    }
+
+    /**
      * ÉTAT DES RAILS DE PAIEMENT — AVANT D'ACCEPTER LA MOINDRE REQUÊTE
      * -------------------------------------------------------------------
      * Les sept adapters démarraient en mode simulé par défaut : un rail non

@@ -80,6 +80,73 @@ async function ensureWallet(req, res) {
     });
   }
 
+  /**
+   * UN COMPTE INTERNE N'A PAS DE PORTEFEUILLE CLIENT (2026-09-22).
+   *
+   * Règle reprise des fintechs : une identité de back-office sert à AGIR sur
+   * des comptes, jamais à en détenir ; une trésorerie a son compte dans
+   * `txsystembalances`. Un portefeuille client à leur nom créerait une seconde
+   * poche pour le même rôle, invisible du registre des comptes internes.
+   *
+   * Seule la base Users connaît ces marqueurs. Injoignable ⇒ on REFUSE : ouvrir
+   * « dans le doute » est exactement ce qui a fabriqué les comptes orphelins.
+   */
+  const INTERNAL_ROLES = [
+    "system", "treasury", "operations", "support",
+    "admin", "superadmin", "compliance", "security", "fraud-analyst",
+  ];
+
+  try {
+    const { getUsersConn } = require("../config/db");
+
+    const owner = await getUsersConn()
+      .db.collection("users")
+      .findOne(
+        { _id: new mongoose.Types.ObjectId(userId) },
+        { projection: { isSystem: 1, isStaff: 1, userType: 1, role: 1, systemType: 1 } }
+      );
+
+    if (!owner) {
+      return res.status(404).json({
+        success: false,
+        code: "USER_NOT_FOUND",
+        error: "Compte introuvable : aucun portefeuille ouvert.",
+      });
+    }
+
+    const interne =
+      owner.isSystem === true ||
+      owner.isStaff === true ||
+      owner.userType === "system" ||
+      !!owner.systemType ||
+      INTERNAL_ROLES.includes(String(owner.role || ""));
+
+    if (interne) {
+      logger.warn("[internal/wallets] portefeuille client REFUSÉ à un compte interne", {
+        userId,
+        role: owner.role,
+        requestId: norm(req.headers["x-request-id"]),
+      });
+
+      return res.status(409).json({
+        success: false,
+        code: "INTERNAL_ACCOUNT_NO_CLIENT_WALLET",
+        error: "Ce compte est interne : il ne reçoit pas de portefeuille client.",
+      });
+    }
+  } catch (err) {
+    logger.error("[internal/wallets] vérification du compte impossible", {
+      userId,
+      error: err?.message,
+    });
+
+    return res.status(503).json({
+      success: false,
+      code: "USER_LOOKUP_UNAVAILABLE",
+      error: "Vérification du compte impossible : aucun portefeuille ouvert.",
+    });
+  }
+
   try {
     /**
      * `getTxConn` résolu À L'APPEL (même motif que `services/aml.js`).
