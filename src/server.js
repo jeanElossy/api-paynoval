@@ -34,6 +34,36 @@ try {
 if (!process.env.LOG_LEVEL) process.env.LOG_LEVEL = "info";
 if (process.env.SENTRY_DSN === undefined) process.env.SENTRY_DSN = "";
 
+/**
+ * ═══ ENVIRONNEMENT ET SUIVI D'ERREURS — AVANT TOUT LE RESTE ═══════════════
+ *
+ * ⚠️ L'ORDRE DE CE BLOC EST LA MOITIÉ DU CORRECTIF, et il ne se déduit d'aucun
+ * nom de fonction.
+ *
+ * `Sentry.init()` était appelé ~200 lignes plus bas, APRÈS `require("express")`.
+ * Depuis la v8 du SDK, l'instrumentation automatique repose sur OpenTelemetry,
+ * qui enrobe les modules AU CHARGEMENT : initialiser après le `require` d'Express
+ * revient à ne pas l'instrumenter du tout. Déplacer ce bloc plus bas rouvre le
+ * défaut sans produire la moindre erreur — c'est précisément ce qui l'avait
+ * rendu invisible (défaut D1).
+ *
+ * `appEnv` n'a aucune dépendance et `errorTracking` n'en a que deux modules
+ * purs : les charger ici ne coûte rien et ne peut rien casser.
+ */
+const { startupReport: envStartupReport, APP_ENV } = require("./services/appEnv");
+const {
+  initErrorTracking,
+  errorTrackingStatus,
+  setupExpressErrorHandler: setupSentryExpressErrorHandler,
+} = require("./services/errorTracking");
+
+{
+  const rapport = envStartupReport();
+  console[rapport.level === "warn" ? "warn" : "log"](rapport.message);
+}
+
+initErrorTracking();
+
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -207,21 +237,25 @@ function isTrustedInternalCall(req) {
 // ─────────────────────────────────────────────────────────────
 // Sentry
 // ─────────────────────────────────────────────────────────────
-let sentry = null;
-
-if (process.env.SENTRY_DSN) {
-  const Sentry = tryRequire("@sentry/node");
-
-  if (Sentry) {
-    sentry = Sentry;
-    sentry.init({
-      dsn: process.env.SENTRY_DSN,
-      tracesSampleRate: 1.0,
-    });
-  } else {
-    logger.warn("[sentry] @sentry/node non installé — Sentry désactivé");
-  }
-}
+/**
+ * ⚠️ IL Y AVAIT ICI UN SECOND POINT D'INITIALISATION DE SENTRY — RETIRÉ.
+ *
+ * Il faisait `Sentry.init()` à cet endroit, c'est-à-dire APRÈS
+ * `require("express")` : trop tard pour l'instrumentation automatique du SDK
+ * v8+. Et les deux gestionnaires qu'il montait plus bas passaient par
+ * `Sentry.Handlers`, retiré en v8 — donc `undefined` sur la 9.47.1 installée,
+ * donc sautés en silence par un `?.`.
+ *
+ * L'initialisation vit désormais en TÊTE DE FICHIER, avant le premier `require`
+ * instrumenté, dans `services/errorTracking.js`. Ce module refuse d'initialiser
+ * un SDK dont l'API attendue est absente, et le DIT avec sa conséquence, au
+ * lieu de se désactiver sans bruit.
+ *
+ * NE PAS réintroduire d'appel à `Sentry.init` ici : deux initialisations ne
+ * produisent aucune erreur, et la seconde écraserait la configuration de
+ * masquage (`beforeSend`) de la première. Le seul symptôme serait une donnée
+ * sensible expédiée à un tiers — c'est-à-dire aucun symptôme visible.
+ */
 
 const app = express();
 app.set("trust proxy", 1);
@@ -420,9 +454,15 @@ app.use(
   })
 );
 
-if (sentry && sentry.Handlers?.requestHandler) {
-  app.use(sentry.Handlers.requestHandler());
-}
+/**
+ * ⚠️ IL Y AVAIT ICI `sentry.Handlers.requestHandler()` — RETIRÉ, ET IL NE FAUT
+ * PAS LE REMETTRE.
+ *
+ * Depuis la v8 du SDK, il n'y a plus de `requestHandler` à monter : la requête
+ * est instrumentée automatiquement par l'initialisation faite en tête de
+ * fichier. Seul le gestionnaire d'ERREURS reste à poser explicitement, et il
+ * l'est plus bas, après les routes.
+ */
 
 // ─────────────────────────────────────────────────────────────
 // Body parsers
@@ -1739,8 +1779,18 @@ async function bootstrap() {
       })
     );
 
-    if (sentry && sentry.Handlers?.errorHandler) {
-      app.use(sentry.Handlers.errorHandler());
+    /**
+     * Gestionnaire d'erreurs Sentry — APRÈS les routes, AVANT `errorHandler`.
+     *
+     * L'ordre n'est pas cosmétique : `errorHandler` rend une réponse et clôt
+     * la requête. Monté après lui, Sentry ne verrait jamais l'erreur.
+     *
+     * `setupExpressErrorHandler` rend `true` seulement s'il a réellement été
+     * monté — on le JOURNALISE plutôt que de le supposer. C'est exactement ce
+     * qui manquait au code précédent : il ne montait rien et n'en disait rien.
+     */
+    if (setupSentryExpressErrorHandler(app)) {
+      logger.info("[errorTracking] gestionnaire d'erreurs Express monté");
     }
 
     app.use(errorHandler);
