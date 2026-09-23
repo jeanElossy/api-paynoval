@@ -85,6 +85,8 @@ const BRANCHES = Object.freeze([
 
 const CLES = Object.freeze(BRANCHES.map((b) => b.cle));
 
+const { MODES, deploymentMode } = require("../deploymentMode");
+
 const DESACTIVE = new Set(["false", "0", "no", "non", "off", "none", "aucun"]);
 const TOUT = new Set(["true", "1", "yes", "oui", "on", "all", "tout", "tous"]);
 
@@ -107,7 +109,20 @@ const TOUT = new Set(["true", "1", "yes", "oui", "on", "all", "tout", "tous"]);
 function lireReglage(env = process.env) {
   const brut = String(env?.EVENT_CONSUMERS_INLINE ?? "").trim().toLowerCase();
 
-  if (!brut) return { cles: [...CLES], source: "default", inconnues: [] };
+  /**
+   * Sans variable explicite, c'est le MODE DE DÉPLOIEMENT qui décide
+   * (`services/deploymentMode.js`) : `isolated` en production OVH, où
+   * `npm run workers:all` porte les consommateurs ; `single` (défaut) partout
+   * ailleurs. Une seule déclaration par service au lieu d'un interrupteur par
+   * processus de fond.
+   */
+  if (!brut) {
+    const { mode } = deploymentMode(env);
+
+    if (mode === MODES.ISOLATED) return { cles: [], source: "mode", inconnues: [] };
+
+    return { cles: [...CLES], source: "default", inconnues: [] };
+  }
   if (DESACTIVE.has(brut)) return { cles: [], source: "env", inconnues: [] };
   if (TOUT.has(brut)) return { cles: [...CLES], source: "env", inconnues: [] };
 
@@ -157,7 +172,9 @@ async function start({ logger = console, env = process.env, branches = BRANCHES 
 
   if (!reglage.cles.length) {
     logger.info?.(
-      "ℹ️ Consommateurs du bus : AUCUN dans ce processus (EVENT_CONSUMERS_INLINE=false). " +
+      `ℹ️ Consommateurs du bus : AUCUN dans ce processus (${
+        reglage.source === "mode" ? "DEPLOYMENT_MODE=isolated" : "EVENT_CONSUMERS_INLINE=false"
+      }). ` +
         "CONSÉQUENCE : ils doivent tourner dans un service dédié " +
         "(`npm run workers:all`) — sinon aucune notification de transaction " +
         "n'arrive et la surveillance AML est aveugle. `event_consumer_present` " +
@@ -198,8 +215,8 @@ async function start({ logger = console, env = process.env, branches = BRANCHES 
   logger[niveau]?.(
     `📨 Consommateurs du bus DANS le processus web : ${demarres.length}/` +
       `${reglage.cles.length} en écoute (${demarres.join(", ") || "aucun"}). ` +
-      `Mode « un seul service » — retirer avec EVENT_CONSUMERS_INLINE=false ` +
-      `le jour où un service dédié existe.`
+      `Mode « un seul service » — en production isolée, poser ` +
+      `DEPLOYMENT_MODE=isolated et déployer \`npm run workers:all\`.`
   );
 
   return {

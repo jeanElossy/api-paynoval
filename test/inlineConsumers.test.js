@@ -202,3 +202,33 @@ test("chaque branche pointe vers un fichier consommateur réel", () => {
     );
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* Mode de déploiement — la bascule vers OVH                                  */
+/* -------------------------------------------------------------------------- */
+
+test("DEPLOYMENT_MODE=isolated sort les consommateurs du web", () => {
+  const r = lireReglage({ DEPLOYMENT_MODE: "isolated" });
+
+  assert.deepStrictEqual(r.cles, []);
+  assert.strictEqual(r.source, "mode");
+});
+
+test("la variable explicite garde le dernier mot sur le mode", () => {
+  assert.deepStrictEqual(
+    lireReglage({ DEPLOYMENT_MODE: "isolated", EVENT_CONSUMERS_INLINE: "notifications" }).cles,
+    ["notifications"]
+  );
+});
+
+test("en mode isolé, l'annonce nomme la cause", async () => {
+  const j = journal();
+
+  await start({
+    logger: j,
+    env: { DEPLOYMENT_MODE: "isolated" },
+    branches: CLES.map((c) => fausseBranche(c)),
+  });
+
+  assert.ok(j.lignes.info.some((l) => l.includes("DEPLOYMENT_MODE=isolated")));
+});
