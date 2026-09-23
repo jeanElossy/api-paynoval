@@ -98,14 +98,120 @@ test("la notification est DEMANDÉE par un événement, sous la session", () => 
   assert.match(SERVICE, /sessOpts\?\.session \|\| null/);
 });
 
-test("un événement PAR CANAL — la clé d'idempotence resterait ambiguë sinon", () => {
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* 2 bis. TX-CORE NE DÉCIDE PLUS DES CANAUX — 2026-09-23                      */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ CE TEST A REMPLACÉ « un événement PAR CANAL ».
+ *
+ * L'ancien vérifiait la présence de `for (const channel of channels` et d'une
+ * clé suffixée par canal. Cette conception était juste TANT QUE Tx-Core
+ * choisissait les canaux — la clé devait alors les distinguer, sinon un échec
+ * e-mail aurait forcé à rejouer le push.
+ *
+ * Elle est devenue fausse le 2026-09-23, parce que la raison qui la justifiait a
+ * disparu : Tx-Core ne choisit plus. Il choisissait en lisant
+ * `notificationPreferences` et `wantsEmail`, **deux champs qui n'existent dans
+ * aucun schéma** — les deux lectures retombaient donc toujours sur `?? true`, et
+ * chaque notification de transaction partait en push ET en e-mail quelles que
+ * soient les préférences réelles de l'utilisateur.
+ *
+ * La séparation par canal existe toujours, exactement où elle doit être : dans
+ * la file du backend, un item par canal retenu, avec sa propre clé suffixée par
+ * `enqueue.channelIdempotencyKey()`.
+ */
+test("Tx-Core n'impose AUCUN canal : il ne lit plus aucune préférence", () => {
   /**
-   * Un seul événement portant tous les canaux forcerait à rejouer la poussée
-   * quand seul le courriel a échoué. La clé est construite par canal, comme
-   * l'était le document d'outbox.
+   * Les deux lectures fautives ne doivent jamais revenir. Les chercher par leur
+   * nom de champ, pas par le nom de la fonction : quelqu'un qui « répare » le
+   * nom du champ (`notificationSettings` au lieu de `notificationPreferences`)
+   * recréerait la seconde implémentation des préférences, dans le dépôt qui ne
+   * peut pas la tenir à jour.
    */
-  assert.match(SERVICE, /for \(const channel of channels/);
-  assert.match(SERVICE, /buildOutboxIdempotencyKey\(\s*txId,\s*recipient,\s*status,\s*channel/);
+  assert.doesNotMatch(
+    SERVICE,
+    /notificationPreferences/,
+    "Tx-Core relit des préférences : la décision appartient au backend"
+  );
+
+  assert.doesNotMatch(
+    SERVICE,
+    /wantsEmail/,
+    "Tx-Core relit des préférences : la décision appartient au backend"
+  );
+
+  assert.doesNotMatch(
+    SERVICE,
+    /notificationSettings/,
+    "Tx-Core relit les préférences du backend : deuxième implémentation interdite"
+  );
+
+  /** Aucune boucle de canaux, et aucun `channels:` posé dans la charge utile. */
+  assert.doesNotMatch(SERVICE, /for \(const channel of channels/);
+  assert.doesNotMatch(
+    SERVICE,
+    /channels:\s*\[/,
+    "poser `channels` dans l'événement le transforme en RESTRICTION côté " +
+      "backend : Tx-Core se remettrait à décider, par une autre porte"
+  );
+});
+
+test("le type annoncé vient du catalogue partagé, pas d'une chaîne libre", (t) => {
+  assert.match(SERVICE, /resolveTransactionType/);
+  assert.match(SERVICE, /notificationType:\s*resolved\.type/);
+
+  /**
+   * `transactionTypes.js` doit être la COPIE STRICTE de celui du backend : une
+   * divergence ne lève aucune erreur, elle produit deux services qui ne
+   * s'accordent plus sur le type d'une même transaction — donc deux préférences
+   * différentes appliquées au même fait.
+   */
+  const ici = path.join(RACINE, "src", "services", "notifications", "transactionTypes.js");
+  const la = path.join(BACKEND, "services", "notifications", "transactionTypes.js");
+
+  assert.ok(fs.existsSync(ici), "transactionTypes.js manque dans Tx-Core");
+
+  if (fs.existsSync(la)) {
+    assert.strictEqual(
+      fs.readFileSync(ici, "utf8"),
+      fs.readFileSync(la, "utf8"),
+      "transactionTypes.js a divergé entre les deux dépôts — toute modification " +
+        "doit être portée dans les deux, dans le même commit"
+    );
+  } else {
+    /**
+     * Dépôt cloné seul : la comparaison est impossible. On le DIT, comme le
+     * fait déjà la garde de réplication d'`appEnv.test.js` — un test qui se
+     * tait quand il ne vérifie rien est indiscernable d'un test qui passe.
+     */
+    t.diagnostic(
+      "⚠️ NON VÉRIFIÉ : paynoval-backend absent de ce disque (dépôts Git " +
+        "indépendants). La copie stricte de transactionTypes.js n'a PAS été " +
+        "contrôlée par cette exécution."
+    );
+  }
+});
+
+test("la clé d'idempotence ne porte PLUS de suffixe de canal", () => {
+  /**
+   * C'est `enqueue.channelIdempotencyKey()` qui suffixe, côté backend. Suffixer
+   * ici produirait `<hash>:push:push` : inoffensif pour la file, mais
+   * `NotificationLog.idempotencyKey` ne se raccrocherait plus à l'item — la
+   * jointure entre le journal et la file casse en silence.
+   */
+  assert.match(
+    SERVICE,
+    /buildOutboxIdempotencyKey\(txId, recipient, status, scope\)/,
+    "la clé doit désigner le FAIT (transaction, destinataire, statut), pas sa livraison"
+  );
+
+  /**
+   * `scope` n'est pas décoratif : il préserve le préfixe `settlement:` des clés
+   * déjà écrites par l'ancien chemin direct des règlements externes. Sans lui,
+   * un rappel prestataire rejoué renotifierait une confirmation déjà envoyée.
+   */
+  assert.match(SERVICE, /const prefix = scope \? `\$\{scope\}:` : "";/);
 });
 
 test("le consommateur existe et appelle l'API interne du backend", () => {

@@ -1,258 +1,95 @@
 "use strict";
 
-const crypto = require("crypto");
-
-const runtime = require("./runtime");
 /**
- * `notifyTransactionViaGateway` a été retiré de cette destructuration le
- * 2026-09-09 : `runtime` ne l'expose pas, il valait `undefined`, et son seul
- * appelant a été supprimé (voir le bloc commenté dans `notifyParties`).
- */
-const { logger, maybeSessionOpts } = runtime;
-
-/**
- * Modèles liés PARESSEUSEMENT : chaque accès de propriété va chercher le
- * modèle au moment de l'usage. Les déstructurer directement résolvait la
- * connexion Mongo au chargement du fichier, ce qui rendait ce module
- * impossible à charger hors d'un serveur démarré.
- */
-const { User, Notification, NotificationOutbox: Outbox } = runtime.lazyModels([
-  "User",
-  "Notification",
-  "NotificationOutbox",
-]);
-
-/**
- * `Notification` et `NotificationOutbox` viennent de `runtime`, et pointent
- * tous deux sur la base USERS — c'est là que le mobile lit ses notifications
- * et que le worker du backend principal draine la file.
+ * NOTIFICATION DES PARTIES D'UN RÈGLEMENT EXTERNE — SIMPLE DÉLÉGATION
+ * =============================================================================
  *
- * Ce fichier prenait auparavant `Outbox` de `runtime`, un nom qui désignait
- * alors la file du PARRAINAGE, dans la base transactions. Les notifications
- * des règlements externes y partaient donc sans lecteur : jamais délivrées,
- * jamais signalées. `runtime.Outbox` lève désormais une erreur explicite pour
- * que personne n'y retombe.
+ * ⚠️ CE FICHIER NE CONTIENT PLUS NI MODÈLE, NI CONSTRUCTION DE MESSAGE, NI
+ *    LECTURE DE PRÉFÉRENCE. Tout cela a été supprimé le 2026-09-23 avec
+ *    l'écriture directe qu'il portait (voir le bloc devant `notifyParties`).
+ *
+ * Ce qui a disparu, et pourquoi le laisser aurait été dangereux :
+ *
+ *   · `runtime.lazyModels(["User","Notification","NotificationOutbox"])` — les
+ *     modèles des collections DU BACKEND, résolus ici. Les garder sous la main
+ *     rendait la réécriture directe à portée d'une ligne ;
+ *
+ *   · `buildOutboxIdempotencyKey`, `buildSenderCurrency`, `buildReceiverCurrency`,
+ *     `buildSenderAmount`, `buildReceiverAmount`, `buildTxDateIso`,
+ *     `getEmailPreference` — SEPT fonctions qui dupliquaient, à la virgule près,
+ *     celles de `transactionNotificationService`. Deux lectures parallèles des
+ *     mêmes champs d'argent, libres de diverger sans lever d'erreur : le motif
+ *     de défaut le plus coûteux de ce projet. La construction de la clé y était
+ *     déjà signalée comme « même construction que
+ *     `transactionNotificationService` » — un commentaire qui décrit une
+ *     duplication ne la corrige pas ;
+ *
+ *   · `getEmailPreference` lisait `notificationPreferences.email` et
+ *     `wantsEmail`, **deux champs absents de tout schéma** : elle rendait donc
+ *     toujours `true`. Elle n'était même pas appelée — le tableau `channels`
+ *     n'était jamais construit. Aucun e-mail n'a jamais été envoyé par ce
+ *     chemin.
  */
 
 /**
- * Même construction de clé que `transactionNotificationService`, et pour la
- * même raison : ce corps est REJOUABLE. Sans clé, un rejeu sur conflit
- * d'écriture notifierait l'utilisateur deux fois du même règlement. L'index
- * unique partiel de `paynoval.outboxes` fait le reste.
+ * ═════════════════════════════════════════════════════════════════════════════
+ * ⚠️ `notifyParties` NE CONSTRUIT PLUS RIEN — ELLE DÉLÈGUE. 2026-09-23
+ * ═════════════════════════════════════════════════════════════════════════════
+ *
+ * ── Ce qu'elle faisait, et pourquoi c'était grave ───────────────────────────
+ *
+ * Elle écrivait DIRECTEMENT dans deux collections du backend principal :
+ * `notifications` (la boîte de réception de l'application) et `outboxes` (la
+ * file de livraison), avec **le schéma de Tx-Core**. C'est le dernier écrivain
+ * direct qui subsistait : `transactionNotificationService` avait été converti au
+ * bus le 2026-09-10, celui-ci avait été oublié. Le chemin concerné est celui des
+ * **règlements externes — mobile money et carte** (`externalSettlementController`,
+ * trois appels : deux `confirmed`, un `failed`).
+ *
+ * Quatre défauts mesurés, tous invisibles dans les journaux :
+ *
+ * 1. **NOTIFICATION IN-APP VIDE.** Le document créé ne portait ni `title` ni
+ *    `message` — seulement `type` et `data`. Le schéma de Tx-Core les déclare
+ *    optionnels avec `default: ""`, celui du backend les déclare **requis**.
+ *    Deux schémas pour une collection : l'écriture passait, et l'utilisateur
+ *    voyait une carte vide dans sa liste après avoir reçu de l'argent.
+ *
+ * 2. **PUSH ANONYME.** L'item d'outbox ne portait pas de `title`/`message` non
+ *    plus. Le worker retombe sur ses valeurs par défaut : l'utilisateur recevait
+ *    « PayNoval — Nouvelle notification » pour une confirmation d'encaissement.
+ *
+ * 3. **AUCUN E-MAIL.** Le champ `channels` était absent, et
+ *    `outboxPolicy.normalizeChannels()` retombe sur `['push']`. Aucun e-mail
+ *    n'est jamais parti pour un règlement mobile money ou carte.
+ *
+ * 4. **AUCUNE PRÉFÉRENCE, AUCUN GABARIT, AUCUN JOURNAL** — l'écriture directe
+ *    contourne par construction `dispatchNotification`.
+ *
+ * ── Ce qui la remplace ─────────────────────────────────────────────────────
+ *
+ * Exactement le chemin des transferts internes : `notifyTransactionEvent`,
+ * qui publie `notification.requested.v1` DANS la transaction, avec le type du
+ * catalogue, le titre, le message, les variables et les métadonnées. Un seul
+ * chemin de notification pour tous les règlements, interne ou externe.
+ *
+ * ⚠️ `scope: "settlement"` PRÉSERVE LA DÉDUPLICATION HISTORIQUE.
+ * Les clés d'idempotence écrites par l'ancienne version dérivaient de
+ * `settlement:${txId}:${userId}:${status}`. Le paramètre `scope` fait produire
+ * le même préfixe : un rappel prestataire rejoué — ce que fait `settlementReplay`
+ * — reste dédoublonné comme avant. Sans lui, une confirmation d'encaissement
+ * déjà envoyée serait repartie une seconde fois au premier rejeu.
+ *
+ * ⚠️ NE PAS REMETTRE D'ÉCRITURE DIRECTE ICI. `runtime.Outbox` lève déjà une
+ * erreur explicite pour empêcher de retomber dans la confusion des deux bases ;
+ * ce commentaire est la garde contre la variante suivante — écrire dans la bonne
+ * base, mais sans passer par le moteur.
  */
-function buildOutboxIdempotencyKey(txId, userId, status) {
-  return crypto
-    .createHash("sha256")
-    .update(`settlement:${txId}:${userId}:${status}`)
-    .digest("hex");
-}
-
-const { toFloat, pickCurrency } = require("./helpers");
-
-function buildTxDateIso(tx) {
-  return (
-    tx?.createdAt?.toISOString?.() ||
-    tx?.updatedAt?.toISOString?.() ||
-    new Date().toISOString()
-  );
-}
-
-function buildSenderCurrency(tx, senderCurrencySymbol) {
-  return pickCurrency(
-    senderCurrencySymbol,
-    tx?.senderCurrencySymbol,
-    tx?.senderCurrencyCode,
-    tx?.currency,
-    tx?.fromCurrency
-  );
-}
-
-function buildReceiverCurrency(tx, senderCurrency) {
-  return pickCurrency(
-    tx?.localCurrencySymbol,
-    tx?.localCurrencyCode,
-    tx?.receiverCurrency,
-    tx?.destinationCurrency,
-    tx?.toCurrency,
-    senderCurrency
-  );
-}
-
-function buildSenderAmount(tx) {
-  return toFloat(
-    tx?.amount ??
-      tx?.grossAmount ??
-      tx?.grossFrom ??
-      tx?.sourceAmount,
-    0
-  );
-}
-
-function buildReceiverAmount(tx) {
-  return toFloat(
-    tx?.localAmount ??
-      tx?.netTo ??
-      tx?.destinationAmount ??
-      tx?.receivedAmount,
-    0
-  );
-}
-
-function getEmailPreference(userLike) {
-  return userLike?.notificationPreferences?.email ?? userLike?.wantsEmail ?? true;
-}
-
 async function notifyParties(tx, status, session, senderCurrencySymbol) {
-  try {
-    const sessOpts = maybeSessionOpts(session);
+  const { notifyTransactionEvent } = require("../transactionNotificationService");
 
-    let sender = null;
-    let receiver = null;
-
-    try {
-      sender = await User.findById(tx.sender)
-        .select("email fullName wantsEmail notificationPreferences")
-        .lean()
-        .session(sessOpts.session || null);
-    } catch (err) {
-      logger?.warn?.("[notifyParties] sender fetch failed", err?.message || err);
-    }
-
-    try {
-      receiver = await User.findById(tx.receiver)
-        .select("email fullName wantsEmail notificationPreferences")
-        .lean()
-        .session(sessOpts.session || null);
-    } catch (err) {
-      logger?.warn?.("[notifyParties] receiver fetch failed", err?.message || err);
-    }
-
-    if (!sender || !receiver) {
-      logger?.warn?.("[notifyParties] sender or receiver missing", {
-        txId: tx?._id?.toString?.() || null,
-        hasSender: !!sender,
-        hasReceiver: !!receiver,
-      });
-      return;
-    }
-
-    const senderCurrency = buildSenderCurrency(tx, senderCurrencySymbol);
-    const receiverCurrency = buildReceiverCurrency(tx, senderCurrency);
-
-    const senderAmount = buildSenderAmount(tx);
-    const receiverAmount = buildReceiverAmount(tx);
-
-    const receiverEmail = tx?.recipientEmail || receiver.email;
-    const senderWantsEmail = getEmailPreference(sender);
-    const receiverWantsEmail = getEmailPreference(receiver);
-
-    const dataSender = {
-      transactionId: tx._id.toString(),
-      amount: senderAmount,
-      currency: senderCurrency,
-      senderEmail: sender.email,
-      receiverEmail,
-      reference: tx.reference,
-      status,
-    };
-
-    const dataReceiver = {
-      transactionId: tx._id.toString(),
-      amount: receiverAmount,
-      currency: receiverCurrency,
-      senderEmail: sender.email,
-      receiverEmail,
-      reference: tx.reference,
-      status,
-    };
-
-    await Notification.create(
-      [
-        {
-          recipient: sender._id.toString(),
-          type: `transaction_${status}`,
-          data: dataSender,
-          read: false,
-          date: new Date(),
-        },
-        {
-          recipient: receiver._id.toString(),
-          type: `transaction_${status}`,
-          data: dataReceiver,
-          read: false,
-          date: new Date(),
-        },
-      ],
-      sessOpts
-    );
-
-    await Outbox.insertMany(
-      [
-        {
-          service: "notifications",
-          event: `transaction_${status}`,
-          payload: { userId: sender._id.toString(), data: dataSender },
-          // 2 = HIGH. Voir le commentaire du champ `priority` dans
-          // `models/Outbox.js` : sans lui, ces envois passaient devant les
-          // alertes de sécurité.
-          priority: 2,
-          idempotencyKey: buildOutboxIdempotencyKey(
-            tx._id.toString(),
-            sender._id.toString(),
-            status
-          ),
-        },
-        {
-          service: "notifications",
-          event: `transaction_${status}`,
-          payload: { userId: receiver._id.toString(), data: dataReceiver },
-          priority: 2,
-          idempotencyKey: buildOutboxIdempotencyKey(
-            tx._id.toString(),
-            receiver._id.toString(),
-            status
-          ),
-        },
-      ],
-      { ordered: false, ...sessOpts }
-    );
-
-    /**
-     * ═══════════════════════════════════════════════════════════════════════
-     * IL Y AVAIT ICI UN SECOND CANAL DE NOTIFICATION — RETIRÉ LE 2026-09-09
-     * ═══════════════════════════════════════════════════════════════════════
-     *
-     * Un appel direct `notifyTransactionViaGateway(status, {...}).catch(...)`
-     * suivait l'écriture d'outbox ci-dessus. Il était cassé DEPUIS TOUJOURS, et
-     * de la façon la plus discrète qui soit :
-     *
-     *   • `notifyTransactionViaGateway` était déstructuré de `runtime`, qui ne
-     *     l'expose pas. Il valait donc `undefined` ;
-     *   • l'appeler levait un `TypeError` **synchrone** — avant que la promesse
-     *     n'existe. Le `.catch()` écrit pour ce cas était **inatteignable** ;
-     *   • le `TypeError` remontait au `catch` général ci-dessous, qui
-     *     journalisait `[notifyParties] error` — le message générique, jamais
-     *     le message spécifique. Rien, dans les journaux, ne désignait ce bloc.
-     *
-     * Il n'a pas été réparé, il a été RETIRÉ, pour deux raisons :
-     *
-     *   1. **La notification est déjà durable.** L'`insertMany` ci-dessus écrit
-     *      un événement d'outbox porteur d'une clé d'idempotence, dans la MÊME
-     *      transaction que le fait métier. Un worker le draine. C'est le motif
-     *      « transactional outbox » — un seul canal, rejouable, dédoublonné.
-     *   2. **Cet appel était un envoi réseau À L'INTÉRIEUR d'une transaction
-     *      Mongo** (`notifyParties` est appelée depuis le bloc transactionnel
-     *      de `externalSettlementController`). Le réparer sans le déplacer
-     *      aurait armé un défaut pire que celui qu'il corrigeait : une
-     *      transaction annulée après l'envoi aurait notifié un client d'un
-     *      règlement qui n'a pas eu lieu, sans clé d'idempotence pour rattraper.
-     *
-     * ⚠️ NE PAS LE RÉINTRODUIRE. Deux canaux pour un même message, c'est un
-     * double envoi le jour où le premier remarche.
-     */
-  } catch (err) {
-    logger?.error?.("[notifyParties] error", err?.message || err);
-  }
+  return notifyTransactionEvent(tx, status, session, senderCurrencySymbol, {
+    scope: "settlement",
+  });
 }
 
 module.exports = {

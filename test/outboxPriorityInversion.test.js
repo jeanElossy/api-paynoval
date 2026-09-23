@@ -43,26 +43,75 @@ test("le schéma Outbox de Tx Core déclare bien `priority`", () => {
   assert.match(src, /max:\s*9/);
 });
 
-test("les DEUX producteurs de Tx Core posent une priorité explicite", () => {
+/**
+ * ⚠️ CE TEST A ÉTÉ REVU LE 2026-09-23 — IL LE DEMANDAIT LUI-MÊME.
+ *
+ * Il exigeait que les DEUX producteurs de Tx-Core contiennent `insertMany`, et
+ * son propre message d'échec disait : « n'écrit plus dans la file — ce test doit
+ * être revu ». C'est arrivé : `shared/notifications.js` n'écrit plus rien, il
+ * délègue à `transactionNotificationService`, qui publie un événement de domaine.
+ *
+ * L'invariant protégé ne change pas d'un iota : **une notification de
+ * transaction ne doit jamais passer devant une alerte de sécurité**. Ce qui
+ * change, c'est où la priorité doit être posée — dans la charge utile de
+ * l'événement, puisque c'est elle que le backend recopie dans l'item d'outbox.
+ *
+ * Le test est plus strict qu'avant sur un point : il vérifie AUSSI qu'aucun
+ * producteur n'est revenu à l'écriture directe. L'ancienne version exigeait
+ * l'inverse.
+ */
+test("Tx-Core pose une priorité explicite dans l'événement publié", () => {
+  const src = lire(
+    path.join(SRC, "services", "transactions", "transactionNotificationService.js")
+  );
+
+  assert.match(
+    src,
+    /priority:\s*2/,
+    "l'événement part sans priorité : le backend écrira un item sans `priority`, " +
+      "qui trie en BSON comme `null` — donc AVANT les alertes de sécurité CRITICAL"
+  );
+
+  /** La priorité doit voyager DANS l'événement, pas rester une variable locale. */
+  assert.match(src, /publishDomainEvent\(/);
+});
+
+test("plus AUCUN producteur de Tx-Core n'écrit directement dans la file", () => {
+  /**
+   * C'est la contrainte inverse de celle que ce test portait avant, et c'est
+   * voulu : deux services écrivant `outboxes` avec deux schémas est le défaut
+   * refermé ici. `shared/notifications.js` était le dernier — il écrivait des
+   * items sans `title`, sans `message` et sans `channels`, ce qui produisait un
+   * push « PayNoval / Nouvelle notification » et jamais d'e-mail.
+   */
   const producteurs = [
     path.join(SRC, "services", "transactions", "transactionNotificationService.js"),
     path.join(SRC, "services", "transactions", "shared", "notifications.js"),
   ];
 
+  /**
+   * ⚠️ COMMENTAIRES DÉPOUILLÉS AVANT L'ASSERTION.
+   *
+   * Les deux fichiers DÉCRIVENT en commentaire l'écriture directe qu'ils ne font
+   * plus (« `outboxes` → `Outbox.insertMany([...])` »). Chercher la chaîne dans
+   * le source brut fait donc échouer le test sur sa propre documentation — et la
+   * seule façon de le faire passer serait de supprimer l'explication qui empêche
+   * la faute de revenir. Même dépouillement que `notificationsOnBus.test.js`.
+   */
+  const sansCommentaires = (src) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
   for (const p of producteurs) {
-    const src = lire(p);
+    const src = sansCommentaires(lire(p));
 
-    assert.ok(
-      src.includes("insertMany"),
-      `${path.basename(p)} n'écrit plus dans la file — ce test doit être revu`
-    );
-
-    assert.match(
-      src,
-      /priority:\s*2/,
-      `${path.basename(p)} écrit dans la file sans poser de priorité : ses ` +
-        "documents repasseront devant les alertes de sécurité"
-    );
+    for (const ecriture of [".insertMany(", "Notification.create(", "Outbox.create("]) {
+      assert.ok(
+        !src.includes(ecriture),
+        `${path.basename(p)} est revenu à l'écriture directe (« ${ecriture} ») : ` +
+          "il écrit dans une collection dont le backend déclare le schéma, donc " +
+          "sans ses préférences, ses gabarits ni son journal"
+      );
+    }
   }
 });
 

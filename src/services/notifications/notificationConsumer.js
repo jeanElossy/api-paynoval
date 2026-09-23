@@ -102,16 +102,46 @@ async function livrer(charge) {
         "content-type": "application/json",
         "x-internal-token": jeton,
       },
+      /**
+       * ⚠️ CE CORPS EST UN RELAIS, PAS UNE DÉCISION.
+       *
+       * Deux champs ont disparu de ce relais, et leur disparition est le
+       * correctif :
+       *
+       * 1. `channels` N'EST PLUS FORCÉ À `["push"]`. Il était posé en dur quand
+       *    le producteur n'en envoyait pas — donc un e-mail demandé par le
+       *    catalogue ne partait jamais par ce chemin. Le champ n'est transmis
+       *    QUE si le producteur l'a explicitement rempli : côté backend,
+       *    `channels` absent signifie « ceux du catalogue », alors que
+       *    `channels: ['push']` est une RESTRICTION qui coupe l'e-mail.
+       *
+       * 2. `meta` EST DÉSORMAIS TRANSMIS. Il ne l'était pas : le producteur le
+       *    plaçait dans `data.meta`, la route interne lisait `corps.meta`, et
+       *    la valeur n'arrivait donc jamais. Comme c'est `meta.category ===
+       *    'transaction'` qui fait choisir le gabarit e-mail transactionnel,
+       *    **l'e-mail de confirmation de virement partait habillé en message
+       *    générique** — sans tableau montant/frais/total, sans date au fuseau
+       *    du destinataire. Rien ne le signalait.
+       *
+       * `variables` est ajouté : ce sont les valeurs des `{{variables}}` des
+       * gabarits. Le backend leur applique une liste blanche par type
+       * (`template.render()`), donc rien d'autre que les variables déclarées
+       * n'atteint le message.
+       */
       body: JSON.stringify({
         recipient: charge.recipient,
-        type: charge.notificationType || "",
+        type: charge.notificationType || charge.legacyType || "",
         title: charge.title || "",
         message: charge.message || "",
-        channels: Array.isArray(charge.channels) ? charge.channels : ["push"],
+        ...(Array.isArray(charge.channels) && charge.channels.length
+          ? { channels: charge.channels }
+          : {}),
         priority: charge.priority,
         idempotencyKey: charge.idempotencyKey,
-        aggregateType: "transaction",
+        aggregateType: charge.aggregateType || "transaction",
         aggregateId: charge.aggregateId || "",
+        variables: charge.variables || {},
+        meta: charge.meta || {},
         data: charge.data || {},
       }),
       signal: controleur.signal,

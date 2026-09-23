@@ -27,6 +27,18 @@ const {
 } = require("../../utils/txMoneyFields");
 
 /**
+ * Traduction (statut, rôle) → type du catalogue de notifications.
+ *
+ * ⚠️ Ce module est une COPIE STRICTE de
+ * `paynoval-backend/services/notifications/transactionTypes.js` — même md5.
+ * Toute modification doit être portée dans les deux dépôts, dans le même
+ * commit : une divergence ne lève aucune erreur, elle produit deux services qui
+ * ne s'accordent plus sur le type d'une même transaction, donc deux préférences
+ * différentes appliquées au même fait.
+ */
+const { resolveTransactionType } = require("../notifications/transactionTypes");
+
+/**
  * ⚠️ CE SERVICE NE RÉSOUT PLUS AUCUN MODÈLE DU BACKEND — 2026-09-10.
  *
  * Il détenait `Notification` et `Outbox`, résolus sur la connexion des
@@ -96,6 +108,21 @@ function formatAmount(amount, currency) {
   return suffix ? `${formattedNumber} ${suffix}` : formattedNumber;
 }
 
+/**
+ * Prénom d'affichage, pour la variable `{{firstName}}` des gabarits.
+ *
+ * Rend `""` plutôt qu'un repli du genre « Client » : les gabarits savent
+ * absorber un prénom vide (« Bonjour, » au lieu de « Bonjour Jean, »), alors
+ * qu'un faux prénom serait imprimé tel quel dans un e-mail de virement.
+ */
+function firstNameOf(userLike) {
+  const full = String(userLike?.fullName || "").trim();
+
+  if (full) return full.split(/\s+/)[0] || "";
+
+  return "";
+}
+
 function buildTxDateIso(tx) {
   return (
     tx?.createdAt?.toISOString?.() ||
@@ -150,13 +177,44 @@ function buildReceiverAmount(tx) {
   );
 }
 
-function getEmailPreference(userLike) {
-  return userLike?.notificationPreferences?.email ?? userLike?.wantsEmail ?? true;
-}
-
-function getPushPreference(userLike) {
-  return userLike?.notificationPreferences?.push ?? true;
-}
+/**
+ * ═════════════════════════════════════════════════════════════════════════════
+ * ⚠️ `getEmailPreference` ET `getPushPreference` ONT ÉTÉ RETIRÉES — ET IL FAUT
+ *    SAVOIR POURQUOI, SINON ELLES REVIENDRONT.
+ * ═════════════════════════════════════════════════════════════════════════════
+ *
+ * Elles lisaient :
+ *
+ *     userLike?.notificationPreferences?.email ?? userLike?.wantsEmail ?? true
+ *     userLike?.notificationPreferences?.push  ?? true
+ *
+ * **Ces deux champs n'existent dans aucun schéma.** Le backend principal stocke
+ * les préférences dans `User.notificationSettings` — `{ channels: {email, push,
+ * inApp}, types: {...} }`. Le code du backend le documente lui-même
+ * (`services/referralBonusNotificationService.js`, en-tête de la projection).
+ *
+ * Les deux lectures retombaient donc TOUJOURS sur `?? true`. Mesuré : **chaque
+ * notification de transaction partait en push ET en e-mail, quelles que soient
+ * les préférences réelles de l'utilisateur.** Quelqu'un qui avait coupé le push
+ * dans l'application en recevait un à chaque virement — l'inverse exact de
+ * l'invariant du produit, sur le volume principal du système.
+ *
+ * Le défaut n'était pas la valeur par défaut, c'était **l'endroit de la
+ * décision**. Tx-Core n'a pas à savoir ce qu'un utilisateur a coché : il ne
+ * détient ni le schéma `User`, ni le catalogue des types, ni l'état des
+ * appareils, ni les quotas. Réparer le nom du champ aurait donné une deuxième
+ * implémentation des préférences, dans un dépôt qui ne peut pas la tenir à jour
+ * — le motif de défaut que ce projet a déjà payé quatre fois (`eligibility.js`
+ * en recense quatre exemplaires incompatibles avant sa création).
+ *
+ * Tx-Core annonce donc le FAIT (« ce transfert est confirmé, voici le type, le
+ * montant et le destinataire »). Le backend décide des canaux, dans
+ * `dispatchNotification` : catalogue → configuration admin → préférences →
+ * disponibilité du canal → permission de l'appareil → quota.
+ *
+ * C'est la séparation que tiennent Stripe et Wise : le moteur de paiement émet
+ * un événement, le service de notification décide qui reçoit quoi et par où.
+ */
 
 function buildMessages(status, ctx) {
   const {
@@ -283,10 +341,35 @@ function buildNotificationData(tx, status, amount, currency, sender, receiver, o
   };
 }
 
-function buildOutboxIdempotencyKey(txId, userId, status, channel) {
+/**
+ * Clé d'idempotence d'un (transaction, destinataire, statut).
+ *
+ * ⚠️ PLUS DE SUFFIXE DE CANAL, ET C'EST UN CORRECTIF.
+ *
+ * La version précédente incluait le canal (`…:${status}:${channel}`) parce
+ * qu'elle publiait UN ÉVÉNEMENT PAR CANAL — c'était elle qui choisissait les
+ * canaux. Elle ne les choisit plus : le backend décide, donc l'événement est
+ * unique et la clé désigne le FAIT, pas sa livraison.
+ *
+ * C'est `enqueue.channelIdempotencyKey()`, côté backend, qui suffixe par canal
+ * au moment de la mise en file (`<clé>:push`, `<clé>:email`). Laisser un suffixe
+ * ici produirait `<hash>:push:push` : inoffensif pour la file, mais le journal
+ * (`NotificationLog.idempotencyKey`) ne se raccrocherait plus à l'item — la
+ * jointure casse en silence, exactement ce que l'en-tête d'`enqueue.js`
+ * interdit.
+ *
+ * ⚠️ `scope` PRÉSERVE LA DÉDUPLICATION HISTORIQUE DES RÈGLEMENTS EXTERNES.
+ * `shared/notifications.js` construisait ses clés sur `settlement:${txId}:…`.
+ * En déléguant ici, il passe `scope: 'settlement'` : les clés gardent leur
+ * préfixe, donc un rappel prestataire rejoué reste dédoublonné comme avant.
+ * Sans ce paramètre, la même confirmation aurait pu partir une seconde fois.
+ */
+function buildOutboxIdempotencyKey(txId, userId, status, scope = "") {
+  const prefix = scope ? `${scope}:` : "";
+
   return crypto
     .createHash("sha256")
-    .update(`${txId}:${userId}:${status}:${channel}`)
+    .update(`${prefix}${txId}:${userId}:${status}`)
     .digest("hex");
 }
 
@@ -312,17 +395,45 @@ async function enqueueUserNotification({
   tx,
   status,
   recipientId,
+  role,
   title,
   message,
   type,
   data,
-  channels = ["push"],
+  variables = {},
+  scope = "",
   sessOpts = {},
 }) {
   const recipient = String(recipientId || "");
   const txId = tx?._id?.toString?.() || "";
 
   if (!recipient) return;
+
+  /**
+   * Type du CATALOGUE, résolu ici et pas chez le consommateur.
+   *
+   * `transactionTypes.js` est dupliqué à l'identique dans les deux dépôts (voir
+   * son en-tête). Le résoudre côté producteur a un avantage précis : un statut
+   * non déclaré se signale **dans les journaux du service qui l'a introduit**,
+   * au moment où il l'introduit — pas trois sauts plus loin, dans un autre
+   * dépôt, où personne ne le relie au changement qui l'a causé.
+   */
+  const resolved = resolveTransactionType({ status, role });
+
+  if (!resolved.matched) {
+    logger?.warn?.(
+      "[transactionNotificationService] statut non declare dans transactionTypes.js",
+      {
+        status: String(status || ""),
+        role: String(role || ""),
+        repli: resolved.type,
+        txId,
+        consequence:
+          "la notification part avec un type approximatif ; declarer ce statut " +
+          "dans transactionTypes.js (LES DEUX depots)",
+      }
+    );
+  }
 
   /**
    * ══════════════════════════════════════════════════════════════════════════
@@ -369,69 +480,144 @@ async function enqueueUserNotification({
    * source : le backend s'en sert pour `dedupeKey` et pour l'unicité de son
    * outbox. La changer ferait réapparaître les notifications déjà envoyées.
    *
-   * ⚠️ UN ÉVÉNEMENT PAR CANAL, comme avant un document d'outbox par canal. Un
-   * seul événement portant tous les canaux rendrait la clé d'idempotence
-   * ambiguë : un échec sur le courriel forcerait à rejouer la poussée.
+   * ⚠️ UN SEUL ÉVÉNEMENT PAR DESTINATAIRE — ET C'EST UN CHANGEMENT.
+   *
+   * La version précédente publiait UN ÉVÉNEMENT PAR CANAL, parce qu'elle
+   * choisissait les canaux : la clé devait alors les distinguer, sinon un échec
+   * e-mail aurait forcé à rejouer le push.
+   *
+   * Ce n'est plus Tx-Core qui choisit. Le backend décide des canaux d'après le
+   * catalogue et les préférences, puis met **un item d'outbox par canal retenu**
+   * avec sa propre clé suffixée (`<clé>:push`, `<clé>:email`). La séparation par
+   * canal existe donc toujours, exactement où elle doit être : dans la file.
+   *
+   * Publier un événement par canal ici serait devenu faux : Tx-Core aurait
+   * annoncé deux fois le même fait, et le backend aurait évalué deux fois les
+   * mêmes préférences pour aboutir au même verdict.
    */
-  for (const channel of channels.length ? channels : ["push"]) {
-    await publishDomainEvent(
-      {
-        name: "notification.requested.v1",
-        aggregateId: txId || recipient,
-        occurredAt: new Date(),
-        payload: {
-          recipient,
-          notificationType: String(type || ""),
-          title: String(title || ""),
-          message: String(message || ""),
-          channels: [channel],
-          /**
-           * 2 = HIGH dans `paynoval-backend/services/notifications/priority.js` :
-           * « Transactions, cagnottes : l'utilisateur attend le message ».
-           * Sans cette valeur, le champ était absent et triait AVANT les
-           * alertes de sécurité `CRITICAL`.
-           */
-          priority: 2,
-          idempotencyKey: buildOutboxIdempotencyKey(
+  const effectiveRole =
+    role || (String(recipient) === String(tx?.sender || "") ? "sender" : "receiver");
+
+  await publishDomainEvent(
+    {
+      name: "notification.requested.v1",
+      aggregateId: txId || recipient,
+      occurredAt: new Date(),
+      payload: {
+        recipient,
+
+        /**
+         * Le type du CATALOGUE. `legacyType` reste transmis à côté : c'est lui
+         * que l'application mobile lit aujourd'hui pour choisir l'icône et la
+         * couleur d'une notification in-app (`utils/notifications/
+         * notificationUtils.js`). Le retirer d'un coup ferait afficher toutes
+         * les notifications de transaction avec le style par défaut sur tous les
+         * téléphones déjà déployés.
+         */
+        notificationType: resolved.type,
+        legacyType: String(type || ""),
+
+        title: String(title || ""),
+        message: String(message || ""),
+
+        /**
+         * ⚠️ AUCUN CANAL DEMANDÉ, VOLONTAIREMENT.
+         *
+         * `channels` absent signifie « ceux du catalogue ». Envoyer une liste
+         * ici la transformerait en RESTRICTION côté backend (il intersecte), et
+         * Tx-Core se remettrait à décider — par une autre porte.
+         */
+
+        /**
+         * 2 = HIGH dans `paynoval-backend/services/notifications/priority.js` :
+         * « Transactions, cagnottes : l'utilisateur attend le message ».
+         * Sans cette valeur, le champ était absent et triait AVANT les
+         * alertes de sécurité `CRITICAL`.
+         */
+        priority: 2,
+
+        idempotencyKey: buildOutboxIdempotencyKey(txId, recipient, status, scope),
+
+        aggregateType: "transaction",
+        aggregateId: txId,
+
+        /** Valeurs des `{{variables}}` des gabarits. Liste blanche appliquée
+         *  côté backend par `template.render()` : rien d'autre ne passe. */
+        variables: variables && typeof variables === "object" ? variables : {},
+
+        /**
+         * ⚠️ `meta` AU PREMIER NIVEAU — CORRECTIF.
+         *
+         * Il était imbriqué dans `data.meta`, alors que la route interne lisait
+         * `corps.meta`. Le champ arrivait donc toujours vide côté backend, et
+         * `meta.category === 'transaction'` — la condition qui fait choisir le
+         * gabarit e-mail transactionnel — n'était jamais vraie. **L'e-mail de
+         * confirmation de virement partait avec le gabarit générique**, sans
+         * tableau montant/frais/total et sans date au fuseau du destinataire.
+         * Rien ne le signalait : l'e-mail partait, simplement mal habillé.
+         *
+         * Il reste AUSSI dans `data.meta` ci-dessous : les événements déjà
+         * publiés le portent là, et le backend lit les deux emplacements.
+         */
+        meta: {
+          type: resolved.type,
+          legacyType: String(type || ""),
+          status: String(status || ""),
+          txId,
+          reference: tx?.reference || "",
+          role: effectiveRole,
+          category: "transaction",
+        },
+
+        data: {
+          ...(data && typeof data === "object" ? data : {}),
+          meta: {
+            type: resolved.type,
+            legacyType: String(type || ""),
+            status: String(status || ""),
             txId,
-            recipient,
-            status,
-            channel
-          ),
-          aggregateId: txId,
-          data: {
-            ...(data && typeof data === "object" ? data : {}),
-            meta: {
-              type: String(type || ""),
-              status: String(status || ""),
-              txId,
-              reference: tx?.reference || "",
-              role:
-                String(recipient) === String(tx?.sender || "")
-                  ? "sender"
-                  : "receiver",
-              category: "transaction",
-            },
+            reference: tx?.reference || "",
+            role: effectiveRole,
+            category: "transaction",
           },
         },
       },
-      sessOpts?.session || null
-    );
-  }
+    },
+    sessOpts?.session || null
+  );
 }
 
-async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol) {
+/**
+ * @param {object}  tx
+ * @param {string}  status
+ * @param {object}  session
+ * @param {string}  senderCurrencySymbol
+ * @param {object}  [options]
+ * @param {string}  [options.scope]  préfixe de la clé d'idempotence. Vide pour
+ *   les transferts internes ; `"settlement"` pour les règlements externes, dont
+ *   `shared/notifications.js` délègue ici — c'est ce qui conserve la
+ *   déduplication des clés déjà écrites par l'ancien chemin direct, et donc
+ *   empêche un rappel prestataire rejoué de notifier une seconde fois.
+ */
+async function notifyTransactionEvent(
+  tx,
+  status,
+  session,
+  senderCurrencySymbol,
+  options = {}
+) {
   try {
     const sessOpts = maybeSessionOpts(session);
+    const scope = String(options?.scope || "");
 
     const [sender, receiver] = await Promise.all([
       runtime.User.findById(tx.sender)
-        .select("_id email fullName wantsEmail notificationPreferences preferences countryCode country")
+        .select("_id email fullName preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),
 
       runtime.User.findById(tx.receiver)
-        .select("_id email fullName wantsEmail notificationPreferences preferences countryCode country")
+        .select("_id email fullName preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),
     ]);
@@ -489,23 +675,47 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       }
     );
 
-    const senderChannels = [];
-    const receiverChannels = [];
+    /**
+     * ⚠️ PLUS AUCUN CALCUL DE CANAUX ICI.
+     *
+     * Ce bloc lisait `notificationPreferences` et `wantsEmail` — deux champs
+     * qui n'existent dans aucun schéma — et retombait donc TOUJOURS sur
+     * « push + e-mail autorisés ». Voir le long commentaire qui a remplacé
+     * `getPushPreference` / `getEmailPreference` en tête de ce fichier.
+     *
+     * Les canaux sont désormais décidés par le backend, dans
+     * `dispatchNotification` : catalogue → configuration admin → préférences de
+     * l'utilisateur → disponibilité du canal → permission de l'appareil → quota.
+     */
+    const senderVariables = {
+      firstName: firstNameOf(sender),
+      amount: senderAmount,
+      currency: senderCurrency,
+      recipientName: receiver.fullName || receiver.email || "",
+      transactionId: tx?._id?.toString?.() || "",
+      reference: tx?.reference || "",
+    };
 
-    if (getPushPreference(sender)) senderChannels.push("push");
-    if (getPushPreference(receiver)) receiverChannels.push("push");
-    if (getEmailPreference(sender)) senderChannels.push("email");
-    if (getEmailPreference(receiver)) receiverChannels.push("email");
+    const receiverVariables = {
+      firstName: firstNameOf(receiver),
+      amount: receiverAmount,
+      currency: receiverCurrency,
+      senderName: sender.fullName || sender.email || "",
+      transactionId: tx?._id?.toString?.() || "",
+      reference: tx?.reference || "",
+    };
 
     await enqueueUserNotification({
       tx,
       status,
       recipientId: sender._id.toString(),
+      role: "sender",
       title: messages.sender.title,
       message: messages.sender.message,
       type: messages.sender.type,
       data: senderData,
-      channels: senderChannels,
+      variables: senderVariables,
+      scope,
       sessOpts,
     });
 
@@ -513,11 +723,13 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
       tx,
       status,
       recipientId: receiver._id.toString(),
+      role: "receiver",
       title: messages.receiver.title,
       message: messages.receiver.message,
       type: messages.receiver.type,
       data: receiverData,
-      channels: receiverChannels,
+      variables: receiverVariables,
+      scope,
       sessOpts,
     });
 
@@ -540,9 +752,14 @@ async function notifyTransactionEvent(tx, status, session, senderCurrencySymbol)
         status,
         senderId: sender._id?.toString?.(),
         receiverId: receiver._id?.toString?.(),
-        senderChannels,
-        receiverChannels,
-        targetDb: "users/main",
+        /**
+         * Les canaux ne sont plus décidés ici, donc plus journalisés ici : les
+         * inscrire serait affirmer une livraison qu'on ne décide plus. Le
+         * verdict canal par canal est journalisé par le backend, dans
+         * `NotificationLog`, avec le MOTIF de chaque refus.
+         */
+        notificationType: resolveTransactionType({ status, role: "sender" }).type,
+        decidedBy: "principal/dispatchNotification",
       }
     );
   } catch (err) {
