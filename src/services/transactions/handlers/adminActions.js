@@ -1,6 +1,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { getTxMetrics } = require("../../txMetrics");
 
 const runtime = require("../shared/runtime");
 const { debitReceiverFunds, refundSenderFunds, chargeCancellationFee, startTxSession, maybeSessionOpts, runInTransaction, assertTransition, safeCommit } = runtime;
@@ -138,6 +139,19 @@ async function refundController(req, res, next) {
       }
 
       assertTransition(tx.status, "refunded");
+      /**
+       * ⚠️ MESURE POSÉE APRÈS LA GARDE, JAMAIS AVANT.
+       *
+       * `assertTransition` LÈVE sur une transition interdite. Compter avant elle
+       * enregistrerait des issues qui n'ont jamais eu lieu — une série de
+       * supervision qui raconte des transitions refusées est pire qu'une série
+       * vide, parce qu'elle a l'air d'une mesure.
+       *
+       * `observeTransactionDoc` ne lève jamais et retombe sur un objet inerte tant
+       * que le registre n'est pas posé.
+       */
+      getTxMetrics().observeTransactionDoc(tx, "refunded");
+
 
       if (!tx.beneficiaryCredited || !tx.fundsCaptured) {
         throw createError(409, "Transaction non exécutable en remboursement");
@@ -301,6 +315,19 @@ async function validateController(req, res, next) {
     // court-circuiter ici produirait un état que le reste de la chaîne
     // considère comme impossible.
     assertTransition(tx.status, normalized);
+    /**
+     * ⚠️ MESURE POSÉE APRÈS LA GARDE, JAMAIS AVANT.
+     *
+     * `assertTransition` LÈVE sur une transition interdite. Compter avant elle
+     * enregistrerait des issues qui n'ont jamais eu lieu — une série de
+     * supervision qui raconte des transitions refusées est pire qu'une série
+     * vide, parce qu'elle a l'air d'une mesure.
+     *
+     * `observeTransactionDoc` ne lève jamais et retombe sur un objet inerte tant
+     * que le registre n'est pas posé.
+     */
+    getTxMetrics().observeTransactionDoc(tx, normalized);
+
 
     /* On ne déclare pas un succès que la comptabilité ne porte pas. Ces
        drapeaux sont posés lors du mouvement réel ; absents, l'argent n'a pas
@@ -469,6 +496,19 @@ async function relaunchController(req, res, next) {
      * `assertTransition` redevient la seule autorité.
      */
     assertTransition(tx.status, "relaunch");
+    /**
+     * ⚠️ MESURE POSÉE APRÈS LA GARDE, JAMAIS AVANT.
+     *
+     * `assertTransition` LÈVE sur une transition interdite. Compter avant elle
+     * enregistrerait des issues qui n'ont jamais eu lieu — une série de
+     * supervision qui raconte des transitions refusées est pire qu'une série
+     * vide, parce qu'elle a l'air d'une mesure.
+     *
+     * `observeTransactionDoc` ne lève jamais et retombe sur un objet inerte tant
+     * que le registre n'est pas posé.
+     */
+    getTxMetrics().observeTransactionDoc(tx, "relaunch");
+
 
     /**
      * Une transaction dont l'argent a bougé ne se relance pas : elle se

@@ -309,3 +309,114 @@ test("le sélecteur d'adapters instrumente sans rien changer au contrat", async 
     setTxMetrics(null);
   }
 });
+
+/* ========================================================================== */
+/* LE RAIL D'UN FLUX, ET LE CÂBLAGE                                           */
+/* ========================================================================== */
+
+const { RAIL_BY_FLOW, railForFlow } = require("../src/services/txMetrics");
+
+test("le rail se dérive du FLUX, pas du prestataire", () => {
+  // `flow` est toujours renseigné ; `provider` seulement parfois.
+  assert.equal(railForFlow("PAYNOVAL_INTERNAL_TRANSFER"), "paynoval");
+  assert.equal(railForFlow("PAYNOVAL_TO_MOBILEMONEY_PAYOUT"), "mobilemoney");
+  assert.equal(railForFlow("PAYNOVAL_TO_CARD_PAYOUT"), "visa_direct");
+});
+
+test("un flux inconnu devient `unknown`, jamais une étiquette vide", () => {
+  // Une étiquette vide disparaît des séries Prometheus — donc le cas aussi.
+  assert.equal(railForFlow("N_IMPORTE_QUOI"), "unknown");
+  assert.equal(railForFlow(null), "unknown");
+  assert.equal(railForFlow(undefined), "unknown");
+});
+
+test("la table des rails est IDENTIQUE à celle du superviseur", () => {
+  /**
+   * ⚠️ CONTRAT INTER-DÉPÔTS.
+   *
+   * La même table existe dans
+   * `paynoval-backend/services/monitoring/transactionLedgerView.js`, qui
+   * compte les mêmes transactions depuis MongoDB. Les deux sources sont
+   * COMPARÉES, et leur écart sert de contrôle.
+   *
+   * Si les tables divergent, la comparaison compare des grandeurs qui ne
+   * veulent plus dire la même chose — et le contrôle se met à mentir dans les
+   * DEUX sens : il tait de vraies divergences et en invente de fausses.
+   *
+   * Même motif que la clé d'idempotence et l'identifiant de corrélation : la
+   * règle de l'autre dépôt est recopiée ici, et un test la compare.
+   */
+  assert.deepEqual({ ...RAIL_BY_FLOW }, {
+    PAYNOVAL_INTERNAL_TRANSFER: "paynoval",
+    MOBILEMONEY_COLLECTION_TO_PAYNOVAL: "mobilemoney",
+    PAYNOVAL_TO_MOBILEMONEY_PAYOUT: "mobilemoney",
+    CARD_TOPUP_TO_PAYNOVAL: "visa_direct",
+    PAYNOVAL_TO_CARD_PAYOUT: "visa_direct",
+  });
+});
+
+test("observeTransactionDoc dérive tout du document et ne lève jamais", () => {
+  const { tx } = makeMetrics();
+
+  tx.observeTransactionDoc({ flow: "PAYNOVAL_INTERNAL_TRANSFER", status: "confirmed" });
+
+  assert.doesNotThrow(() => tx.observeTransactionDoc(null));
+  assert.doesNotThrow(() => tx.observeTransactionDoc({}));
+  assert.doesNotThrow(() => tx.observeTransactionDoc(undefined, "confirmed"));
+});
+
+test("le compteur est RÉELLEMENT appelé depuis le chemin de production", () => {
+  /**
+   * ⚠️ RÈGLE B.7, ET C'EST LE DÉFAUT QUI A MOTIVÉ TOUT CE CHANTIER.
+   *
+   * `observeTransaction` était définie, testée ici même — avec
+   * `PAYNOVAL_INTERNAL_TRANSFER` comme exemple — et appelée depuis AUCUN
+   * chemin de production. `transactions_total` était donc vide pour les trois
+   * rails, et le virement interne n'apparaissait nulle part dans la
+   * supervision, puisqu'il n'appelle aucun prestataire (invariant A.13).
+   *
+   * Aucun test unitaire ne peut attraper ça : chaque pièce fonctionnait. Ce
+   * test lit donc les SOURCES et vérifie que le câblage existe.
+   */
+  const fs = require("node:fs");
+
+  const sites = [
+    "../src/services/transactions/handlers/initiateInternal.js",
+    "../src/services/transactions/handlers/initiateExternalTransactions.js",
+    "../src/services/transactions/handlers/confirmTransaction.js",
+    "../src/services/transactions/handlers/cancelTransaction.js",
+    "../src/services/transactions/handlers/adminActions.js",
+    "../src/services/cancellation.service.js",
+  ];
+
+  for (const site of sites) {
+    const source = fs.readFileSync(require.resolve(site), "utf8");
+
+    assert.match(
+      source,
+      /observeTransactionDoc\s*\(/,
+      `${site} ne mesure aucune issue de transaction`
+    );
+  }
+});
+
+test("la mesure est posée APRÈS la garde de transition, jamais avant", () => {
+  /**
+   * ⚠️ `assertTransition` LÈVE sur une transition interdite. Mesurer avant
+   * elle enregistrerait des issues qui n'ont jamais eu lieu — une série qui
+   * raconte des transitions REFUSÉES est pire qu'une série vide, parce
+   * qu'elle a l'air d'une mesure.
+   */
+  const fs = require("node:fs");
+
+  const source = fs.readFileSync(
+    require.resolve("../src/services/transactions/handlers/cancelTransaction.js"),
+    "utf8"
+  );
+
+  const garde = source.indexOf('assertTransition(tx.status, "cancelled")');
+  const mesure = source.indexOf("observeTransactionDoc(tx");
+
+  assert.ok(garde > -1, "la garde doit exister");
+  assert.ok(mesure > garde, "la mesure doit suivre la garde, pas la précéder");
+});

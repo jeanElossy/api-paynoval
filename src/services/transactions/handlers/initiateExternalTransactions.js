@@ -2,6 +2,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { getTxMetrics } = require("../../txMetrics");
 const { resoudreTypeExterne } = require("../shared/externalTxType");
 
 const runtime = require("../shared/runtime");
@@ -1072,6 +1073,20 @@ async function initiateOutboundExternal(req, res, next) {
       });
     }
 
+      /**
+       * ⚠️ MESURE, APRÈS COUP, SANS `await` DE CONSÉQUENCE.
+       *
+       * `observeTransactionDoc` n'a ni retour ni exception possible : elle est
+       * enveloppée d'un `try/catch` interne et retombe sur un objet inerte tant
+       * que le registre n'est pas posé. « Une métrique qui fait échouer un
+       * virement est un défaut bien pire que l'absence de métrique. »
+       *
+       * Sans cet appel, `transactions_total` restait VIDE pour les trois rails
+       * — défaut mesuré le 2026-09-23 : la fonction existait, était testée, et
+       * n'était appelée depuis aucun chemin de production.
+       */
+    getTxMetrics().observeTransactionDoc(tx);
+
     return res.status(201).json({
       success: true,
       transactionId: tx._id.toString(),
@@ -1587,6 +1602,20 @@ async function initiateInboundExternal(req, res, next) {
         status: e.status,
       });
     }
+
+      /**
+       * ⚠️ MESURE, APRÈS COUP, SANS `await` DE CONSÉQUENCE.
+       *
+       * `observeTransactionDoc` n'a ni retour ni exception possible : elle est
+       * enveloppée d'un `try/catch` interne et retombe sur un objet inerte tant
+       * que le registre n'est pas posé. « Une métrique qui fait échouer un
+       * virement est un défaut bien pire que l'absence de métrique. »
+       *
+       * Sans cet appel, `transactions_total` restait VIDE pour les trois rails
+       * — défaut mesuré le 2026-09-23 : la fonction existait, était testée, et
+       * n'était appelée depuis aucun chemin de production.
+       */
+    getTxMetrics().observeTransactionDoc(tx);
 
     return res.status(201).json({
       success: true,

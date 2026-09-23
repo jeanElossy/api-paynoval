@@ -60,6 +60,41 @@ const PROVIDER_BUCKETS = Object.freeze([
 ]);
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * À QUEL RAIL APPARTIENT UN FLUX
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ⚠️ CETTE TABLE EXISTE EN DEUX EXEMPLAIRES, DANS DEUX DÉPÔTS.
+ *
+ * La seconde est `paynoval-backend/services/monitoring/transactionLedgerView.js`,
+ * qui compte les mêmes transactions depuis MongoDB. Les deux sources sont
+ * COMPARÉES : leur écart est un contrôle qui détecte une transition passée
+ * hors de la machine à états.
+ *
+ * Si les deux tables divergent, la comparaison compare des grandeurs qui ne
+ * veulent plus dire la même chose — et le contrôle se met à mentir dans les
+ * deux sens. Un test de chaque côté verrouille donc la correspondance,
+ * exactement comme pour la clé d'idempotence et l'identifiant de corrélation.
+ *
+ * **Toute modification ici doit être faite EN MÊME TEMPS que là-bas.**
+ *
+ * Le rail se dérive du FLUX et non du prestataire : `flow` est toujours
+ * renseigné, `provider` seulement parfois.
+ */
+const RAIL_BY_FLOW = Object.freeze({
+  PAYNOVAL_INTERNAL_TRANSFER: "paynoval",
+  MOBILEMONEY_COLLECTION_TO_PAYNOVAL: "mobilemoney",
+  PAYNOVAL_TO_MOBILEMONEY_PAYOUT: "mobilemoney",
+  CARD_TOPUP_TO_PAYNOVAL: "visa_direct",
+  PAYNOVAL_TO_CARD_PAYOUT: "visa_direct",
+});
+
+/** PURE. `unknown` plutôt que `null` : une étiquette vide disparaît des séries. */
+function railForFlow(flow) {
+  return RAIL_BY_FLOW[String(flow || "")] || "unknown";
+}
+
+/**
  * Construit le jeu de métriques métier.
  *
  * En injection, comme `metrics.js` : `client` et `register` sont fournis, donc
@@ -207,9 +242,36 @@ function createTxMetrics({ client, register }) {
     } catch {}
   }
 
+  /**
+   * Enregistre l'issue en dérivant tout du DOCUMENT.
+   *
+   * ⚠️ UNE SEULE LIGNE PAR SITE D'APPEL, ET AUCUNE LOGIQUE.
+   *
+   * Les transitions se font dans sept fichiers différents. Si chacun devait
+   * dériver le rail lui-même, sept copies de la même règle dériveraient — et
+   * la comparaison avec la vue base (`transactionLedgerView.js`) comparerait
+   * alors des grandeurs qui ne veulent plus dire la même chose.
+   *
+   * ⚠️ NE LÈVE JAMAIS, ET C'EST NON NÉGOCIABLE : cette fonction est appelée
+   * sur le chemin de l'argent. « Une métrique qui fait échouer un virement est
+   * un défaut bien pire que l'absence de métrique. »
+   */
+  function observeTransactionDoc(tx, status) {
+    try {
+      if (!tx) return;
+
+      observeTransaction({
+        flow: tx.flow,
+        rail: railForFlow(tx.flow),
+        status: status || tx.status,
+      });
+    } catch {}
+  }
+
   return {
     instrumentAdapter,
     observeTransaction,
+    observeTransactionDoc,
     setRailModes,
     PROVIDER_BUCKETS,
   };
@@ -233,6 +295,7 @@ function createTxMetrics({ client, register }) {
 const INERT = Object.freeze({
   instrumentAdapter: (adapter) => adapter,
   observeTransaction: () => {},
+  observeTransactionDoc: () => {},
   setRailModes: () => {},
 });
 
@@ -248,6 +311,8 @@ function getTxMetrics() {
 
 module.exports = {
   createTxMetrics,
+  RAIL_BY_FLOW,
+  railForFlow,
   setTxMetrics,
   getTxMetrics,
   PROVIDER_BUCKETS,

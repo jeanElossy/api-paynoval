@@ -2,6 +2,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { getTxMetrics } = require("../../txMetrics");
 
 const runtime = require("../shared/runtime");
 const { captureSenderReserve, creditReceiverFunds, creditTreasuryRevenue, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, assertTransition, runInTransaction, isTransactionLevelError, safeAbort, safeEndSession } = runtime;
@@ -690,6 +691,19 @@ function assertConfirmable({ req, tx, now }) {
 
   if (isInternalTransfer(tx)) {
     assertTransition(tx.status, "confirmed");
+    /**
+     * ⚠️ MESURE POSÉE APRÈS LA GARDE, JAMAIS AVANT.
+     *
+     * `assertTransition` LÈVE sur une transition interdite. Compter avant elle
+     * enregistrerait des issues qui n'ont jamais eu lieu — une série de
+     * supervision qui raconte des transitions refusées est pire qu'une série
+     * vide, parce qu'elle a l'air d'une mesure.
+     *
+     * `observeTransactionDoc` ne lève jamais et retombe sur un objet inerte tant
+     * que le registre n'est pas posé.
+     */
+    getTxMetrics().observeTransactionDoc(tx, "confirmed");
+
 
     if (String(tx.receiver) !== getAuthedUserId(req)) {
       throw createError(

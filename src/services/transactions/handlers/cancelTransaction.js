@@ -2,6 +2,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { getTxMetrics } = require("../../txMetrics");
 
 const runtime = require("../shared/runtime");
 const { logTransaction, releaseSenderReserve, chargeCancellationFee, convertAmount, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, assertTransition, runInTransaction, safeAbort, safeEndSession } = runtime;
@@ -368,6 +369,19 @@ function resolveSourceCurrency(tx) {
  */
 function assertCancellable({ req, tx }) {
   assertTransition(tx.status, "cancelled");
+  /**
+   * ⚠️ MESURE POSÉE APRÈS LA GARDE, JAMAIS AVANT.
+   *
+   * `assertTransition` LÈVE sur une transition interdite. Compter avant elle
+   * enregistrerait des issues qui n'ont jamais eu lieu — une série de
+   * supervision qui raconte des transitions refusées est pire qu'une série
+   * vide, parce qu'elle a l'air d'une mesure.
+   *
+   * `observeTransactionDoc` ne lève jamais et retombe sur un objet inerte tant
+   * que le registre n'est pas posé.
+   */
+  getTxMetrics().observeTransactionDoc(tx, "cancelled");
+
 
   const userId = getAuthedUserId(req);
   const senderId = String(tx.sender || "");
