@@ -25,10 +25,12 @@
  *
  * ── Ce qui reste vrai dans les deux cas ─────────────────────────────────────
  *
- * Les consommateurs ne tournent JAMAIS dans le processus du serveur. C'est la
- * séparation qui compte : la surveillance, la réconciliation, le parrainage et
- * les notifications peuvent saturer, planter ou se redéployer sans toucher au
- * moteur d'argent.
+ * ⚠️ MIS À JOUR LE 2026-09-23 : par défaut, les consommateurs tournent AUSSI
+ * dans le processus du serveur (`services/events/inlineConsumers.js`), parce
+ * que l'hébergement réel n'a pas de service worker. Ce script reste le moyen de
+ * les isoler dans un service dédié ; poser alors `EVENT_CONSUMERS_INLINE=false`
+ * sur le serveur. Faire tourner les deux ensemble ne crée pas de doublon : les
+ * groupes Redis répartissent les messages.
  *
  * ── Lancement ───────────────────────────────────────────────────────────────
  *
@@ -48,12 +50,14 @@ const { connectTransactionsDB, getTxConn } = require("../src/config/db");
 const { setClient } = require("../src/services/redisClientAccessor");
 const stream = require("../src/services/events/stream");
 
-const BRANCHES = [
-  ["🛡️  risque", require("../src/services/risk/monitoringConsumer")],
-  ["📒 réconciliation", require("../src/services/reconciliation/settlementConsumer")],
-  ["🎁 parrainage", require("../src/services/referral/referralConsumer")],
-  ["🔔 notifications", require("../src/services/notifications/notificationConsumer")],
-];
+/**
+ * La liste vient de `inlineConsumers.js`, la même que celle du mode « dans le
+ * processus web » : deux listes finiraient par diverger, et une branche ne
+ * tournerait alors que selon le mode de déploiement.
+ */
+const BRANCHES = require("../src/services/events/inlineConsumers").BRANCHES.map(
+  (b) => [b.titre, b.charger()]
+);
 
 const poignees = [];
 let redis = null;

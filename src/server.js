@@ -1035,6 +1035,7 @@ let settlementReplayWorker = null;
 let referralOutboxWorker = null;
 let eventRelay = null;
 let busHealthMonitor = null;
+let inlineConsumers = null;
 
 /**
  * Worker de livraison des evenements de parrainage.
@@ -1711,14 +1712,22 @@ async function bootstrap() {
      * Il lit `domain_events` (écrit DANS les transactions du moteur) et publie
      * sur le flux Redis. Il ne décide rien : il transporte.
      *
-     * ⚠️ IL TOURNE DANS CE PROCESSUS, LES CONSOMMATEURS NON.
+     * ⚠️ IL TOURNE DANS CE PROCESSUS — ET, DEPUIS LE 2026-09-23, LES
+     * CONSOMMATEURS AUSSI PAR DÉFAUT.
      *
      * Le relais appartient au producteur — il lit la base du moteur, et le
      * faire tourner ailleurs ferait sortir cette lecture de son propriétaire.
-     * Les consommateurs, eux, ont leur propre point d'entrée
-     * (`workers/riskMonitor.js`) : ils se déploient et se redémarrent
-     * séparément, et une surveillance qui s'effondre n'emporte pas le moteur
-     * d'argent avec elle.
+     *
+     * Les consommateurs devaient avoir leur propre processus
+     * (`workers/*.js`), pour qu'une surveillance qui s'effondre n'emporte pas
+     * le moteur d'argent. Mais cette séparation supposait un service
+     * d'hébergement par processus, et l'hébergement réel n'en a pas (Render :
+     * trois web services, background worker payant). Mesuré : les quatre
+     * consommateurs n'avaient JAMAIS tourné — aucune notification de
+     * transaction, aucune surveillance AML asynchrone. Une séparation qui
+     * n'existe pas en production ne protège rien : voir
+     * `services/events/inlineConsumers.js`, et `EVENT_CONSUMERS_INLINE=false`
+     * pour revenir au mode séparé.
      *
      * C'est l'étape vers le service `Risk/AML` du schéma cible : processus
      * séparé d'abord, dépôt séparé ensuite. L'inverse — extraire le dépôt avant
@@ -1754,6 +1763,25 @@ async function bootstrap() {
        * s'arrêter parce qu'une notification est en retard.
        */
       busHealthMonitor = busHealth.start({ logger });
+
+      /**
+       * CONSOMMATEURS DANS CE PROCESSUS — voir l'en-tête du bloc.
+       *
+       * Après le relais, pas avant : ils lisent ce qu'il publie, avec le même
+       * client Redis (aucune lecture bloquante, donc aucun gel des autres
+       * commandes). `start` ne lève jamais : un consommateur qui ne s'abonne
+       * pas n'empêche pas le moteur d'argent de servir.
+       */
+      require("./services/events/inlineConsumers")
+        .start({ logger })
+        .then((h) => {
+          inlineConsumers = h;
+        })
+        .catch((err) =>
+          logger.error("❌ Consommateurs du bus non démarrés dans ce processus", {
+            message: err?.message || err,
+          })
+        );
     } catch (err) {
       logger.error("❌ Relais d'événements non démarré", {
         message: err?.message || err,
@@ -1905,6 +1933,7 @@ const graceful = async (signal) => {
 
     try {
       eventRelay?.stop?.();
+      inlineConsumers?.stop?.();
       busHealthMonitor?.stop?.();
       logger.info("📨 Relais d'événements arrêté");
     } catch (err) {

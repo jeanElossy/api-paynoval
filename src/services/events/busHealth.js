@@ -219,8 +219,9 @@ function messagePour(groupe) {
       `⚠️ Consommateur « ${groupe.role} » JAMAIS DÉMARRÉ (groupe Redis ` +
       `« ${groupe.nom} » inexistant, ${groupe.retard ?? "?"} événements en ` +
       `attente) — CONSÉQUENCE : ${groupe.consequence} ` +
-      `Correctif : déployer le processus consommateur ` +
-      `(\`npm run workers:all\`, ou \`npm run worker:notifications\`).`
+      `Correctif : vérifier que \`EVENT_CONSUMERS_INLINE\` n'est pas à ` +
+      `« false » sur Tx-Core (les consommateurs tournent alors dans le web ` +
+      `service), ou déployer \`npm run workers:all\` dans un service dédié.`
     );
   }
 
