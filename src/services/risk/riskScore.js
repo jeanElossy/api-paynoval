@@ -33,6 +33,11 @@
  *     une panne du cache.
  */
 
+const {
+  evaluateBaseline,
+  BASELINE_SIGNALS,
+} = require("./behaviorBaseline");
+
 /**
  * Bandes de décision.
  *
@@ -97,6 +102,28 @@ const WEIGHTS = Object.freeze({
   /** KYC non finalisé alors que le montant le justifierait. */
   KYC_INSUFFICIENT: 0.25,
 
+  /* ---------------------------------------------------------------------
+   * ÉCART À L'HABITUDE DU TITULAIRE — le signal central des fintechs
+   * ---------------------------------------------------------------------
+   * Les poids ci-dessus comparent au RAIL, donc à tout le monde. Ceux-ci
+   * comparent le client À LUI-MÊME. C'est la différence entre « ce montant
+   * est gros » et « ce montant est gros POUR CE CLIENT », et c'est la
+   * seconde question qui sépare une fraude d'un gros virement légitime.
+   *
+   * ⚠️ TOUS MOUS. Ensemble ils valent 0.80, donc ils peuvent déclencher une
+   * REVUE (0.55) mais jamais franchir seuls le blocage (0.85) — et le
+   * plafond `SOFT_SCORE_CAP` le garantit même cumulés au reste. Un client qui
+   * change d'habitude doit pouvoir s'expliquer, pas se heurter à un refus.
+   */
+  /** Montant nettement au-dessus de l'habitude du titulaire. */
+  AMOUNT_ABOVE_CUSTOMER_HABIT: 0.2,
+  /** Montant sans commune mesure avec son habitude. Exclusif du précédent. */
+  AMOUNT_FAR_ABOVE_CUSTOMER_HABIT: 0.35,
+  /** Au-delà du plus gros envoi jamais confirmé par ce compte. */
+  AMOUNT_ABOVE_CUSTOMER_MAX: 0.15,
+  /** Heure à laquelle ce client n'opère jamais. */
+  UNUSUAL_HOUR_FOR_CUSTOMER: 0.1,
+
   /** Un signal qu'on n'a PAS pu lire. Petit, mais jamais nul. */
   SIGNAL_UNAVAILABLE: 0.05,
 });
@@ -135,6 +162,8 @@ function clamp01(n) {
  * @param {string} input.kycLevel
  * @param {boolean} input.sanctioned           signal DUR
  * @param {object|null} input.blacklistHit     signal DUR
+ * @param {object|null} input.baseline         référence du titulaire, ou `null`
+ * @param {number|null} input.hour             heure UTC (0-23) de l'opération
  *
  * @returns {{score: number, band: "allow"|"review"|"block", reasons: Array, hardBlock: boolean}}
  */
@@ -149,6 +178,8 @@ function computeRiskScore(input = {}) {
     kycLevel = "",
     sanctioned = false,
     blacklistHit = null,
+    baseline = null,
+    hour = null,
   } = input;
 
   const reasons = [];
@@ -242,6 +273,47 @@ function computeRiskScore(input = {}) {
     add("NEW_BENEFICIARY", WEIGHTS.NEW_BENEFICIARY, "bénéficiaire jamais utilisé");
   }
 
+  /* ----------------------------------------- écart à l'habitude du client */
+  const verdictBaseline = evaluateBaseline({ amount: amt, hour, baseline });
+
+  if (!verdictBaseline.available) {
+    /**
+     * ⚠️ « Habitude inconnue » N'EST PAS « habitude respectée ». Le client
+     * neuf, le client rare, la base illisible : dans les trois cas on ignore
+     * ce qui est normal pour lui, et l'ignorer en silence reviendrait à
+     * récompenser l'absence d'historique — précisément ce qu'un compte
+     * jetable offre à un fraudeur.
+     */
+    score += WEIGHTS.SIGNAL_UNAVAILABLE;
+    add(
+      "SIGNAL_UNAVAILABLE",
+      WEIGHTS.SIGNAL_UNAVAILABLE,
+      verdictBaseline.reason || "habitude du titulaire inconnue"
+    );
+  } else {
+    for (const signal of verdictBaseline.signals) {
+      const poids = WEIGHTS[signal.code];
+
+      /**
+       * Un code sans poids déclaré serait compté zéro EN SILENCE — donc une
+       * règle écrite mais inopérante, ce qui est pire qu'une règle absente.
+       * On le nomme au lieu de l'ignorer.
+       */
+      if (!Number.isFinite(poids)) {
+        score += WEIGHTS.SIGNAL_UNAVAILABLE;
+        add(
+          "SIGNAL_UNAVAILABLE",
+          WEIGHTS.SIGNAL_UNAVAILABLE,
+          `poids manquant pour ${signal.code}`
+        );
+        continue;
+      }
+
+      score += poids;
+      add(signal.code, poids, signal.detail);
+    }
+  }
+
   /**
    * Le KYC n'est un signal que si le MONTANT le justifie : exiger une pièce
    * d'identité pour un virement de 5 € ferait fuir les clients honnêtes sans
@@ -255,8 +327,37 @@ function computeRiskScore(input = {}) {
     add("KYC_INSUFFICIENT", WEIGHTS.KYC_INSUFFICIENT, `kycLevel=${kyc || "(vide)"} pour un montant élevé`);
   }
 
-  const rawScore = clamp01(score);
+  /**
+   * ⚠️ DEUX RÉDUCTIONS, ET TOUTES DEUX DOIVENT SE NOMMER.
+   *
+   * Défaut trouvé le 2026-09-23 en ajoutant les signaux d'habitude, et qui
+   * dormait depuis l'écriture du module : le score subissait DEUX réductions
+   * successives — la borne à 1 (`clamp01`), puis le plafond des signaux mous —
+   * dont **une seule** était expliquée.
+   *
+   * Tant qu'aucun profil réel ne dépassait 1, la borne ne servait jamais et
+   * personne ne pouvait le voir. Avec les signaux d'habitude, des profils
+   * légitimes l'atteignent : l'opérateur aurait alors lu un dossier dont les
+   * motifs totalisent 1.20 en face d'un score de 0.84, sans rien pour
+   * expliquer l'écart de 0.36. Un score dont on ne peut pas refaire le calcul
+   * n'est pas explicable — c'est la propriété que ce module revendique.
+   *
+   * Les trois valeurs sont donc rendues, et chaque marche est nommée :
+   *   `signalSum` → somme brute des poids, ce que TOTALISENT les motifs ;
+   *   `rawScore`  → bornée à 1, ce que l'opérateur voit dans le dossier ;
+   *   `score`     → plafonnée aux signaux mous, ce qui décide de la bande.
+   */
+  const signalSum = Number(score.toFixed(10));
+  const rawScore = clamp01(signalSum);
   const finalScore = Math.min(rawScore, SOFT_SCORE_CAP);
+
+  if (rawScore < signalSum) {
+    add(
+      "SCORE_CLAMPED",
+      0,
+      `somme des signaux ${signalSum.toFixed(2)} bornée à 1`
+    );
+  }
 
   if (finalScore < rawScore) {
     add(
@@ -270,6 +371,8 @@ function computeRiskScore(input = {}) {
     score: finalScore,
     /** Non plafonné : c'est ce que l'opérateur doit voir dans le dossier. */
     rawScore,
+    /** Somme brute des poids — ce que totalisent les motifs affichés. */
+    signalSum,
     band: bandFor(finalScore),
     reasons,
     hardBlock: false,
@@ -296,6 +399,7 @@ function explainRisk(verdict) {
 
 module.exports = {
   BANDS,
+  BASELINE_SIGNALS,
   SOFT_SCORE_CAP,
   WEIGHTS,
   THRESHOLDS,

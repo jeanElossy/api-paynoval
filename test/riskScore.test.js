@@ -5,6 +5,8 @@ const assert = require("node:assert/strict");
 
 const {
   BANDS,
+  WEIGHTS,
+  SOFT_SCORE_CAP,
   computeRiskScore,
   explainRisk,
   bandFor,
@@ -17,6 +19,25 @@ const {
  * le score d'une transaction passée était irreproductible lors d'un litige.
  */
 
+/**
+ * Référence de comportement d'un client établi : 60 opérations confirmées,
+ * médiane à 100, réparties sur des heures ouvrables.
+ *
+ * ⚠️ AJOUTÉE LE 2026-09-23, ET CE N'EST PAS UN AFFAIBLISSEMENT DE TEST.
+ *
+ * `computeRiskScore` accepte désormais une entrée de plus : l'habitude du
+ * titulaire. `BASE` décrit « tout est connu et ordinaire » ; sans cette
+ * référence, il décrirait « tout est ordinaire SAUF qu'on ignore l'habitude »
+ * — ce qui est un autre cas, et qui a son propre test plus bas.
+ *
+ * Les assertions des tests concernés n'ont pas bougé d'un caractère.
+ */
+const HABITUDE_ETABLIE = (() => {
+  const hourCounts = new Array(24).fill(0);
+  for (let i = 0; i < 60; i += 1) hourCounts[8 + (i % 12)] += 1;
+  return { count: 60, median: 100, max: 300, hourCounts };
+})();
+
 const BASE = {
   amount: 100,
   singleTxLimit: 1000,
@@ -27,7 +48,28 @@ const BASE = {
   kycLevel: "full",
   sanctioned: false,
   blacklistHit: null,
+  baseline: HABITUDE_ETABLIE,
+  hour: 14,
 };
+
+test("une habitude inconnue est DITE, jamais prise pour une habitude respectée", () => {
+  /**
+   * ⚠️ LE DÉFAUT VISÉ : traiter « je ne sais pas ce qui est normal pour lui »
+   * comme « tout va bien » reviendrait à récompenser l'absence d'historique —
+   * exactement ce qu'un compte jetable offre à un fraudeur.
+   *
+   * Ce test verrouille le sens du `null` : il coûte `SIGNAL_UNAVAILABLE`, ni
+   * plus (ce serait punir un client neuf), ni moins (ce serait un blanc-seing).
+   */
+  const sansReference = computeRiskScore({ ...BASE, baseline: null });
+  const avecReference = computeRiskScore(BASE);
+
+  assert.equal(avecReference.score, 0);
+  assert.equal(sansReference.score, WEIGHTS.SIGNAL_UNAVAILABLE);
+  assert.ok(
+    sansReference.reasons.some((r) => r.code === "SIGNAL_UNAVAILABLE")
+  );
+});
 
 /* ==========================================================================
  * LA PROPRIÉTÉ FONDAMENTALE
@@ -110,10 +152,31 @@ test("un montant JUSTE SOUS la limite est un signal en soi", () => {
   assert.equal(v.band, "allow", "seul, ce signal ne suffit pas à retenir");
 });
 
-test("sans limite connue, le montant n'invente aucun signal", () => {
+test("sans limite connue, le montant n'invente aucun signal DE RAIL", () => {
+  /**
+   * ⚠️ PRÉCISÉ LE 2026-09-23. Ce test visait les signaux dérivés de la limite
+   * du rail : sans limite, ils ne doivent pas se déclencher — c'est ce qu'il
+   * vérifie toujours.
+   *
+   * Il ne peut plus viser TOUS les codes `AMOUNT_*`, parce qu'il en existe
+   * désormais d'une autre nature : ceux qui comparent le client à SA PROPRE
+   * habitude. Ceux-là n'ont pas besoin de limite de rail — c'est précisément
+   * leur raison d'être — et exiger leur silence ici reviendrait à réclamer que
+   * le signal central des fintechs ne fonctionne pas.
+   */
   const v = computeRiskScore({ ...BASE, singleTxLimit: 0, amount: 999999 });
 
-  assert.ok(!v.reasons.some((r) => r.code.startsWith("AMOUNT_")));
+  const codesDeRail = [
+    "AMOUNT_OVER_SINGLE_LIMIT",
+    "AMOUNT_NEAR_SINGLE_LIMIT",
+  ];
+
+  for (const code of codesDeRail) {
+    assert.ok(
+      !v.reasons.some((r) => r.code === code),
+      `${code} ne doit pas se déclencher sans limite connue`
+    );
+  }
 });
 
 /* ==========================================================================
@@ -276,8 +339,33 @@ test("chaque point de score NOMME sa raison", () => {
    */
   const v = computeRiskScore({ ...BASE, amount: 1500, accountAgeDays: 1 });
 
+  /**
+   * ⚠️ LA SOMME SE COMPARE AU SCORE **BRUT**, PAS AU SCORE PLAFONNÉ.
+   *
+   * Corrigé le 2026-09-23. Comparer au score final ne marchait que tant
+   * qu'aucun profil ne franchissait `SOFT_SCORE_CAP` : dès qu'un cas réel
+   * l'atteint, la somme des motifs dépasse légitimement le score rendu, et le
+   * test échouait sur une propriété qu'il ne cherchait pas à mesurer.
+   *
+   * L'invariant réel est : **chaque point du score brut est nommé**, et la
+   * seule réduction autorisée est le plafond — qui se nomme lui-même
+   * (`SOFT_SCORE_CAPPED`). Les deux sont vérifiés ici.
+   */
   const somme = v.reasons.reduce((t, r) => t + r.weight, 0);
-  assert.equal(Number(somme.toFixed(10)), Number(v.score.toFixed(10)));
+
+  // Chaque point de la somme brute est nommé.
+  assert.equal(Number(somme.toFixed(10)), v.signalSum);
+
+  // Et chaque RÉDUCTION de cette somme est nommée elle aussi.
+  assert.equal(v.rawScore, Math.min(v.signalSum, 1));
+  assert.equal(v.score, Math.min(v.rawScore, SOFT_SCORE_CAP));
+
+  if (v.rawScore < v.signalSum) {
+    assert.match(explainRisk(v), /SCORE_CLAMPED/);
+  }
+  if (v.score < v.rawScore) {
+    assert.match(explainRisk(v), /SOFT_SCORE_CAPPED/);
+  }
 
   const texte = explainRisk(v);
   assert.match(texte, /AMOUNT_OVER_SINGLE_LIMIT/);

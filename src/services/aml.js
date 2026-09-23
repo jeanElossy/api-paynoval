@@ -562,6 +562,19 @@ module.exports = {
   safeNumber,
   buildCurrencyOrMatch,
 
+  /**
+   * Exporté le 2026-09-23 pour la référence de comportement par client
+   * (`services/risk/baselineStore.js`).
+   *
+   * ⚠️ EXPORTÉ PLUTÔT QUE RECOPIÉ. « Quel champ porte le montant d'une
+   * transaction » est une question à UNE seule réponse : `amountSource`, sinon
+   * `amount`, sinon `money.source.amount`. En redéfinir une seconde copie
+   * ailleurs garantit qu'un jour les deux divergeront — et une référence de
+   * risque calculée sur un champ différent de celui des plafonds serait fausse
+   * sans que rien ne le signale.
+   */
+  buildAmountExpression,
+
   appliesToCagnotteParticipations,
   cagnotteParticipationMatch,
   getCagnotteParticipationStats,

@@ -1534,9 +1534,31 @@ module.exports = async function amlMiddleware(req, res, next) {
      *            que la transaction existe, il pose donc son verdict sur `req` ;
      *   block  → refus, réservé aux signaux DURS (liste noire, sanction).
      */
-    const velocityCounters = await riskEngine
-      .velocity()
-      .read({ userId, destination: toEmail || phoneNumber || iban || null });
+    /**
+     * ⚠️ LES DEUX LECTURES SONT PARALLÈLES ET NE LÈVENT PAS.
+     *
+     * Le cache de vélocité et la référence de comportement du titulaire
+     * répondent à deux questions différentes — « à quel rythme ? » et
+     * « est-ce habituel POUR LUI ? ». Les enchaîner ajouterait leurs latences
+     * sur le chemin d'un paiement sans rien apporter : elles ne dépendent pas
+     * l'une de l'autre.
+     *
+     * `allSettled` et non `all` : `all` propagerait un rejet et transformerait
+     * une statistique indisponible en échec de virement. Chacune rend déjà
+     * `null` en cas de panne, et `null` se traduit en `SIGNAL_UNAVAILABLE`.
+     */
+    const [velocityResult, baselineResult] = await Promise.allSettled([
+      riskEngine
+        .velocity()
+        .read({ userId, destination: toEmail || phoneNumber || iban || null }),
+      riskEngine.baseline().read({ userId, currencyIso: currencyCode }),
+    ]);
+
+    const velocityCounters =
+      velocityResult.status === "fulfilled" ? velocityResult.value : null;
+
+    const customerBaseline =
+      baselineResult.status === "fulfilled" ? baselineResult.value : null;
 
     const riskVerdict = riskEngine.computeRiskScore({
       amount,
@@ -1544,6 +1566,14 @@ module.exports = async function amlMiddleware(req, res, next) {
       velocity: velocityCounters,
       stats: stats || null,
       accountAgeDays: accountAgeInDays(user),
+      /**
+       * Référence du titulaire et heure de l'opération. L'heure est prise en
+       * UTC, comme celle de l'historique : deux repères différents rendraient
+       * la comparaison fausse de plusieurs heures, donc toutes les opérations
+       * d'un fuseau donné « inhabituelles ».
+       */
+      baseline: customerBaseline,
+      hour: new Date().getUTCHours(),
       isNewBeneficiary: false,
       kycLevel: user?.kycLevel,
       // Les signaux durs ont déjà rendu la main plus haut : s'ils sont encore

@@ -28,10 +28,12 @@ const {
   publishInvalidation,
 } = require("./blacklistStore");
 const { computeRiskScore, explainRisk, BANDS } = require("./riskScore");
+const { createBaselineStore } = require("./baselineStore");
 
 let _velocity = null;
 let _blacklist = null;
 let _publisher = null;
+let _baseline = null;
 
 /**
  * Chargement de la liste noire depuis MongoDB.
@@ -71,6 +73,20 @@ async function initRiskEngine({
   _publisher = redisClient;
 
   /**
+   * ⚠️ TOUTES LES DÉPENDANCES SONT RÉSOLUES PARESSEUSEMENT, à l'intérieur des
+   * fonctions passées. Résoudre `services/aml` ou le modèle `Transaction` ici
+   * exigerait une connexion Mongo ouverte au moment de l'initialisation — le
+   * défaut déjà corrigé dans `config.js` et `ledgerService.js`.
+   */
+  _baseline = createBaselineStore({
+    redisClient,
+    logger,
+    resolveModel: () => require("../aml").resolveTransactionModel(),
+    buildCurrencyMatch: (iso) => require("../aml").buildCurrencyOrMatch(iso),
+    buildAmountExpr: () => require("../aml").buildAmountExpression(),
+  });
+
+  /**
    * L'ancienne liste statique sert d'amorçage. Sans elle, la première seconde
    * d'exécution — avant le premier chargement en base — se ferait avec une
    * liste VIDE, c'est-à-dire sans aucun blocage, au moment précis où le service
@@ -104,10 +120,12 @@ async function initRiskEngine({
     .then((subscribed) => ({
       velocityEnabled: _velocity.usable(),
       blacklistSubscribed: subscribed,
+      baselineCacheEnabled: _baseline.stats().cacheEnabled,
     }))
     .catch(() => ({
       velocityEnabled: _velocity.usable(),
       blacklistSubscribed: false,
+      baselineCacheEnabled: _baseline.stats().cacheEnabled,
     }));
 }
 
@@ -126,6 +144,24 @@ function blacklist() {
     refresh: async () => ({ ok: false, count: 0, stale: true }),
     snapshot: () => ({ count: 0, stale: true, everLoaded: false }),
     size: () => 0,
+  };
+}
+
+/**
+ * Référence de comportement du titulaire, ou un magasin inerte.
+ *
+ * ⚠️ INERTE REND `null`, PAS UN RÉSUMÉ VIDE. `null` se traduit en
+ * « habitude inconnue » (`SIGNAL_UNAVAILABLE`) ; un résumé vide se traduirait
+ * en « habitude établie et respectée », c'est-à-dire en blanc-seing accordé
+ * par une panne.
+ */
+function baseline() {
+  if (_baseline) return _baseline;
+
+  return {
+    read: async () => null,
+    invalidate: async () => false,
+    stats: () => ({ hits: 0, miss: 0, erreurs: 0, calculs: 0, cacheEnabled: false }),
   };
 }
 
@@ -152,6 +188,7 @@ function resetRiskEngine() {
   _velocity = null;
   _blacklist = null;
   _publisher = null;
+  _baseline = null;
 }
 
 module.exports = {
@@ -160,6 +197,7 @@ module.exports = {
   resetRiskEngine,
   blacklist,
   velocity,
+  baseline,
   invalidateBlacklist,
   computeRiskScore,
   explainRisk,
