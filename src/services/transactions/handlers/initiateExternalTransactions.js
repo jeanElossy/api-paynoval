@@ -5,6 +5,7 @@ const createError = require("http-errors");
 const { resoudreTypeExterne } = require("../shared/externalTxType");
 
 const runtime = require("../shared/runtime");
+const { openStepUpReview } = require("../../risk/stepUpReview");
 const { validationService, logTransaction, logger, normCur, generateTransactionRef, reserveSenderFunds, normalizePricingSnapshot, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, runInTransaction, safeAbort, safeEndSession } = runtime;
 
 /**
@@ -1001,7 +1002,59 @@ async function initiateOutboundExternal(req, res, next) {
       flagReason: "",
       transactionId: tx._id,
       ip: req.ip,
-    }).catch(() => {});
+    }).catch((err) => {
+      /**
+       * ⚠️ DÉFAUT CORRIGÉ LE 2026-09-23 (règle B.1).
+       *
+       * C'était un `.catch(() => {})` nu. L'invariant A.4 exige que toute
+       * écriture financière soit AUDITABLE ; ce catch muet rendait l'absence
+       * d'audit indiscernable de sa présence — personne n'aurait su qu'il
+       * manquait. Le même défaut avait déjà été corrigé dans
+       * `initiateInternal`, il avait survécu ici.
+       *
+       * On ne relève PAS l'erreur : l'audit est posté après le commit, la
+       * transaction est acquise, et échouer ici rendrait un 500 pour un
+       * virement réussi. On la rend VISIBLE, seule chose utile à ce stade.
+       */
+      logger?.error?.("[TX-CORE] écriture du journal d'audit ÉCHOUÉE", {
+        marqueur: "AUDIT_LOG_LOST",
+        transactionId: tx._id.toString(),
+        reference: tx.reference,
+        message: err?.message || String(err),
+        consequence:
+          "mouvement d'argent sans entrée au journal d'audit (invariant A.4)",
+      });
+    });
+
+    /* ======================================================================
+     * STEP-UP CLIENT — on ne refuse pas, ON DEMANDE
+     * ======================================================================
+     *
+     * Même raisonnement que dans `initiateInternal` : `pending_review`
+     * retenait le virement sans prévenir le client ni lui demander quoi que
+     * ce soit. L'opérateur héritait d'un dossier vide.
+     *
+     * ⚠️ SANS `await`, et APRÈS le commit. La transaction est acquise ; faire
+     * échouer la réponse ici rendrait un 500 pour un virement réussi.
+     */
+    if (tx.status === "pending_review") {
+      openStepUpReview({
+        tx,
+        verdict: req?.riskVerdict || null,
+        ReviewCase: require("../../../models/TransactionReviewCase")(runtime.txConn),
+        Notification: runtime.Notification,
+        NotificationOutbox: runtime.NotificationOutbox,
+        logger,
+      }).catch((err) => {
+        logger?.error?.("[TX-CORE] step-up client ÉCHOUÉ", {
+          marqueur: "REVIEW_CASE_LOST",
+          transactionId: tx._id.toString(),
+          message: err?.message || String(err),
+          consequence:
+            "virement retenu sans demande au client ni dossier pour l'opérateur",
+        });
+      });
+    }
 
     let execution = null;
 
@@ -1465,7 +1518,59 @@ async function initiateInboundExternal(req, res, next) {
       flagReason: "",
       transactionId: tx._id,
       ip: req.ip,
-    }).catch(() => {});
+    }).catch((err) => {
+      /**
+       * ⚠️ DÉFAUT CORRIGÉ LE 2026-09-23 (règle B.1).
+       *
+       * C'était un `.catch(() => {})` nu. L'invariant A.4 exige que toute
+       * écriture financière soit AUDITABLE ; ce catch muet rendait l'absence
+       * d'audit indiscernable de sa présence — personne n'aurait su qu'il
+       * manquait. Le même défaut avait déjà été corrigé dans
+       * `initiateInternal`, il avait survécu ici.
+       *
+       * On ne relève PAS l'erreur : l'audit est posté après le commit, la
+       * transaction est acquise, et échouer ici rendrait un 500 pour un
+       * virement réussi. On la rend VISIBLE, seule chose utile à ce stade.
+       */
+      logger?.error?.("[TX-CORE] écriture du journal d'audit ÉCHOUÉE", {
+        marqueur: "AUDIT_LOG_LOST",
+        transactionId: tx._id.toString(),
+        reference: tx.reference,
+        message: err?.message || String(err),
+        consequence:
+          "mouvement d'argent sans entrée au journal d'audit (invariant A.4)",
+      });
+    });
+
+    /* ======================================================================
+     * STEP-UP CLIENT — on ne refuse pas, ON DEMANDE
+     * ======================================================================
+     *
+     * Même raisonnement que dans `initiateInternal` : `pending_review`
+     * retenait le virement sans prévenir le client ni lui demander quoi que
+     * ce soit. L'opérateur héritait d'un dossier vide.
+     *
+     * ⚠️ SANS `await`, et APRÈS le commit. La transaction est acquise ; faire
+     * échouer la réponse ici rendrait un 500 pour un virement réussi.
+     */
+    if (tx.status === "pending_review") {
+      openStepUpReview({
+        tx,
+        verdict: req?.riskVerdict || null,
+        ReviewCase: require("../../../models/TransactionReviewCase")(runtime.txConn),
+        Notification: runtime.Notification,
+        NotificationOutbox: runtime.NotificationOutbox,
+        logger,
+      }).catch((err) => {
+        logger?.error?.("[TX-CORE] step-up client ÉCHOUÉ", {
+          marqueur: "REVIEW_CASE_LOST",
+          transactionId: tx._id.toString(),
+          message: err?.message || String(err),
+          consequence:
+            "virement retenu sans demande au client ni dossier pour l'opérateur",
+        });
+      });
+    }
 
     let execution = null;
 

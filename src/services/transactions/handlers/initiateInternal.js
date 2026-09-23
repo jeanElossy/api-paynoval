@@ -3,6 +3,7 @@
 
 const createError = require("http-errors");
 const runtime = require("../shared/runtime");
+const { openStepUpReview } = require("../../risk/stepUpReview");
 const { publishDomainEvent } = require("../../events/publisher");
 
 const { notifyTransactionEvent } = require("../transactionNotificationService");
@@ -1002,6 +1003,40 @@ async function initiateInternal(req, res, next) {
         message: err?.message || String(err),
       });
     });
+
+
+    /* ======================================================================
+     * STEP-UP CLIENT — on ne refuse pas, ON DEMANDE
+     * ======================================================================
+     *
+     * `pending_review` retenait le virement sans que personne ne prévienne le
+     * client ni ne lui demande quoi que ce soit : l'opérateur héritait d'un
+     * dossier vide, et le client d'un virement figé sans explication. Une
+     * revue sans instruction n'est pas une revue, c'est une file d'attente.
+     *
+     * ⚠️ APRÈS LE COMMIT, ET SANS `await`. La transaction est acquise ; faire
+     * échouer la réponse ici rendrait un 500 pour un virement réussi, ce qui
+     * pousserait le client à rejouer. L'erreur est rendue VISIBLE, jamais
+     * remontée (même raisonnement que le journal d'audit ci-dessus).
+     */
+    if (tx.status === "pending_review") {
+      openStepUpReview({
+        tx,
+        verdict: req?.riskVerdict || null,
+        ReviewCase: require("../../../models/TransactionReviewCase")(runtime.txConn),
+        Notification: runtime.Notification,
+        NotificationOutbox: runtime.NotificationOutbox,
+        logger,
+      }).catch((err) => {
+        logger?.error?.("[initiateInternal] step-up client ÉCHOUÉ", {
+          marqueur: "REVIEW_CASE_LOST",
+          transactionId: String(tx._id),
+          message: err?.message || String(err),
+          consequence:
+            "virement retenu sans demande au client ni dossier pour l'opérateur",
+        });
+      });
+    }
 
     return res.status(201).json({
       success: true,
