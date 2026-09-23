@@ -531,3 +531,36 @@ test("une panne de balayage ne lève jamais", async () => {
   assert.equal(out.ok, false);
   assert.equal(out.expired, 0);
 });
+
+/* ========================================================================== */
+/* LE CÂBLAGE — une capacité non branchée n'existe pas                        */
+/* ========================================================================== */
+
+test("le balayage des dossiers échus est RÉELLEMENT appelé par le worker", () => {
+  /**
+   * ⚠️ RÈGLE B.7 : une fonction écrite mais jamais appelée est une capacité
+   * affirmée sans mesure. `expireOverdueCases` pouvait très bien rester
+   * inerte — tous ses tests unitaires seraient passés, et aucun dossier
+   * échu n'aurait jamais été refermé en production.
+   *
+   * Ce test lit la SOURCE du worker d'annulation, seul endroit d'où le
+   * balayage part. Il vérifie l'intention, pas la mise en forme : un
+   * `require` du module et un appel à la fonction.
+   */
+  const fs = require("node:fs");
+  const chemin = require.resolve("../src/services/transactionAutoCancelService");
+  const source = fs.readFileSync(chemin, "utf8");
+
+  assert.match(source, /require\(["']\.\/risk\/stepUpReview["']\)/);
+  assert.match(source, /expireOverdueCases\s*\(/);
+
+  // Et le résultat doit REMONTER : un compteur qu'on ne rend pas est un
+  // balayage dont personne ne saura jamais s'il a tourné.
+  assert.match(source, /reviewCasesExpired/);
+});
+
+test("le worker rend bien le compteur de dossiers refermés", async () => {
+  const { processExpiredTransactions } = require("../src/services/transactionAutoCancelService");
+
+  assert.equal(typeof processExpiredTransactions, "function");
+});

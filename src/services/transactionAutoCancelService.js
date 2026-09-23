@@ -663,12 +663,63 @@ async function processExpiredTransactions({
     }
   }
 
+  /**
+   * ═══════════════════════════════════════════════════════════════════════
+   * LES DOSSIERS DE REVUE ÉCHUS — refermés dans le MÊME passage
+   * ═══════════════════════════════════════════════════════════════════════
+   *
+   * Un dossier de revue (`TransactionReviewCase`) porte un délai : passé lui,
+   * le client n'a pas répondu. Sans balayage, ces dossiers morts s'accumulent
+   * devant les opérateurs, et une file d'attente pleine de dossiers qui ne
+   * bougeront jamais finit par ne plus être lue du tout.
+   *
+   * ⚠️ MARQUER `expired` NE LIBÈRE AUCUN FONDS. C'est la boucle ci-dessus qui
+   * annule la transaction et libère la réserve, en passant par la machine à
+   * états et les gardes du grand livre. Ce balayage-ci ne referme qu'un
+   * dossier d'instruction — il n'a aucun pouvoir sur l'argent, et c'est
+   * précisément ce qui permet de le faire tourner sans risque.
+   *
+   * ⚠️ ICI PLUTÔT QUE DANS UN WORKER À PART, pour une raison : les deux
+   * balaient la même échéance vue de deux côtés. Un second minuteur, avec son
+   * propre verrou et sa propre cadence, pourrait dériver de celui-ci — et
+   * l'écart entre « le virement est annulé » et « le dossier est refermé »
+   * serait invisible, donc jamais corrigé.
+   *
+   * ⚠️ IL NE FAIT JAMAIS ÉCHOUER L'ANNULATION. Le mouvement d'argent est
+   * l'affaire sérieuse ; refermer un dossier est du rangement.
+   */
+  let reviewCasesExpired = 0;
+
+  try {
+    const { expireOverdueCases } = require("./risk/stepUpReview");
+    /**
+     * Par `runtime`, pas par `config/db` en direct : c'est l'accès canonique
+     * aux connexions dans ce dépôt, et il est paresseux. Résoudre la connexion
+     * par un second chemin en ferait une seconde source de vérité — le défaut
+     * que ce projet a déjà payé sur l'adresse de la passerelle.
+     */
+    const ReviewCase = require("../models/TransactionReviewCase")(runtime.txConn);
+
+    const out = await expireOverdueCases({ ReviewCase, limit });
+    reviewCasesExpired = out.expired;
+  } catch (err) {
+    /**
+     * Signalé, pas avalé (règle B.1) : un balayage qui ne tourne plus laisse
+     * croire qu'il n'y a plus de dossiers échus, ce qui est exactement
+     * l'inverse de la vérité.
+     */
+    logger?.warn?.("[autoCancel] dossiers de revue échus non balayés", {
+      message: err?.message || String(err),
+    });
+  }
+
   return {
     workerId: wid,
     scanned: expired.length,
     cancelled,
     skipped,
     failed,
+    reviewCasesExpired,
   };
 }
 
