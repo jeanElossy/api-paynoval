@@ -957,6 +957,19 @@ registerMongoPoolMetrics(metrics, { logger });
  */
 registerWorkerMetrics(metrics, { logger });
 
+/**
+ * RETARD DES CONSOMMATEURS DU BUS — ajouté le 2026-09-23.
+ *
+ * `registerWorkerMetrics` ne voit que les boucles de CE processus. Les
+ * consommateurs du bus tournent ailleurs, par conception, et n'étaient mesurés
+ * nulle part : un utilisateur a fait une transaction avec les trois canaux
+ * activés et n'a rien reçu, parce que `worker:notifications` n'était pas
+ * déployé — sans qu'aucune série, aucune sonde ni aucun journal ne le dise.
+ * Voir l'en-tête de `services/events/busHealth.js`.
+ */
+const busHealth = require("./services/events/busHealth");
+busHealth.registerMetrics(metrics);
+
 // Debug interne temporaire.
 app.use((req, _res, next) => {
   if (
@@ -1021,6 +1034,7 @@ let reconciliationWorker = null;
 let settlementReplayWorker = null;
 let referralOutboxWorker = null;
 let eventRelay = null;
+let busHealthMonitor = null;
 
 /**
  * Worker de livraison des evenements de parrainage.
@@ -1729,6 +1743,17 @@ async function bootstrap() {
       }
 
       eventRelay = relais.start({ logger });
+
+      /**
+       * ⚠️ LE CONTRÔLE DÉMARRE AVEC LE RELAIS, ET S'ANNONCE AUSSITÔT.
+       *
+       * Le relais publie ; ce contrôle vérifie que quelqu'un LIT. Sans lui, un
+       * consommateur jamais déployé est invisible : le relais publie avec
+       * succès, `/readyz` est vert, et le client ne reçoit rien. Un consommateur
+       * absent ne rend PAS `/readyz` rouge — le moteur d'argent ne doit pas
+       * s'arrêter parce qu'une notification est en retard.
+       */
+      busHealthMonitor = busHealth.start({ logger });
     } catch (err) {
       logger.error("❌ Relais d'événements non démarré", {
         message: err?.message || err,
@@ -1880,6 +1905,7 @@ const graceful = async (signal) => {
 
     try {
       eventRelay?.stop?.();
+      busHealthMonitor?.stop?.();
       logger.info("📨 Relais d'événements arrêté");
     } catch (err) {
       logger.warn("Erreur arrêt relais d'événements", {

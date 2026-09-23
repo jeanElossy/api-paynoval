@@ -274,6 +274,77 @@ async function longueur() {
   return client.xlen(FLUX);
 }
 
+/**
+ * État de chaque groupe de consommateurs du flux.
+ *
+ * ⚠️ C'EST LA SEULE FAÇON D'OBSERVER UN CONSOMMATEUR QUI TOURNE AILLEURS.
+ *
+ * Les consommateurs sont des processus séparés, par conception
+ * (`server.js` : « il tourne dans ce processus, les consommateurs non »). Ce
+ * processus-ci ne peut donc pas recevoir leur battement de cœur. Mais il peut
+ * lire, dans Redis, où chaque groupe en est : `XINFO GROUPS` rend le retard du
+ * groupe et le nombre de messages en attente d'acquittement.
+ *
+ * Un groupe ABSENT de cette réponse n'a jamais démarré : son consommateur n'est
+ * pas déployé. Un groupe dont le retard monte tourne trop lentement ou est
+ * tombé. Dans les deux cas, personne ne le voyait avant.
+ *
+ * Rend `null` — et non un tableau vide — quand il n'y a pas de transport : le
+ * vide signifierait « aucun groupe », ce qui est une information, alors qu'on
+ * n'en a aucune.
+ *
+ * @returns {Promise<Array<{name: string, consumers: number, pending: number,
+ *   lastDeliveredId: string, lag: number|null}>|null>}
+ */
+async function groupes() {
+  const client = clientOuNull();
+  if (!client) return null;
+
+  let reponse;
+
+  try {
+    reponse = await client.xinfo("GROUPS", FLUX);
+  } catch (err) {
+    /**
+     * `XINFO GROUPS` lève quand le flux n'existe pas encore (aucun événement
+     * jamais publié). Ce n'est pas une panne : c'est un système au repos.
+     */
+    if (String(err?.message || "").includes("no such key")) return [];
+
+    throw err;
+  }
+
+  return (reponse || []).map((entree) => {
+    /**
+     * `ioredis` rend une liste plate `[clé, valeur, clé, valeur, …]`. On la
+     * transforme en objet plutôt que d'indexer par position : l'ordre des
+     * champs a changé entre Redis 6 et 7 (`lag` et `entries-read` sont
+     * apparus), et un accès par index se serait décalé en silence.
+     */
+    const champs = {};
+
+    for (let i = 0; i + 1 < entree.length; i += 2) {
+      champs[String(entree[i])] = entree[i + 1];
+    }
+
+    const lag = champs.lag;
+
+    return {
+      name: String(champs.name || ""),
+      consumers: Number(champs.consumers || 0),
+      pending: Number(champs.pending || 0),
+      lastDeliveredId: String(champs["last-delivered-id"] || "0-0"),
+      /**
+       * `lag` n'existe qu'à partir de Redis 7, et vaut `null` quand Redis ne
+       * peut pas le calculer (flux taillé sous le décalage du groupe). On ne le
+       * remplace pas par 0 : zéro se lit « à jour », l'inverse exact de
+       * « je ne sais pas ».
+       */
+      lag: lag === null || lag === undefined ? null : Number(lag),
+    };
+  });
+}
+
 module.exports = {
   FLUX,
   TAILLE_MAX,
@@ -286,5 +357,6 @@ module.exports = {
   ack,
   livraisons,
   longueur,
+  groupes,
   decoder,
 };
