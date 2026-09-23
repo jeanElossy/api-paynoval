@@ -691,7 +691,13 @@ async function notifyTransactionEvent(
       firstName: firstNameOf(sender),
       amount: senderAmount,
       currency: senderCurrency,
-      recipientName: receiver.fullName || receiver.email || "",
+      /**
+       * ⚠️ JAMAIS L'ADRESSE E-MAIL EN REPLI. Ces variables voyagent sur le bus
+       * et sont stockées dans `domain_events` ; le contrat interdit l'e-mail au
+       * premier niveau, et ce repli l'aurait fait passer au second. Nom absent ⇒
+       * chaîne vide : le gabarit sait l'afficher sans nom.
+       */
+      recipientName: receiver.fullName || "",
       transactionId: tx?._id?.toString?.() || "",
       reference: tx?.reference || "",
     };
@@ -700,7 +706,7 @@ async function notifyTransactionEvent(
       firstName: firstNameOf(receiver),
       amount: receiverAmount,
       currency: receiverCurrency,
-      senderName: sender.fullName || sender.email || "",
+      senderName: sender.fullName || "",
       transactionId: tx?._id?.toString?.() || "",
       reference: tx?.reference || "",
     };

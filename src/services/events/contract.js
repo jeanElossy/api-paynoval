@@ -192,17 +192,44 @@ const CONTRATS = Object.freeze({
    * un identifiant, jamais une adresse ni un numéro — le backend résout le
    * canal à partir du compte.
    */
+  /**
+   * ⚠️ QUATRE CHAMPS AJOUTÉS LE 2026-09-23 — ET LEUR OUBLI A COUPÉ TOUTES LES
+   * NOTIFICATIONS DE TRANSACTION.
+   *
+   * `legacyType`, `aggregateType`, `variables` et `meta` ont été ajoutés à la
+   * charge par `transactionNotificationService` (le backend choisit désormais
+   * les canaux ; il lui faut le type du catalogue, les variables des gabarits
+   * et la catégorie `transaction`). Le contrat, lui, n'avait pas été mis à jour.
+   * `buildPayload` refusait donc CHAQUE événement (`EVENT_FIELD_UNDECLARED`), le
+   * `catch` de l'appelant le journalisait en `OUTBOX_EVENT_LOST`, et aucune
+   * transaction — initiée, confirmée ou annulée — ne notifiait plus personne.
+   * Mesuré sur la base de dev : dernière demande de notification à 13:25,
+   * aucune ensuite malgré cinq transactions.
+   *
+   * C'est ce refus qui est correct : il empêche un champ non relu de glisser
+   * sur le bus. Le défaut était l'absence d'un test qui soumette la VRAIE
+   * charge au VRAI contrat — voir `test/transactionNotificationContract.test.js`.
+   *
+   * `variables` et `meta` sont des objets : la liste `BANNIS` ne contrôle que
+   * le premier niveau. Leur contenu est donc tenu par le producteur (noms
+   * d'affichage, montants, référence, rôle — jamais d'adresse), et vérifié par
+   * ce même test.
+   */
   "notification.requested.v1": Object.freeze({
     aggregateType: "transaction",
     champs: Object.freeze([
       "recipient",
       "notificationType",
+      "legacyType",
       "title",
       "message",
       "channels",
       "priority",
       "idempotencyKey",
+      "aggregateType",
       "aggregateId",
+      "variables",
+      "meta",
       "data",
     ]),
     requis: Object.freeze(["recipient", "idempotencyKey"]),
