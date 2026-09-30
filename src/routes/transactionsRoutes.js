@@ -23,6 +23,7 @@
 // const rateLimit = require("express-rate-limit");
 // const { body, param, query } = require("express-validator");
 // const asyncHandler = require("express-async-handler");
+const { transactionInsights } = require("../services/transactions/handlers/insights");
 
 // const {
 //   listInternal,
@@ -1228,6 +1229,23 @@ const railDestinationValidator = body("destination")
 /* -------------------------------------------------------------------------- */
 /* Routes lecture                                                             */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Insights of the user's confirmed transactions (charts). Declared BEFORE
+ * `/:id`, whose MongoId validator would otherwise answer 400 to "insights".
+ */
+router.get(
+  "/insights",
+  protect,
+  [
+    query("range")
+      .optional()
+      .isIn(["7d", "30d", "90d", "month", "12m"])
+      .withMessage("range invalide"),
+  ],
+  requestValidator,
+  asyncHandler(transactionInsights)
+);
 
 router.get(
   "/:id",
