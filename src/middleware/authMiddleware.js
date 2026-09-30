@@ -597,7 +597,7 @@ exports.protect = asyncHandler(async (req, _res, next) => {
     try {
       device = await Device.findOne(
         buildDeviceQuery(binding.deviceId, String(user._id)),
-        "sessionInvalidBefore status user"
+        "sessionInvalidBefore status user signingKey"
       ).lean();
     } catch (_err) {
       // Fail-closed également sur panne base.

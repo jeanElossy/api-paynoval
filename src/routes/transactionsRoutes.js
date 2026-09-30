@@ -24,6 +24,7 @@
 // const { body, param, query } = require("express-validator");
 // const asyncHandler = require("express-async-handler");
 const { transactionInsights } = require("../services/transactions/handlers/insights");
+const { requireTransactionSignature } = require("../middleware/requireTransactionSignature");
 
 // const {
 //   listInternal,
@@ -1284,6 +1285,8 @@ router.get(
 router.post(
   "/initiate",
   protect,
+  // Server-verified SCA (device-bound signature), before the idempotency record.
+  requireTransactionSignature(),
   idempotency(),
   normalizeProviderRails,
   normalizeInitiateBody,

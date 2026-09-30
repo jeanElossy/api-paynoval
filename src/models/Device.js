@@ -75,6 +75,15 @@ const deviceSchema = new mongoose.Schema(
     },
 
     sessionInvalidBefore: { type: Date, default: null },
+
+    /** Payment signing key — written by paynoval-backend, READ here only. */
+    signingKey: {
+      publicKey: { type: String, default: null },
+      format: { type: String, default: null },
+      algorithm: { type: String, default: null },
+      enrolledAt: { type: Date, default: null },
+      revokedAt: { type: Date, default: null },
+    },
     notes: { type: String, trim: true, default: "", maxlength: 2000 },
   },
   {
