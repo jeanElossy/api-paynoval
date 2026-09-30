@@ -796,7 +796,10 @@ async function registerFailedAttempt({ transactionId, now }) {
       401,
       `Réponse incorrecte. Il vous reste ${
         MAX_CONFIRM_ATTEMPTS - attemptCount
-      } essai(s).`
+      } essai(s).`,
+      // Lets clients tell a wrong answer from an expired session (no refresh
+      // + replay that would burn a second attempt).
+      { code: "SECURITY_ANSWER_INVALID" }
     );
   }
 
@@ -912,7 +915,7 @@ async function confirmController(req, res, next) {
        * compteur incrémenté dans la transaction serait annulé avec elle.
        */
       if (!securityAnswerMatches(tx, provided)) {
-        throw createError(401, "Réponse incorrecte.");
+        throw createError(401, "Réponse incorrecte.", { code: "SECURITY_ANSWER_INVALID" });
       }
 
       const corridorLock = assertCorridorLockIsValid(tx);

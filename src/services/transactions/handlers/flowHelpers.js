@@ -101,6 +101,15 @@ function maskPan(raw) {
   return `${s.slice(0, 6)}******${s.slice(-4)}`;
 }
 
+/**
+ * Masked card from its LAST FOUR digits only. Since 2026-09-30 the mobile app
+ * sends a saved-card reference (`cardId`) and `cardLast4`, never the number.
+ */
+function maskLast4(raw) {
+  const s = String(raw || "").replace(/\D/g, "");
+  return s.length === 4 ? `•••• ${s}` : null;
+}
+
 function redactSensitiveFields(obj = {}) {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
   const out = {};
@@ -429,4 +438,5 @@ module.exports = {
   buildExternalMeta,
   redactSensitiveFields,
   maskPan,
+  maskLast4,
 };

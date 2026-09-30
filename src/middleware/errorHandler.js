@@ -20,6 +20,23 @@ module.exports = (err, req, res, next) => {
 
   const response = { success: false, status: statusCode, message };
 
+  /**
+   * Machine-readable business code (Stripe-style `code`), for client errors
+   * only: clients must be able to tell a wrong security answer (401
+   * SECURITY_ANSWER_INVALID) from an expired session without parsing a
+   * translated message. Restricted to exposed 4xx with an UPPER_SNAKE code, so
+   * a Node system error (`ECONNREFUSED`…) never leaks through a 500.
+   */
+  if (
+    statusCode < 500 &&
+    err.expose !== false &&
+    typeof err.code === 'string' &&
+    /^[A-Z][A-Z0-9_]{2,63}$/.test(err.code) &&
+    !/^E[A-Z]+$/.test(err.code)
+  ) {
+    response.code = err.code;
+  }
+
   // Détails pour la validation (ex: Joi, celebrate, etc.)
   if (err.details) response.errors = err.details;
 

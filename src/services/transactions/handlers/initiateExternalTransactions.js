@@ -51,6 +51,7 @@ const {
   buildExternalMeta,
   redactSensitiveFields,
   maskPan,
+  maskLast4,
 } = require("./flowHelpers");
 
 const {
@@ -330,7 +331,9 @@ function buildRecipientExternalMeta(flow, body = {}) {
 
     if (flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT) {
     return {
-      maskedCardNumber: maskPan(body.cardNumber || body.beneficiary?.cardNumber),
+      maskedCardNumber:
+        maskPan(body.cardNumber || body.beneficiary?.cardNumber) ||
+        maskLast4(body.cardLast4 || body.recipientInfo?.cardLast4),
       cardHolder:
         body.cardHolder ||
         body.toName ||
@@ -362,7 +365,9 @@ function buildRecipientExternalMeta(flow, body = {}) {
 
   if (flow === INBOUND_EXTERNAL_FLOWS.CARD_TOPUP_TO_PAYNOVAL) {
     return {
-      maskedCardNumber: maskPan(body.cardNumber || body.beneficiary?.cardNumber),
+      maskedCardNumber:
+        maskPan(body.cardNumber || body.beneficiary?.cardNumber) ||
+        maskLast4(body.cardLast4 || body.recipientInfo?.cardLast4),
       cardHolder:
         body.cardHolder ||
         body.senderName ||
