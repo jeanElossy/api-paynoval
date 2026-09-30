@@ -37,8 +37,9 @@ const createError = require("http-errors");
  *   withdrawRails        where an account of that country withdraws to.
  *
  * Accounts: Canada, USA, Côte d'Ivoire, France, United Kingdom, Belgium,
- * Germany, Spain. Transfers are received by CARD in Europe / America and by
- * MOBILE MONEY in Côte d'Ivoire, Mali and Burkina Faso. Ivorian accounts
+ * Germany, Spain. Transfers are received by CARD everywhere (Europe, America,
+ * Côte d'Ivoire, Mali, Burkina Faso) and ALSO by MOBILE MONEY in the three
+ * African countries (decided 2026-09-30). Ivorian accounts
  * deposit and withdraw by mobile money or card; the others by card.
  *
  * `region` feeds `shared/railPolicy.js#evaluateRegionScope`. Mirrored by the
@@ -51,7 +52,7 @@ const COUNTRY_RULES = {
   "cote d'ivoire": {
     region: "africa",
     accountOpening: true,
-    transferPayoutRails: [MOBILE_MONEY],
+    transferPayoutRails: [MOBILE_MONEY, CARD],
     depositRails: [MOBILE_MONEY, CARD],
     withdrawRails: [MOBILE_MONEY, CARD],
     aliases: [
@@ -82,7 +83,7 @@ const COUNTRY_RULES = {
   mali: {
     region: "africa",
     accountOpening: false,
-    transferPayoutRails: [MOBILE_MONEY],
+    transferPayoutRails: [MOBILE_MONEY, CARD],
     depositRails: [],
     withdrawRails: [],
     aliases: ["mali", "ml", "mli"],
@@ -93,7 +94,7 @@ const COUNTRY_RULES = {
   "burkina faso": {
     region: "africa",
     accountOpening: false,
-    transferPayoutRails: [MOBILE_MONEY],
+    transferPayoutRails: [MOBILE_MONEY, CARD],
     depositRails: [],
     withdrawRails: [],
     aliases: ["burkina faso", "burkina-faso", "bf", "bfa"],
@@ -1062,7 +1063,7 @@ function validateOutboundExternalCorridor({
     code: isWithdrawal ? "WITHDRAW_RAIL_NOT_AVAILABLE_FOR_COUNTRY" : "PAYOUT_RAIL_NOT_AVAILABLE_FOR_COUNTRY",
     message: isWithdrawal
       ? "Ce moyen de retrait n’est pas disponible pour ce pays."
-      : "Ce pays ne reçoit pas de transfert par ce moyen (carte en Europe et en Amérique, mobile money en Côte d’Ivoire, au Mali et au Burkina Faso).",
+      : "Ce pays ne reçoit pas de transfert par ce moyen (carte partout ; mobile money en Côte d’Ivoire, au Mali et au Burkina Faso).",
   });
 
   const snapshot = buildCorridorSnapshot({

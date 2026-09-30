@@ -49,19 +49,19 @@
  * `compte: true` : on y ouvre un compte, donc on y DÉPOSE et on y RETIRE.
  * `compte: false` : pays de destination seulement (Mali, Burkina Faso).
  * `reception` : comment on y REÇOIT un transfert (`TRANSFER`, prix propre) —
- * mobile money en Côte d'Ivoire, au Mali, au Burkina Faso ; carte ailleurs.
+ * carte partout ; mobile money EN PLUS en Côte d'Ivoire, au Mali, au Burkina Faso.
  */
 const MARCHES = Object.freeze([
-  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true, reception: "mobilemoney" },
-  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false, reception: "mobilemoney" },
-  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false, reception: "mobilemoney" },
-  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true, reception: "card" },
-  { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true, reception: "card" },
-  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true, reception: "card" },
-  { pays: "DE", devise: "EUR", zone: "EUROPE", nom: "Allemagne", compte: true, reception: "card" },
-  { pays: "ES", devise: "EUR", zone: "EUROPE", nom: "Espagne", compte: true, reception: "card" },
-  { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada", compte: true, reception: "card" },
-  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis", compte: true, reception: "card" },
+  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true, reception: ["mobilemoney", "card"] },
+  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false, reception: ["mobilemoney", "card"] },
+  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false, reception: ["mobilemoney", "card"] },
+  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true, reception: ["card"] },
+  { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true, reception: ["card"] },
+  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true, reception: ["card"] },
+  { pays: "DE", devise: "EUR", zone: "EUROPE", nom: "Allemagne", compte: true, reception: ["card"] },
+  { pays: "ES", devise: "EUR", zone: "EUROPE", nom: "Espagne", compte: true, reception: ["card"] },
+  { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada", compte: true, reception: ["card"] },
+  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis", compte: true, reception: ["card"] },
 ]);
 
 /**
@@ -160,12 +160,13 @@ function reglesTransfertExterne({ feePercent, markupPercent, marches, operateurs
   const regles = [];
 
   for (const { pays, devise: vers, nom, reception } of marches) {
-    const cibles =
-      reception === "mobilemoney"
+    const rails = Array.isArray(reception) ? reception : [];
+    const cibles = [
+      ...(rails.includes("mobilemoney")
         ? (operateursParPays[pays] || []).map((provider) => ({ method: "MOBILEMONEY", provider, rail: `MOBILEMONEY_${provider.toUpperCase()}` }))
-        : reception === "card"
-          ? [{ method: "CARD", provider: OPERATEUR_CARTE, rail: "CARD" }]
-          : [];
+        : []),
+      ...(rails.includes("card") ? [{ method: "CARD", provider: OPERATEUR_CARTE, rail: "CARD" }] : []),
+    ];
 
     for (const { method, provider, rail } of cibles) {
       for (const de of devises) {

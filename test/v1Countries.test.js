@@ -123,15 +123,24 @@ const cardPayout = (toCountry, cardCountry, currencyTarget, action = "send", sen
     currencyTarget,
   });
 
-test("card transfers are received in Europe and America", () => {
-  for (const [country, iso, cur] of [["France", "FR", "EUR"], ["Espagne", "ES", "EUR"], ["Angleterre", "GB", "GBP"], ["USA", "US", "USD"], ["Canada", "CA", "CAD"]]) {
+test("card transfers are received in Europe, America AND the three African countries", () => {
+  for (const [country, iso, cur] of [
+    ["France", "FR", "EUR"],
+    ["Espagne", "ES", "EUR"],
+    ["Angleterre", "GB", "GBP"],
+    ["USA", "US", "USD"],
+    ["Canada", "CA", "CAD"],
+    ["Côte d'Ivoire", "CI", "XOF"],
+    ["Mali", "ML", "XOF"],
+    ["Burkina Faso", "BF", "XOF"],
+  ]) {
     assert.equal(cardPayout(country, iso, cur).ok, true, country);
   }
+  assert.equal(cardPayout("Côte d'Ivoire", "CI", "XOF", "withdraw").ok, true);
 });
 
-test("a transfer to an Ivorian card is refused, a withdrawal to one's own Ivorian card is not", () => {
-  refusedWith(() => cardPayout("Côte d'Ivoire", "CI", "XOF"), "PAYOUT_RAIL_NOT_AVAILABLE_FOR_COUNTRY");
-  assert.equal(cardPayout("Côte d'Ivoire", "CI", "XOF", "withdraw").ok, true);
+test("no card transfer to a country outside the V1 perimeter", () => {
+  refusedWith(() => cardPayout("Sénégal", "SN", "XOF"), "CARD_COUNTRY_NOT_SUPPORTED");
 });
 
 test("deposits: mobile money in Côte d'Ivoire only, card for every account country", () => {
