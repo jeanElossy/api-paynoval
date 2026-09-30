@@ -11,7 +11,14 @@
  * "possession + inherence".
  *
  * Signed message (UTF-8, `\n`-joined):
- *   PAYNOVAL-SCA-v1 | userId | deviceId | idempotencyKey | sha256(canonical body) | timestampMs
+ *   PAYNOVAL-SCA-v1 | userId | deviceId | idempotencyKey | sha256(canonical SCA payload) | timestampMs
+ *
+ * DYNAMIC LINKING (PSD2 RTS art. 5): the signature covers what the user agreed
+ * to — amount, rails, locked quote and payee (`SCA_FIELDS`) — not the raw body.
+ * The gateway validates the body with Joi (`stripUnknown`, `convert`) and adds
+ * `action` / `provider` / `method`: a raw-body digest computed on the phone
+ * could never match the one computed here. Every field of `SCA_FIELDS` is kept
+ * as-is by the gateway schema (`api-gateway test/security/scaFieldsSurviveValidation`).
  *
  * The idempotency key already makes a replay harmless (same key + same body ⇒
  * original answer); the timestamp bounds how long a captured signature lives.
@@ -43,8 +50,49 @@ function stableStringify(value) {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
 }
 
+/**
+ * Money-critical fields bound by the signature. MUST stay identical to
+ * `payNoval-master/utils/deviceSigning.js#SCA_FIELDS` (shared test vector).
+ */
+const SCA_FIELDS = Object.freeze([
+  "amount",
+  "funds",
+  "destination",
+  "quoteId",
+  "pricingId",
+  "toEmail",
+  "phoneNumber",
+  "toCountry",
+  "recipientInfo",
+]);
+
+/**
+ * The signed subset of an initiation body. Absent / null / empty values are
+ * left out; `amount` is compared as a number (the gateway converts "1500.50"
+ * to 1500.5 before Tx-Core sees it).
+ */
+function scaPayload(body) {
+  const source = body && typeof body === "object" ? body : {};
+  const out = {};
+
+  for (const field of SCA_FIELDS) {
+    const value = source[field];
+    if (value === undefined || value === null || value === "") continue;
+
+    if (field === "amount") {
+      const n = typeof value === "number" ? value : Number(String(value).trim());
+      out.amount = Number.isFinite(n) ? n : String(value);
+      continue;
+    }
+
+    out[field] = value;
+  }
+
+  return out;
+}
+
 const bodyDigest = (body) =>
-  crypto.createHash("sha256").update(stableStringify(body ?? null), "utf8").digest("hex");
+  crypto.createHash("sha256").update(stableStringify(scaPayload(body)), "utf8").digest("hex");
 
 function buildSignedMessage({ userId, deviceId, idempotencyKey, body, timestamp }) {
   return [
@@ -123,7 +171,9 @@ function decideSignature({
 module.exports = {
   SIGNATURE_VERSION,
   MAX_SKEW_MS,
+  SCA_FIELDS,
   stableStringify,
+  scaPayload,
   bodyDigest,
   buildSignedMessage,
   verifySignature,

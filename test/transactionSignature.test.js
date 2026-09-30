@@ -10,12 +10,26 @@ const {
   bodyDigest,
   buildSignedMessage,
   decideSignature,
+  scaPayload,
   stableStringify,
 } = require("../src/services/security/transactionSignature");
 
 // Shared with payNoval-master/utils/deviceSigning.test.js — must match byte for byte.
-const VECTOR = { b: [1, "é", null, { z: 1, a: true }], a: { y: 1.5, x: '<"\\n>' }, c: 0 };
-const VECTOR_DIGEST = "620f3daa27433c8155fbd24c895c73a7beed2d1fd309f1b47018b4f8adaed329";
+const VECTOR = {
+  amount: "1500.50",
+  funds: "paynoval",
+  destination: "paynoval",
+  toEmail: "zoé@example.com",
+  quoteId: "q_1",
+  phoneNumber: "",
+  pricingId: null,
+  recipientInfo: { z: 1, a: [true, null, '<"\\n>'] },
+  note: "not signed",
+  action: "send",
+};
+const VECTOR_CANONICAL =
+  '{"amount":1500.5,"destination":"paynoval","funds":"paynoval","quoteId":"q_1","recipientInfo":{"a":[true,null,"<\\"\\\\n>"],"z":1},"toEmail":"zoé@example.com"}';
+const VECTOR_DIGEST = "15cc2b46db618968a2f6d56c4d66f2bb4971043bd1ab4df8e68cd57785169e4b";
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const spki = { publicKey: publicKey.export({ type: "spki", format: "der" }).toString("base64"), format: "spki" };
@@ -25,9 +39,21 @@ const NOW = 1_800_000_000_000;
 const base = { userId: "u1", deviceId: "d1", idempotencyKey: "idem-12345678", body: { amount: 10 }, timestamp: NOW };
 const sign = (message) => crypto.sign("RSA-SHA256", Buffer.from(message), privateKey).toString("base64");
 
-test("canonical body digest matches the mobile vector", () => {
+test("canonical SCA payload digest matches the mobile vector", () => {
+  assert.equal(stableStringify(scaPayload(VECTOR)), VECTOR_CANONICAL);
   assert.equal(bodyDigest(VECTOR), VECTOR_DIGEST);
   assert.equal(stableStringify({ b: 1, a: undefined }), '{"b":1}');
+});
+
+test("the digest survives the gateway normalisation, not a change of payee or amount", () => {
+  // What the gateway forwards: Joi-converted amount, stripped extras, added fields.
+  const forwarded = { ...VECTOR, amount: 1500.5, note: undefined, provider: "paynoval", method: "INTERNAL" };
+  assert.equal(bodyDigest(forwarded), VECTOR_DIGEST);
+
+  assert.notEqual(bodyDigest({ ...VECTOR, toEmail: "mallory@example.com" }), VECTOR_DIGEST);
+  assert.notEqual(bodyDigest({ ...VECTOR, amount: "1500.51" }), VECTOR_DIGEST);
+  assert.notEqual(bodyDigest({ ...VECTOR, quoteId: "q_2" }), VECTOR_DIGEST);
+  assert.notEqual(bodyDigest({ ...VECTOR, recipientInfo: { ...VECTOR.recipientInfo, z: 2 } }), VECTOR_DIGEST);
 });
 
 test("a valid signature passes, with SPKI (Android) and PKCS#1 (iOS) keys", () => {
