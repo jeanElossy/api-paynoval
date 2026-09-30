@@ -43,59 +43,42 @@
  */
 
 /**
- * Les marchés servis, et la devise de chacun.
+ * Les marchés V1 — la même liste que `COUNTRY_RULES`
+ * (`services/transactions/handlers/corridorValidation.js`), épinglée par test.
  *
- * ⚠️ HYPOTHÈSE DE DÉPART, À CONFIRMER — ce n'est pas une donnée mesurée.
- * Aucune liste de pays servis n'existe dans le code : `User.country` est du
- * texte libre sans énumération, et `countryRegion.js` côté mobile ne fait que
- * classer « Afrique / hors Afrique ». Cette liste vient des zones retenues en
- * séance le 2026-09-16, pas d'une source technique.
+ * `compte: true` : on y ouvre un compte, donc on y DÉPOSE et on y RETIRE.
+ * `compte: false` : pays de destination seulement (Mali, Burkina Faso) — il y
+ * reçoit des transferts mobile money, que Tx-Core tarifie comme un versement
+ * (`WITHDRAW`) : aucune règle de dépôt n'y a de sens.
  */
 const MARCHES = Object.freeze([
-  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire" },
-  { pays: "SN", devise: "XOF", zone: "UEMOA", nom: "Sénégal" },
-  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso" },
-  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali" },
-  { pays: "TG", devise: "XOF", zone: "UEMOA", nom: "Togo" },
-  { pays: "BJ", devise: "XOF", zone: "UEMOA", nom: "Bénin" },
-  { pays: "CM", devise: "XAF", zone: "CEMAC", nom: "Cameroun" },
-  { pays: "GA", devise: "XAF", zone: "CEMAC", nom: "Gabon" },
-  { pays: "CG", devise: "XAF", zone: "CEMAC", nom: "Congo" },
-  { pays: "TD", devise: "XAF", zone: "CEMAC", nom: "Tchad" },
-  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France" },
-  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique" },
-  { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada" },
-  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis" },
+  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true },
+  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false },
+  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false },
+  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true },
+  { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true },
+  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true },
+  { pays: "DE", devise: "EUR", zone: "EUROPE", nom: "Allemagne", compte: true },
+  { pays: "ES", devise: "EUR", zone: "EUROPE", nom: "Espagne", compte: true },
+  { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada", compte: true },
+  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis", compte: true },
 ]);
 
 /**
- * Quel opérateur mobile money sert quel pays.
- *
- * ⚠️⚠️ HYPOTHÈSE DE DÉPART, À CONFIRMER AVANT APPROBATION.
- *
- * Le code ne déclare NULLE PART cette correspondance : les quatre adaptateurs
- * de `src/providers/mobilemoney/` relaient `input.country` sans rien en savoir.
- * Ces listes sont donc une connaissance de marché, pas une mesure — et c'est
- * exactement en inventant des combinaisons qu'on a produit `DEPOSIT · INTERNAL`,
- * un barème pour une opération qui n'existe pas.
- *
- * Seuls les quatre opérateurs réellement intégrés figurent ici
- * (`RAILS` de `models/Transaction.js`). Un pays sans opérateur reste VIDE : la
- * grille l'annonce au lieu de lui fabriquer une couverture.
+ * Quel opérateur mobile money sert quel pays — V1, décidé le 2026-09-30 :
+ * Côte d'Ivoire : Orange, MTN, Moov, Wave ; Mali et Burkina Faso : Orange et
+ * Moov. Le reste reçoit par carte. Seuls les quatre opérateurs réellement
+ * intégrés figurent ici (`RAILS` de `models/Transaction.js`).
  */
 const OPERATEURS_PAR_PAYS = Object.freeze({
   CI: ["orange", "mtn", "moov", "wave"],
-  SN: ["orange", "wave"],
-  BF: ["orange", "moov", "wave"],
   ML: ["orange", "moov"],
-  TG: ["moov"],
-  BJ: ["mtn", "moov"],
-  CM: ["orange", "mtn"],
-  CG: ["mtn"],
-  GA: [],
-  TD: [],
+  BF: ["orange", "moov"],
   FR: [],
+  GB: [],
   BE: [],
+  DE: [],
+  ES: [],
   CA: [],
   US: [],
 });
@@ -177,11 +160,13 @@ function reglesVirementInterne({ feePercent, markupPercent, devises }) {
 function reglesDepotRetrait({ feePercent, marches, operateursParPays }) {
   const regles = [];
 
-  for (const { pays, devise, nom } of marches) {
+  for (const { pays, devise, nom, compte = true } of marches) {
     const operateurs = operateursParPays[pays] || [];
+    // A destination-only country receives (WITHDRAW = payout), never deposits.
+    const sens = compte ? ["DEPOSIT", "WITHDRAW"] : ["WITHDRAW"];
 
     for (const provider of operateurs) {
-      for (const txType of ["DEPOSIT", "WITHDRAW"]) {
+      for (const txType of sens) {
         const libelle = txType === "DEPOSIT" ? "Dépôt" : "Retrait";
 
         regles.push({
@@ -211,7 +196,8 @@ function reglesDepotRetrait({ feePercent, marches, operateursParPays }) {
       }
     }
 
-    for (const txType of ["DEPOSIT", "WITHDRAW"]) {
+    // Card: account countries only (Mali / Burkina Faso receive by mobile money).
+    for (const txType of compte ? ["DEPOSIT", "WITHDRAW"] : []) {
       const libelle = txType === "DEPOSIT" ? "Dépôt" : "Retrait";
 
       regles.push({

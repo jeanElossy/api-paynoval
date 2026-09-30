@@ -170,3 +170,26 @@ test("chaque marché déclare une devise ISO", () => {
     assert.match(m.pays, /^[A-Z]{2}$/, m.nom);
   }
 });
+
+test("V1: the grid markets are exactly the countries Tx-Core serves", () => {
+  const { COUNTRY_RULES, getCountryKey } = require("../../src/services/transactions/handlers/corridorValidation");
+  const fromGrid = MARCHES.map((m) => getCountryKey(m.pays)).sort();
+  assert.deepEqual(fromGrid, Object.keys(COUNTRY_RULES).sort());
+  for (const m of MARCHES) {
+    assert.equal(COUNTRY_RULES[getCountryKey(m.pays)].accountOpening, m.compte, m.pays);
+  }
+});
+
+test("V1: Mali and Burkina Faso are priced as payout destinations only", () => {
+  const grille = construireGrille();
+  for (const pays of ["ML", "BF"]) {
+    const rules = grille.filter((r) => r.scope.country === pays);
+    assert.ok(rules.length > 0, pays);
+    assert.deepEqual([...new Set(rules.map((r) => `${r.scope.txType}/${r.scope.method}`))], ["WITHDRAW/MOBILEMONEY"], pays);
+    assert.deepEqual([...new Set(rules.map((r) => r.scope.provider))].sort(), ["moov", "orange"], pays);
+  }
+  // GBP and USD accounts get their card deposit / withdrawal rules.
+  for (const code of ["DEPOSIT_CARD_GB", "WITHDRAW_CARD_GB", "DEPOSIT_CARD_US", "WITHDRAW_CARD_ES"]) {
+    assert.ok(grille.some((r) => r.code === code), code);
+  }
+});

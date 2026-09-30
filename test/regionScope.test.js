@@ -17,12 +17,15 @@ const run = (user, body) =>
   new Promise((resolve) => requireAllowedRail({ user, body }, {}, (err) => resolve(err || null)));
 
 test("every served country has a region", () => {
-  for (const c of ["Côte d'Ivoire", "CI", "Sénégal", "Mali", "Burkina Faso", "Cameroun"]) {
+  for (const c of ["Côte d'Ivoire", "CI", "Mali", "Burkina Faso"]) {
     assert.equal(getCountryRegion(c), "africa", c);
   }
-  for (const c of ["France", "Belgique", "Allemagne"]) assert.equal(getCountryRegion(c), "europe", c);
+  for (const c of ["France", "Belgique", "Allemagne", "Espagne", "Angleterre", "GB"]) {
+    assert.equal(getCountryRegion(c), "europe", c);
+  }
   for (const c of ["Canada", "USA"]) assert.equal(getCountryRegion(c), "america", c);
-  assert.equal(getCountryRegion("Atlantide"), null);
+  // Out of the V1 perimeter.
+  for (const c of ["Sénégal", "Cameroun", "Atlantide"]) assert.equal(getCountryRegion(c), null, c);
 });
 
 test("the V1 matrix", () => {
