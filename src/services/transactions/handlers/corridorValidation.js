@@ -28,8 +28,14 @@ const createError = require("http-errors");
  * - kybStatus
  */
 
+/**
+ * `region` drives the V1 capabilities (`shared/railPolicy.js#evaluateRegionScope`):
+ * mobile money deposits and withdrawals are open to AFRICAN accounts only;
+ * Europe / America / elsewhere deposit and withdraw by card.
+ */
 const COUNTRY_RULES = {
   "cote d'ivoire": {
+    region: "africa",
     aliases: [
       "cote d'ivoire",
       "cote d’ivoire",
@@ -41,7 +47,6 @@ const COUNTRY_RULES = {
     ],
     currency: "XOF",
     callingCodes: ["225"],
-    ibanPrefixes: [],
     mobileOperators: [
       "orange",
       "orange_money",
@@ -57,38 +62,39 @@ const COUNTRY_RULES = {
   },
 
   canada: {
+    region: "america",
     aliases: ["canada", "ca"],
     currency: "CAD",
     callingCodes: ["1"],
-    ibanPrefixes: [],
     mobileOperators: [],
   },
 
   france: {
+    region: "europe",
     aliases: ["france", "fr"],
     currency: "EUR",
     callingCodes: ["33"],
-    ibanPrefixes: ["FR"],
     mobileOperators: [],
   },
 
   belgique: {
+    region: "europe",
     aliases: ["belgique", "belgium", "be"],
     currency: "EUR",
     callingCodes: ["32"],
-    ibanPrefixes: ["BE"],
     mobileOperators: [],
   },
 
   allemagne: {
+    region: "europe",
     aliases: ["allemagne", "germany", "de"],
     currency: "EUR",
     callingCodes: ["49"],
-    ibanPrefixes: ["DE"],
     mobileOperators: [],
   },
 
   usa: {
+    region: "america",
     aliases: [
       "usa",
       "us",
@@ -101,39 +107,38 @@ const COUNTRY_RULES = {
     ],
     currency: "USD",
     callingCodes: ["1"],
-    ibanPrefixes: [],
     mobileOperators: [],
   },
 
   "burkina faso": {
+    region: "africa",
     aliases: ["burkina faso", "burkina-faso", "bf"],
     currency: "XOF",
     callingCodes: ["226"],
-    ibanPrefixes: [],
     mobileOperators: [],
   },
 
   mali: {
+    region: "africa",
     aliases: ["mali", "ml"],
     currency: "XOF",
     callingCodes: ["223"],
-    ibanPrefixes: [],
     mobileOperators: [],
   },
 
   senegal: {
+    region: "africa",
     aliases: ["senegal", "sénégal", "sn"],
     currency: "XOF",
     callingCodes: ["221"],
-    ibanPrefixes: [],
     mobileOperators: [],
   },
 
   cameroun: {
+    region: "africa",
     aliases: ["cameroun", "cameroon", "cm"],
     currency: "XAF",
     callingCodes: ["237"],
-    ibanPrefixes: [],
     mobileOperators: [],
   },
 };
@@ -220,6 +225,11 @@ function getCountryKey(country) {
 function getCountryRule(country) {
   const key = getCountryKey(country);
   return COUNTRY_RULES[key] || null;
+}
+
+/** "africa" | "europe" | "america" — null for a country PayNoval does not serve. */
+function getCountryRegion(country) {
+  return getCountryRule(country)?.region || null;
 }
 
 function getCurrencyByCountry(country) {
@@ -564,23 +574,6 @@ function phoneCountryMatchesSelectedCountry(selectedCountry, detectedPhoneCountr
   }
 
   return selected === detected;
-}
-
-function detectCountryFromIban(iban) {
-  const clean = String(iban || "")
-    .replace(/\s/g, "")
-    .trim()
-    .toUpperCase();
-
-  if (!/^[A-Z]{2}/.test(clean)) return "";
-
-  const prefix = clean.slice(0, 2);
-
-  for (const [key, rule] of Object.entries(COUNTRY_RULES)) {
-    if (rule.ibanPrefixes.includes(prefix)) return key;
-  }
-
-  return "";
 }
 
 function assertMobileOperatorAllowed({ country, operator }) {
@@ -1069,6 +1062,8 @@ function validateInboundExternalCorridor({
 }
 
 module.exports = {
+  getCountryRegion,
+  extractUserCountry,
   normalizeCountry,
   normalizeCurrency,
   normalizeProvider,

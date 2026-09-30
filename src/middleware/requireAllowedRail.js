@@ -32,7 +32,12 @@ const logger = require("../utils/logger");
 
 const {
   evaluateRailPolicy,
+  evaluateRegionScope,
 } = require("../services/transactions/shared/railPolicy");
+const {
+  extractUserCountry,
+  getCountryRegion,
+} = require("../services/transactions/handlers/corridorValidation");
 
 function pickUserCountry(req) {
   return (
@@ -53,6 +58,36 @@ function pickUserCurrency(req) {
 }
 
 function requireAllowedRail(req, _res, next) {
+  /**
+   * V1 scope first, and FAIL CLOSED: unlike the report-only policy below, a
+   * failure here refuses — the region decides which rails exist at all.
+   */
+  let scope;
+  try {
+    scope = evaluateRegionScope({
+      region: getCountryRegion(extractUserCountry(req.user || {})),
+      action: req.body?.action,
+      funds: req.body?.funds,
+      destination: req.body?.destination,
+    });
+  } catch (err) {
+    logger?.error?.(`[RAIL-SCOPE][ERROR] ${err?.message || err}`);
+    return next(createError(503, "Vérification du moyen de paiement indisponible.", { code: "RAIL_SCOPE_UNAVAILABLE" }));
+  }
+
+  if (!scope.allowed) {
+    logger?.warn?.(
+      `[RAIL-SCOPE][BLOCKED] user=${req.user?._id || req.user?.id || "unknown"} ${scope.side}=${scope.rail} (${scope.code})`
+    );
+    return next(
+      createError(403, "Le dépôt et le retrait par mobile money sont réservés aux comptes africains : utilisez une carte.", {
+        code: scope.code,
+        rail: scope.rail,
+        side: scope.side,
+      })
+    );
+  }
+
   let verdict;
 
   try {
