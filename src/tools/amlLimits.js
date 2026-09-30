@@ -429,18 +429,51 @@ function resoudrePlafond(table, libelle, provider, currencyISO) {
 }
 
 /**
+ * PLAFONDS PAR OPÉRATION — la dimension que Wise, Revolut, PayPal ajoutent au
+ * rail : envoyer à un TIERS (`transfer`), retirer vers SOI (`withdraw`) et
+ * recharger (`deposit`) ne portent pas le même risque.
+ *
+ * Surcharges `{ operation: { rail: { ISO: montant } } }`, VIDES aujourd'hui :
+ * les montants propres à chaque opération sont une décision de conformité, pas
+ * un choix de code. Sans surcharge, le plafond du RAIL s'applique — exactement
+ * le comportement antérieur. Une surcharge ne remplace jamais une devise par
+ * une autre.
+ */
+const AML_OPERATIONS = Object.freeze(["transfer", "withdraw", "deposit"]);
+const AML_SINGLE_TX_OPERATION_LIMITS = Object.freeze({ transfer: {}, withdraw: {}, deposit: {} });
+const AML_DAILY_OPERATION_LIMITS = Object.freeze({ transfer: {}, withdraw: {}, deposit: {} });
+
+/** "transfer" | "withdraw" | "deposit" from a declared type or action, else null. */
+function normalizeAmlOperation(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (["transfer", "send", "payout_third_party"].includes(v)) return "transfer";
+  if (["withdraw", "withdrawal", "retrait"].includes(v)) return "withdraw";
+  if (["deposit", "topup", "depot", "collection"].includes(v)) return "deposit";
+  return null;
+}
+
+function surchargeOperation(table, operation, provider, currencyISO) {
+  const op = normalizeAmlOperation(operation);
+  if (!op) return null;
+  const valeur = table[op]?.[normalizeRail(provider)]?.[normalizeIso(currencyISO)];
+  return Number.isFinite(valeur) ? valeur : null;
+}
+
+/**
  * Plafond par envoi. LÈVE `AmlLimitUnavailableError` si le couple rail/devise
  * n'est pas couvert — ne rend jamais de valeur par défaut.
  */
-function getSingleTxLimit(provider, currencyISO) {
-  return resoudrePlafond(AML_SINGLE_TX_LIMITS, "par envoi", provider, currencyISO);
+function getSingleTxLimit(provider, currencyISO, operation) {
+  const plafondRail = resoudrePlafond(AML_SINGLE_TX_LIMITS, "par envoi", provider, currencyISO);
+  return surchargeOperation(AML_SINGLE_TX_OPERATION_LIMITS, operation, provider, currencyISO) ?? plafondRail;
 }
 
 /**
  * Plafond journalier. LÈVE `AmlLimitUnavailableError` dans les mêmes conditions.
  */
-function getDailyLimit(provider, currencyISO) {
-  return resoudrePlafond(AML_DAILY_LIMITS, "journalier", provider, currencyISO);
+function getDailyLimit(provider, currencyISO, operation) {
+  const plafondRail = resoudrePlafond(AML_DAILY_LIMITS, "journalier", provider, currencyISO);
+  return surchargeOperation(AML_DAILY_OPERATION_LIMITS, operation, provider, currencyISO) ?? plafondRail;
 }
 
 /**
@@ -453,6 +486,10 @@ function isRailSupported(provider) {
 }
 
 module.exports = {
+  AML_OPERATIONS,
+  AML_SINGLE_TX_OPERATION_LIMITS,
+  AML_DAILY_OPERATION_LIMITS,
+  normalizeAmlOperation,
   AML_SINGLE_TX_LIMITS,
   AML_DAILY_LIMITS,
   LIMIT_PROVENANCE,

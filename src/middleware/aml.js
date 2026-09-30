@@ -20,6 +20,7 @@ const {
 const {
   getDailyLimit,
   getSingleTxLimit,
+  normalizeAmlOperation,
   AmlLimitUnavailableError,
 } = require("../tools/amlLimits");
 
@@ -805,6 +806,11 @@ module.exports = async function amlMiddleware(req, res, next) {
   );
 
   const currencyCode = resolveCurrencyCode(req);
+  // Transfer to a third party, own withdrawal or top-up: each may carry its
+  // own limits (`tools/amlLimits.js`, per-operation overrides).
+  const amlOperation = normalizeAmlOperation(
+    req.body?.txType || req.body?.transactionType || req.body?.action
+  );
   const currencySymbol = getCurrencySymbolByCode(currencyCode);
   const userId = getUserId(user);
 
@@ -1198,7 +1204,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    const singleTxLimit = getSingleTxLimit(provider, currencyCode);
+    const singleTxLimit = getSingleTxLimit(provider, currencyCode, amlOperation);
 
     if (amount > singleTxLimit) {
       logger.warn("[AML] Plafond single dépassé", {
@@ -1234,7 +1240,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    const dailyLimit = getDailyLimit(provider, currencyCode);
+    const dailyLimit = getDailyLimit(provider, currencyCode, amlOperation);
 
     /**
      * ÉCHEC EN FERMETURE — décision du 2026-09-15.
@@ -1562,7 +1568,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     const riskVerdict = riskEngine.computeRiskScore({
       amount,
-      singleTxLimit: getSingleTxLimit(provider, currencyCode),
+      singleTxLimit: getSingleTxLimit(provider, currencyCode, amlOperation),
       velocity: velocityCounters,
       stats: stats || null,
       accountAgeDays: accountAgeInDays(user),

@@ -47,21 +47,21 @@
  * (`services/transactions/handlers/corridorValidation.js`), épinglée par test.
  *
  * `compte: true` : on y ouvre un compte, donc on y DÉPOSE et on y RETIRE.
- * `compte: false` : pays de destination seulement (Mali, Burkina Faso) — il y
- * reçoit des transferts mobile money, que Tx-Core tarifie comme un versement
- * (`WITHDRAW`) : aucune règle de dépôt n'y a de sens.
+ * `compte: false` : pays de destination seulement (Mali, Burkina Faso).
+ * `reception` : comment on y REÇOIT un transfert (`TRANSFER`, prix propre) —
+ * mobile money en Côte d'Ivoire, au Mali, au Burkina Faso ; carte ailleurs.
  */
 const MARCHES = Object.freeze([
-  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true },
-  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false },
-  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false },
-  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true },
-  { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true },
-  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true },
-  { pays: "DE", devise: "EUR", zone: "EUROPE", nom: "Allemagne", compte: true },
-  { pays: "ES", devise: "EUR", zone: "EUROPE", nom: "Espagne", compte: true },
-  { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada", compte: true },
-  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis", compte: true },
+  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true, reception: "mobilemoney" },
+  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false, reception: "mobilemoney" },
+  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false, reception: "mobilemoney" },
+  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true, reception: "card" },
+  { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true, reception: "card" },
+  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true, reception: "card" },
+  { pays: "DE", devise: "EUR", zone: "EUROPE", nom: "Allemagne", compte: true, reception: "card" },
+  { pays: "ES", devise: "EUR", zone: "EUROPE", nom: "Espagne", compte: true, reception: "card" },
+  { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada", compte: true, reception: "card" },
+  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis", compte: true, reception: "card" },
 ]);
 
 /**
@@ -151,6 +151,55 @@ function reglesVirementInterne({ feePercent, markupPercent, devises }) {
 }
 
 /**
+ * Transfert vers un tiers : PayNoval → mobile money / carte du pays de
+ * destination, depuis chaque devise de compte. C'est un TRANSFER, pas un
+ * retrait : Wise, Revolut, Stripe tarifent l'envoi à un tiers et le versement
+ * vers soi séparément. Marge de change seulement s'il y a conversion.
+ */
+function reglesTransfertExterne({ feePercent, markupPercent, marches, operateursParPays, devises }) {
+  const regles = [];
+
+  for (const { pays, devise: vers, nom, reception } of marches) {
+    const cibles =
+      reception === "mobilemoney"
+        ? (operateursParPays[pays] || []).map((provider) => ({ method: "MOBILEMONEY", provider, rail: `MOBILEMONEY_${provider.toUpperCase()}` }))
+        : reception === "card"
+          ? [{ method: "CARD", provider: OPERATEUR_CARTE, rail: "CARD" }]
+          : [];
+
+    for (const { method, provider, rail } of cibles) {
+      for (const de of devises) {
+        regles.push({
+          name: `Transfert — ${provider} ${nom} (${de} → ${vers})`,
+          code: `TRANSFER_${rail}_${pays}_${de}`,
+          description:
+            `Transfert vers un tiers, ${method === "CARD" ? "sur carte" : `par ${provider}`} en ${nom}, ` +
+            `corridor ${de} → ${vers}. À AJUSTER selon le corridor.`,
+          active: true,
+          priority: 0,
+          category: "pricing",
+          scope: {
+            txType: "TRANSFER",
+            method,
+            provider,
+            country: "ALL",
+            fromCountry: "ALL",
+            toCountry: pays,
+            fromCurrency: de,
+            toCurrency: vers,
+          },
+          fee: { mode: "PERCENT", percent: feePercent },
+          fx: changePour(de, vers, markupPercent),
+          amountRange: { min: 0, max: null },
+        });
+      }
+    }
+  }
+
+  return regles;
+}
+
+/**
  * Dépôt et retrait : une règle par (pays × opérateur), en devise identique.
  *
  * Les deux sens sont générés séparément parce qu'ils n'ont PAS le même coût :
@@ -162,8 +211,9 @@ function reglesDepotRetrait({ feePercent, marches, operateursParPays }) {
 
   for (const { pays, devise, nom, compte = true } of marches) {
     const operateurs = operateursParPays[pays] || [];
-    // A destination-only country receives (WITHDRAW = payout), never deposits.
-    const sens = compte ? ["DEPOSIT", "WITHDRAW"] : ["WITHDRAW"];
+    // Deposit / withdrawal: account countries only (a transfer is not a
+    // withdrawal: it has its own rules, `reglesTransfertExterne`).
+    const sens = compte ? ["DEPOSIT", "WITHDRAW"] : [];
 
     for (const provider of operateurs) {
       for (const txType of sens) {
@@ -246,6 +296,7 @@ function construireGrille({
   return [
     ...reglesVirementInterne({ feePercent, markupPercent, devises }),
     ...reglesDepotRetrait({ feePercent, marches, operateursParPays }),
+    ...reglesTransfertExterne({ feePercent, markupPercent, marches, operateursParPays, devises }),
   ];
 }
 

@@ -180,16 +180,31 @@ test("V1: the grid markets are exactly the countries Tx-Core serves", () => {
   }
 });
 
-test("V1: Mali and Burkina Faso are priced as payout destinations only", () => {
+test("V1: a transfer to someone is a TRANSFER, never a withdrawal", () => {
   const grille = construireGrille();
   for (const pays of ["ML", "BF"]) {
-    const rules = grille.filter((r) => r.scope.country === pays);
+    const rules = grille.filter((r) => r.scope.toCountry === pays || r.scope.country === pays);
     assert.ok(rules.length > 0, pays);
-    assert.deepEqual([...new Set(rules.map((r) => `${r.scope.txType}/${r.scope.method}`))], ["WITHDRAW/MOBILEMONEY"], pays);
+    // Destination-only: transfers received, no deposit, no withdrawal.
+    assert.deepEqual([...new Set(rules.map((r) => `${r.scope.txType}/${r.scope.method}`))], ["TRANSFER/MOBILEMONEY"], pays);
     assert.deepEqual([...new Set(rules.map((r) => r.scope.provider))].sort(), ["moov", "orange"], pays);
   }
-  // GBP and USD accounts get their card deposit / withdrawal rules.
-  for (const code of ["DEPOSIT_CARD_GB", "WITHDRAW_CARD_GB", "DEPOSIT_CARD_US", "WITHDRAW_CARD_ES"]) {
+  // From every account currency, e.g. a Canadian account to a Malian Orange wallet.
+  const cadToMali = grille.find((r) => r.code === "TRANSFER_MOBILEMONEY_ORANGE_ML_CAD");
+  assert.equal(cadToMali?.fx.mode, "MARKUP_PERCENT");
+  // Card transfers are received in Europe / America only.
+  assert.ok(grille.some((r) => r.code === "TRANSFER_CARD_GB_XOF"));
+  assert.equal(grille.some((r) => r.code.startsWith("TRANSFER_CARD_CI_")), false);
+  // Account countries keep their own deposit / withdrawal.
+  for (const code of ["DEPOSIT_CARD_GB", "WITHDRAW_CARD_GB", "DEPOSIT_CARD_US", "WITHDRAW_MOBILEMONEY_CI_WAVE"]) {
     assert.ok(grille.some((r) => r.code === code), code);
+  }
+});
+
+test("V1: `reception` of each market = Tx-Core transferPayoutRails", () => {
+  const { COUNTRY_RULES, getCountryKey } = require("../../src/services/transactions/handlers/corridorValidation");
+  for (const m of MARCHES) {
+    const rails = COUNTRY_RULES[getCountryKey(m.pays)].transferPayoutRails;
+    assert.deepEqual(rails, [m.reception === "card" ? "card" : "mobilemoney"], m.pays);
   }
 });
