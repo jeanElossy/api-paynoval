@@ -322,12 +322,86 @@ async function checkTransactionLedger({ sinceHours, limit }) {
 /* 5. Écritures orphelines                                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * ═══ LES PARENTS LÉGITIMES D'UNE ÉCRITURE — corrigé le 2026-10-01 ══════════
+ *
+ * Le contrôle ne cherchait le `transactionId` que dans `transactions`. Or
+ * quatre familles d'écritures n'y ont, par construction, aucun document :
+ *
+ *   1. les lots de CAGNOTTE (`ledgerService.postCagnotteLotEntries` et
+ *      voisins) portent l'`_id` de leur RÈGLEMENT : `tx_cagnotte_settlements`,
+ *      `tx_cagnotte_external_settlements`, `tx_cagnotte_refund_settlements`,
+ *      `tx_cagnotte_vault_withdrawal_settlements` ;
+ *   2. la CONTRE-PASSATION d'un remboursement d'invité porte un identifiant
+ *      dérivé de `<référence du remboursement>:reversal` — son parent est le
+ *      remboursement, retrouvé par sa référence ;
+ *   3. les écritures d'OUVERTURE (`OPENING_BALANCE`, références `OPENING:` /
+ *      `RESET_OPENING:`) sont des journaux autonomes : le solde repris est leur
+ *      seule justification, documentée dans `metadata`.
+ *
+ * Résultat mesuré : chaque opération de cagnotte et chaque reprise de solde
+ * levait `ORPHAN_LEDGER_ENTRY` pendant 48 h — l'alerte criait sur de l'argent
+ * parfaitement rattaché, et un vrai orphelin s'y serait noyé (règle B.1).
+ *
+ * Ce qui reste orphelin l'est vraiment : aucune transaction, aucun règlement,
+ * aucune référence d'ouverture ou de contre-passation reconnue.
+ */
+const SETTLEMENT_COLLECTIONS = Object.freeze([
+  "tx_cagnotte_settlements",
+  "tx_cagnotte_external_settlements",
+  "tx_cagnotte_refund_settlements",
+  "tx_cagnotte_vault_withdrawal_settlements",
+]);
+
+const OPENING_REFERENCE = /^(RESET_)?OPENING:/;
+const REVERSAL_SUFFIX = ":reversal";
+
+/**
+ * Pure : décide, à partir des parents TROUVÉS, quelles écritures sont orphelines.
+ *
+ * @param {object[]} entries
+ * @param {{ parentIds: Set<string>, refundReferences: Set<string> }} found
+ */
+function findOrphanEntries(entries, { parentIds = new Set(), refundReferences = new Set() } = {}) {
+  const anomalies = [];
+
+  for (const e of entries) {
+    if (parentIds.has(String(e.transactionId))) continue;
+
+    const reference = String(e.reference || "");
+    const entryType = String(e.entryType || "").toUpperCase();
+
+    if (entryType === "OPENING_BALANCE" && OPENING_REFERENCE.test(reference)) continue;
+
+    if (
+      reference.endsWith(REVERSAL_SUFFIX) &&
+      refundReferences.has(reference.slice(0, -REVERSAL_SUFFIX.length))
+    ) {
+      continue;
+    }
+
+    anomalies.push({
+      type: ANOMALIES.ORPHAN_LEDGER_ENTRY,
+      ledgerEntryId: String(e._id),
+      transactionId: String(e.transactionId),
+      reference: e.reference || null,
+      entryType: e.entryType,
+      amount: decimalToNumber(e.amount),
+      currency: e.currency,
+      detail:
+        "écriture rattachée à aucune transaction, aucun règlement de cagnotte, " +
+        "ni à une reprise de solde reconnue",
+    });
+  }
+
+  return anomalies;
+}
+
 async function checkOrphanLedgerEntries({ sinceHours, limit }) {
   const Transaction = model("Transaction");
   const LedgerEntry = model("LedgerEntry");
 
   const since = new Date(Date.now() - sinceHours * 60 * 60 * 1000);
-  const anomalies = [];
 
   const entries = await LedgerEntry.find({
     createdAt: { $gte: since },
@@ -337,32 +411,52 @@ async function checkOrphanLedgerEntries({ sinceHours, limit }) {
     .limit(limit)
     .lean();
 
-  if (!entries.length) return { checked: 0, anomalies };
+  if (!entries.length) return { checked: 0, anomalies: [] };
 
   const ids = [...new Set(entries.map((e) => String(e.transactionId)))];
+  const objectIds = entries.map((e) => e.transactionId);
 
-  const existing = await Transaction.find({ _id: { $in: ids } })
-    .select("_id")
-    .lean();
+  const parentIds = new Set(
+    (await Transaction.find({ _id: { $in: ids } }).select("_id").lean()).map((t) => String(t._id))
+  );
 
-  const known = new Set(existing.map((t) => String(t._id)));
+  const missing = objectIds.filter((id) => !parentIds.has(String(id)));
+  const db = getTxConn().db;
 
-  for (const e of entries) {
-    if (!known.has(String(e.transactionId))) {
-      anomalies.push({
-        type: ANOMALIES.ORPHAN_LEDGER_ENTRY,
-        ledgerEntryId: String(e._id),
-        transactionId: String(e.transactionId),
-        reference: e.reference || null,
-        entryType: e.entryType,
-        amount: decimalToNumber(e.amount),
-        currency: e.currency,
-        detail: "écriture comptable rattachée à une transaction inexistante",
-      });
+  if (missing.length) {
+    for (const name of SETTLEMENT_COLLECTIONS) {
+      const docs = await db
+        .collection(name)
+        .find({ _id: { $in: missing } }, { projection: { _id: 1 } })
+        .toArray();
+      for (const d of docs) parentIds.add(String(d._id));
     }
   }
 
-  return { checked: entries.length, anomalies };
+  const reversalParents = [
+    ...new Set(
+      entries
+        .map((e) => String(e.reference || ""))
+        .filter((r) => r.endsWith(REVERSAL_SUFFIX))
+        .map((r) => r.slice(0, -REVERSAL_SUFFIX.length))
+    ),
+  ];
+
+  const refundReferences = new Set(
+    reversalParents.length
+      ? (
+          await db
+            .collection("tx_cagnotte_refund_settlements")
+            .find({ reference: { $in: reversalParents } }, { projection: { reference: 1 } })
+            .toArray()
+        ).map((d) => String(d.reference))
+      : []
+  );
+
+  return {
+    checked: entries.length,
+    anomalies: findOrphanEntries(entries, { parentIds, refundReferences }),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -553,6 +647,7 @@ module.exports = {
   checkWalletBalances,
   checkTransactionLedger,
   checkOrphanLedgerEntries,
+  findOrphanEntries,
   checkStuckReservations,
   ANOMALIES,
 };

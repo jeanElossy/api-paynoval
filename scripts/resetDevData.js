@@ -34,6 +34,7 @@
  *   node scripts/resetDevData.js --target=test             # simulation : n'écrit rien
  *   node scripts/resetDevData.js --target=legacy           # simulation, bases sans suffixe
  *   node scripts/resetDevData.js --target=test --apply --confirm=<baseTx>,<baseUsers>
+ *   node scripts/resetDevData.js --target=legacy --reconcile-only   # un passage de réconciliation, sans rien effacer
  *
  * GARDE-FOUS
  *   - refus si NODE_ENV=production ;
@@ -61,6 +62,7 @@ const argValue = (name) => {
 
 const TARGET = argValue("target");
 const APPLY = args.includes("--apply");
+const RECONCILE_ONLY = args.includes("--reconcile-only");
 const CONFIRM = String(argValue("confirm") || "")
   .split(",")
   .map((s) => s.trim())
@@ -517,6 +519,25 @@ async function openKeptBalances(txDb) {
   return lines;
 }
 
+/**
+ * Contrôle final : un vrai passage de réconciliation, sous verrou, écrit
+ * dans `reconciliation_runs` — l'alerte du backend lit ce document.
+ */
+async function reconcileNow() {
+  const { runReconciliationOnce } = require("../src/services/reconciliation/reconciliationScheduler");
+  const outcome = await runReconciliationOnce();
+  if (!outcome?.ran) {
+    console.log("\nRéconciliation non lancée (verrou détenu ailleurs) — elle passera au prochain contrôle.");
+    return;
+  }
+  const anomalies = outcome.result?.anomalies || [];
+  const byType = anomalies.reduce((acc, a) => ({ ...acc, [a.type]: (acc[a.type] || 0) + 1 }), {});
+  console.log(
+    `\nRéconciliation : ${anomalies.length} écart(s)` +
+      (anomalies.length ? ` — ${JSON.stringify(byType)}` : " ✅")
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Principal                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -561,6 +582,12 @@ function backendDbNames() {
       `  .env du backend   : ${backend.main} / ${backend.tx}` +
         (aligned ? "" : "  ⚠️ familles de bases DIFFÉRENTES de Tx-Core — vérifier avant d'appliquer")
     );
+  }
+
+  if (RECONCILE_ONLY) {
+    await reconcileNow();
+    await mongoose.disconnect();
+    process.exit(0);
   }
 
   const { apple, system } = await protectedAccounts(usersDb, txDb);
@@ -627,25 +654,7 @@ function backendDbNames() {
   const openings = await openKeptBalances(txDb);
   console.log(openings.length ? openings.join("\n") : "  aucune (soldes déjà adossés au grand livre)");
 
-  /**
-   * Contrôle final : un vrai passage de réconciliation, sous verrou, écrit
-   * dans `reconciliation_runs` — l'alerte du backend lit ce document.
-   */
-  const { runReconciliationOnce } = require("../src/services/reconciliation/reconciliationScheduler");
-  const outcome = await runReconciliationOnce();
-  if (outcome?.ran) {
-    const report = outcome.result;
-    console.log(
-      `\nRéconciliation : ${report.anomalies.length} écart(s)` +
-        (report.anomalies.length
-          ? ` — ${JSON.stringify(
-              report.anomalies.reduce((acc, a) => ({ ...acc, [a.type]: (acc[a.type] || 0) + 1 }), {})
-            )}`
-          : " ✅")
-    );
-  } else {
-    console.log("\nRéconciliation non lancée (verrou détenu ailleurs) — elle passera au prochain contrôle.");
-  }
+  await reconcileNow();
 
   await mongoose.disconnect();
   process.exit(0);
