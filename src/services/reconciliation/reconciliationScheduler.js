@@ -432,25 +432,138 @@ async function getLastRun() {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Planification — ancrée sur le dernier passage ENREGISTRÉ                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ═══ POURQUOI L'ÉCHÉANCE SE CALCULE DEPUIS LA BASE, PAS DEPUIS LE PROCESSUS ═══
+ *
+ * Jusqu'au 2026-10-01 la boucle était un `setInterval(tick, 24 h)` sans premier
+ * tour. Le premier balayage n'arrivait donc qu'après 24 h de vie CONTINUE du
+ * processus — et chaque redémarrage remettait ce compte à zéro. Mesuré : sur
+ * l'hébergement de test (mise en veille après ~15 min sans trafic), le dernier
+ * passage datait de 2,2 jours et l'alerte `reconciliation_stale` s'est levée.
+ * En production le défaut demeurait : un service redéployé chaque jour ne se
+ * serait JAMAIS réconcilié.
+ *
+ * Désormais l'horloge est `reconciliation_runs` : à intervalle court, on
+ * regarde quand le dernier balayage COMPLET a commencé, et on balaie s'il est
+ * plus vieux que la période. C'est la sémantique de rattrapage des
+ * planificateurs modernes (Kubernetes CronJob `startingDeadlineSeconds`,
+ * schedules Temporal) : une échéance manquée est rattrapée au premier moment
+ * où le service est en vie, quelle que soit la durée de vie du processus.
+ *
+ * Plusieurs instances : chacune vérifie, `withCronLock` n'en laisse balayer
+ * qu'une, et les autres voient au contrôle suivant un passage récent.
+ */
+
+/** Cadence du CONTRÔLE d'échéance (une lecture indexée), pas du balayage. */
+const CHECK_EVERY_MS = 15 * 60 * 1000;
+
+/**
+ * Délai avant le premier contrôle : le balayage ne doit pas concurrencer la
+ * montée en charge de l'instance qui démarre (raison de l'ancien « pas de
+ * premier tour »), mais il ne doit plus attendre 24 h.
+ */
+const STARTUP_DELAY_MS = 60 * 1000;
+
+/**
+ * Après un ÉCHEC, on ne relance pas avant ce délai : une base en panne ne doit
+ * pas recevoir un balayage complet tous les quarts d'heure.
+ */
+const RETRY_AFTER_FAILURE_MS = 60 * 60 * 1000;
+
+const toMs = (value) => {
+  if (value == null) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+};
+
+/**
+ * Le balayage est-il dû ?
+ *
+ * Pure : l'heure et l'état lui sont donnés.
+ *
+ * @param {object} state
+ * @param {Date|null} state.lastCompletedAt  début du dernier balayage COMPLET
+ * @param {Date|null} state.lastAttemptAt    début de la dernière tentative, quelle qu'en soit l'issue
+ * @returns {{ due: boolean, reason: string, ageMs: (number|null) }}
+ */
+function decideRun(
+  { lastCompletedAt = null, lastAttemptAt = null } = {},
+  { now = Date.now(), periodMs, retryAfterMs = RETRY_AFTER_FAILURE_MS } = {}
+) {
+  const completedMs = toMs(lastCompletedAt);
+  const attemptMs = toMs(lastAttemptAt);
+  const ageMs = completedMs == null ? null : Math.max(0, now - completedMs);
+
+  if (completedMs != null && ageMs < periodMs) {
+    return { due: false, reason: "fresh", ageMs };
+  }
+
+  /**
+   * Une tentative plus récente que le dernier succès est un échec (ou un
+   * balayage en cours ailleurs, que le verrou couvrirait de toute façon).
+   */
+  if (attemptMs != null && (completedMs == null || attemptMs > completedMs)) {
+    if (now - attemptMs < retryAfterMs) {
+      return { due: false, reason: "retry-backoff", ageMs };
+    }
+  }
+
+  return { due: true, reason: completedMs == null ? "never-ran" : "overdue", ageMs };
+}
+
+/**
+ * L'état de planification lu en base.
+ *
+ * ⚠️ LÈVE en cas d'erreur — contrairement à `getLastRun`. Une base illisible
+ * ne doit pas se lire « jamais balayé » : le contrôle s'abstient et le dit.
+ */
+async function readScheduleState() {
+  const Run = runModel();
+
+  const [lastCompleted, lastAttempt] = await Promise.all([
+    Run.findOne({ job: JOB_NAME, status: "completed" })
+      .sort({ startedAt: -1 })
+      .select("startedAt")
+      .lean(),
+    Run.findOne({ job: JOB_NAME }).sort({ startedAt: -1 }).select("startedAt").lean(),
+  ]);
+
+  return {
+    lastCompletedAt: lastCompleted?.startedAt ?? null,
+    lastAttemptAt: lastAttempt?.startedAt ?? null,
+  };
+}
+
+const formatAge = (ms) =>
+  ms == null ? "aucun passage enregistré" : `dernier passage il y a ${(ms / 3600000).toFixed(1)} h`;
+
 /**
  * Démarre la boucle.
  *
- * ⚠️ PAS DE PREMIER TOUR AU DÉMARRAGE, contrairement au worker d'auto-annulation.
- * Un balayage complet pendant le démarrage entre en concurrence avec la montée
- * en charge de l'instance, et un redéploiement enchaînerait autant de balayages
- * que d'instances redémarrées. Le premier tour attend donc un intervalle —
- * la réconciliation est un contrôle périodique, pas une urgence.
+ * Premier contrôle `startupDelayMs` après le démarrage, puis toutes les
+ * `checkEveryMs`. Chaque contrôle ne balaie QUE si l'échéance est passée.
  *
- * @returns {{ stop: Function }|null} `null` si le worker est désactivé.
+ * @returns {{ check: Function, tick: Function, stop: Function }|null}
+ *          `null` si le worker est désactivé.
  */
 function startReconciliationWorker({
   intervalMs = Number(process.env.RECONCILIATION_INTERVAL_MS || 24 * 3600 * 1000),
   enabled = String(process.env.RECONCILIATION_WORKER ?? "true").toLowerCase() !== "false",
   /**
-   * Travail d'un tour. Injectable pour que le test de câblage exerce le VRAI
-   * `startReconciliationWorker` sans ouvrir de connexion Mongo (règle B.5).
+   * Travail d'un tour et lecture de l'état. Injectables pour que le test de
+   * câblage exerce le VRAI `startReconciliationWorker` sans ouvrir de
+   * connexion Mongo (règle B.5).
    */
   runOnce = runReconciliationOnce,
+  readState = readScheduleState,
+  checkEveryMs = CHECK_EVERY_MS,
+  startupDelayMs = STARTUP_DELAY_MS,
+  retryAfterMs = RETRY_AFTER_FAILURE_MS,
+  now = Date.now,
 } = {}) {
   if (!enabled) {
     logger.info?.(
@@ -471,44 +584,107 @@ function startReconciliationWorker({
    * Celle-là (exposée par le backend principal, qui lit `reconciliation_runs`)
    * dit quand la réconciliation a réellement BALAYÉ, quelle que soit
    * l'instance. Celle-ci dit que la BOUCLE DE CETTE INSTANCE est vivante.
-   *
-   * Conséquence assumée : un tour qui n'obtient pas le verrou (une autre
-   * instance balaie déjà) compte quand même comme un passage. C'est voulu —
-   * sinon, sur une flotte de trois instances, deux afficheraient un âge qui
-   * monte indéfiniment alors qu'elles fonctionnent parfaitement.
    */
   const metrics = declareWorker(WORKERS.RECONCILIATION, { logger });
 
   // Plancher à 1 minute : une valeur trop basse transformerait un contrôle en
   // charge permanente sur la base.
   const period = Math.max(60_000, Number(intervalMs) || 24 * 3600 * 1000);
+  // On ne contrôle jamais moins souvent qu'on ne balaie.
+  const checkEvery = Math.max(1_000, Math.min(Number(checkEveryMs) || CHECK_EVERY_MS, period));
 
-  const tick = async () => {
+  let inFlight = null;
+
+  /** Un balayage sous verrou. `ran: false` = une autre instance balaie. */
+  const sweep = async () => {
+    const outcome = await runOnce();
+    if (outcome && outcome.ran === false && !outcome.error) {
+      logger.info?.("[RECONCILE] balayage déjà en cours sur une autre instance — rien à faire ici.");
+    }
+    return outcome;
+  };
+
+  /**
+   * Un contrôle d'échéance : balaie seulement si le dernier passage est trop
+   * vieux. LÈVE si l'état est illisible — l'échec est alors compté par
+   * `metrics.record` (`worker_failures`), pas maquillé en « rien à faire ».
+   */
+  const runCheck = async () => {
+    let state;
     try {
-      await metrics.record(() => runOnce());
+      state = await readState();
+    } catch (err) {
+      logger.warn?.(
+        "[RECONCILE] état de planification illisible — contrôle ignoré, nouvel " +
+          `essai dans ${Math.round(checkEvery / 60000)} min. Tant que la lecture ` +
+          "échoue, aucune réconciliation ne tourne et l'alerte " +
+          "`reconciliation_stale` le signalera."
+      );
+      throw err;
+    }
+
+    const decision = decideRun(state, { now: now(), periodMs: period, retryAfterMs });
+    if (!decision.due) return { ran: false, reason: decision.reason };
+
+    logger.info?.(
+      `[RECONCILE] échéance passée (${formatAge(decision.ageMs)}) — balayage lancé.`
+    );
+    const outcome = await sweep();
+    return { ran: outcome?.ran === true, reason: decision.reason };
+  };
+
+  /**
+   * Chaque contrôle compte comme un passage de la boucle, balayage ou non :
+   * sur une flotte de trois instances, celles qui ne balaient pas n'ont pas à
+   * afficher un âge qui monte alors qu'elles fonctionnent.
+   */
+  const guarded = (fn) => async () => {
+    try {
+      return await metrics.record(fn);
     } catch (err) {
       logger.error?.("[RECONCILE] tour échoué", {
         message: err?.message || err,
       });
+      return null;
     }
   };
 
-  const timer = setInterval(tick, period);
+  const checkOnce = guarded(runCheck);
 
-  // `unref` : ce minuteur ne doit pas empêcher le processus de s'arrêter.
+  /** Jamais deux contrôles simultanés dans la même instance. */
+  const check = () => {
+    if (!inFlight) {
+      inFlight = checkOnce().finally(() => {
+        inFlight = null;
+      });
+    }
+    return inFlight;
+  };
+
+  /** Un balayage sans condition d'échéance (test, usage à la demande). */
+  const tick = guarded(sweep);
+
+  const startupTimer = setTimeout(check, Math.max(0, Number(startupDelayMs) || 0));
+  const timer = setInterval(check, checkEvery);
+
+  // `unref` : ces minuteurs ne doivent pas empêcher le processus de s'arrêter.
+  if (typeof startupTimer.unref === "function") startupTimer.unref();
   if (typeof timer.unref === "function") timer.unref();
 
   logger.info?.(
     `[RECONCILE] worker actif — un balayage toutes les ${Math.round(
-      period / 60000
-    )} min, un seul exécutant par fenêtre.`
+      period / 3600000
+    )} h, calculé depuis le dernier passage enregistré (rattrapage vérifié ` +
+      `toutes les ${Math.round(checkEvery / 60000)} min, premier contrôle dans ` +
+      `${Math.round(startupDelayMs / 1000)} s), un seul exécutant par fenêtre.`
   );
 
   return {
-    /** Un tour, à la demande. Exposé pour le test de câblage. */
+    check,
     tick,
 
     stop() {
+      clearTimeout(startupTimer);
       clearInterval(timer);
       logger.info?.("[RECONCILE] worker arrêté");
     },
@@ -520,6 +696,11 @@ module.exports = {
   startReconciliationWorker,
   runReconciliationOnce,
   getLastRun,
+  readScheduleState,
+  decideRun,
+  CHECK_EVERY_MS,
+  STARTUP_DELAY_MS,
+  RETRY_AFTER_FAILURE_MS,
   // exportés pour les tests, et pour `scripts/reconcileTransactions.js`
   summarizeAnomalies,
   buildRunDocument,

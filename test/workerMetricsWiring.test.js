@@ -108,7 +108,10 @@ const WORKERS_REELS = [
     nom: WORKERS.RECONCILIATION,
     demarrer: (runOnce) =>
       startReconciliationWorker({ intervalMs: 3600_000, enabled: true, runOnce }),
-    /** Pas de premier tour au démarrage — choix documenté du planificateur. */
+    /**
+     * Pas de balayage SYNCHRONE au démarrage : le premier contrôle d'échéance
+     * est différé (60 s) pour ne pas concurrencer la montée en charge.
+     */
     tourAuDemarrage: false,
   },
   {

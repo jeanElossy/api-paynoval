@@ -229,3 +229,179 @@ test("le worker se désactive proprement par variable d'environnement", () => {
 
   assert.equal(handle, null, "désactivé ⇒ aucun minuteur, aucun effet de bord");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Planification — rattrapage ancré sur le dernier passage enregistré          */
+/* -------------------------------------------------------------------------- */
+
+const {
+  decideRun,
+  startReconciliationWorker,
+  CHECK_EVERY_MS,
+} = require("../src/services/reconciliation/reconciliationScheduler");
+
+const HOUR = 3600 * 1000;
+const DAY = 24 * HOUR;
+const NOW = Date.parse("2026-10-01T12:00:00Z");
+const ago = (ms) => new Date(NOW - ms);
+
+test("échéance : aucun passage enregistré ⇒ balayage dû", () => {
+  const d = decideRun({}, { now: NOW, periodMs: DAY });
+  assert.equal(d.due, true);
+  assert.equal(d.reason, "never-ran");
+});
+
+test("échéance : dernier passage complet il y a 2,2 j ⇒ balayage dû (l'alerte du 2026-10-01)", () => {
+  const last = ago(2.2 * DAY);
+  const d = decideRun({ lastCompletedAt: last, lastAttemptAt: last }, { now: NOW, periodMs: DAY });
+  assert.equal(d.due, true);
+  assert.equal(d.reason, "overdue");
+});
+
+test("échéance : dernier passage complet il y a 3 h ⇒ rien à faire", () => {
+  const last = ago(3 * HOUR);
+  const d = decideRun({ lastCompletedAt: last, lastAttemptAt: last }, { now: NOW, periodMs: DAY });
+  assert.equal(d.due, false);
+  assert.equal(d.reason, "fresh");
+});
+
+test("échéance : un échec récent retient le balayage — une base en panne n'est pas martelée", () => {
+  const d = decideRun(
+    { lastCompletedAt: ago(2 * DAY), lastAttemptAt: ago(10 * 60 * 1000) },
+    { now: NOW, periodMs: DAY, retryAfterMs: HOUR }
+  );
+  assert.equal(d.due, false);
+  assert.equal(d.reason, "retry-backoff");
+});
+
+test("échéance : un échec ancien ne bloque pas le rattrapage indéfiniment", () => {
+  const d = decideRun(
+    { lastCompletedAt: ago(2 * DAY), lastAttemptAt: ago(2 * HOUR) },
+    { now: NOW, periodMs: DAY, retryAfterMs: HOUR }
+  );
+  assert.equal(d.due, true);
+});
+
+test("échéance : une date illisible compte comme « jamais balayé », pas comme « frais »", () => {
+  const d = decideRun({ lastCompletedAt: "pas une date" }, { now: NOW, periodMs: DAY });
+  assert.equal(d.due, true);
+});
+
+/**
+ * LE TEST DE LA PANNE DU 2026-10-01 (règle B.5).
+ *
+ * L'ancien worker ne faisait qu'un `setInterval(tick, 24 h)` : un processus qui
+ * vit moins de 24 h (mise en veille, redéploiement) ne balayait JAMAIS. Ce
+ * test démarre le VRAI worker, avance l'horloge du seul délai de démarrage, et
+ * exige un balayage. Sur l'ancien code, aucun balayage n'a lieu avant 24 h.
+ */
+test("un service qui démarre après une échéance manquée balaie sans attendre 24 h", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+
+  let sweeps = 0;
+  const handle = startReconciliationWorker({
+    enabled: true,
+    intervalMs: DAY,
+    startupDelayMs: 60_000,
+    now: () => NOW,
+    readState: async () => ({ lastCompletedAt: ago(2.2 * DAY), lastAttemptAt: ago(2.2 * DAY) }),
+    runOnce: async () => {
+      sweeps += 1;
+      return { ran: true };
+    },
+  });
+
+  try {
+    t.mock.timers.tick(60_000);
+    // Laisse s'écouler les promesses du contrôle déclenché par le minuteur.
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+
+    assert.equal(sweeps, 1, "l'échéance manquée doit être rattrapée au premier contrôle");
+  } finally {
+    handle.stop();
+  }
+});
+
+test("le contrôle ne balaie pas quand le dernier passage est récent", async () => {
+  let sweeps = 0;
+  const handle = startReconciliationWorker({
+    enabled: true,
+    intervalMs: DAY,
+    startupDelayMs: 10 * DAY,
+    now: () => NOW,
+    readState: async () => ({ lastCompletedAt: ago(HOUR), lastAttemptAt: ago(HOUR) }),
+    runOnce: async () => {
+      sweeps += 1;
+      return { ran: true };
+    },
+  });
+
+  try {
+    const r = await handle.check();
+    assert.equal(r.ran, false);
+    assert.equal(r.reason, "fresh");
+    assert.equal(sweeps, 0);
+  } finally {
+    handle.stop();
+  }
+});
+
+test("un état illisible n'est PAS pris pour « jamais balayé » : on s'abstient", async () => {
+  let sweeps = 0;
+  const handle = startReconciliationWorker({
+    enabled: true,
+    intervalMs: DAY,
+    startupDelayMs: 10 * DAY,
+    readState: async () => {
+      throw new Error("base injoignable");
+    },
+    runOnce: async () => {
+      sweeps += 1;
+      return { ran: true };
+    },
+  });
+
+  try {
+    const r = await handle.check();
+    assert.equal(r, null, "le contrôle échoue, il est compté et journalisé");
+    assert.equal(sweeps, 0, "aucun balayage à l'aveugle");
+  } finally {
+    handle.stop();
+  }
+});
+
+test("deux contrôles simultanés dans une instance ne lancent qu'un balayage", async () => {
+  let sweeps = 0;
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+
+  const handle = startReconciliationWorker({
+    enabled: true,
+    intervalMs: DAY,
+    startupDelayMs: 10 * DAY,
+    now: () => NOW,
+    readState: async () => ({ lastCompletedAt: null, lastAttemptAt: null }),
+    runOnce: async () => {
+      sweeps += 1;
+      await gate;
+      return { ran: true };
+    },
+  });
+
+  try {
+    const a = handle.check();
+    const b = handle.check();
+    assert.equal(a, b, "le second appel rejoint le contrôle en cours");
+    release();
+    await Promise.all([a, b]);
+    assert.equal(sweeps, 1);
+  } finally {
+    handle.stop();
+  }
+});
+
+test("le contrôle d'échéance tourne au plus tous les quarts d'heure", () => {
+  assert.ok(CHECK_EVERY_MS <= 15 * 60 * 1000);
+});
