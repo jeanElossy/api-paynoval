@@ -42,6 +42,7 @@
  */
 
 const createError = require("http-errors");
+const { liveOnlyFilter } = require("../utils/accountMode");
 
 // ⚠️ On garde l'objet `runtime` et on résout les modèles au moment de l'appel,
 // sans déstructurer : `runtime.LedgerEntry` / `runtime.Transaction` sont des
@@ -208,9 +209,19 @@ function changePercent(current, previous) {
   return round2(((c - p) / Math.abs(p)) * 100);
 }
 
+/**
+ * Toute agrégation de ce tableau de bord porte sur la PRODUCTION : la première
+ * étape écarte les écritures de simulation (`utils/accountMode`). Posée ici,
+ * dans l'unique point d'entrée, elle ne peut pas être oubliée par une
+ * agrégation future. MongoDB fusionne les `$match` consécutifs : aucun coût
+ * d'index.
+ */
 function aggLedger(pipeline) {
   // Résolution paresseuse : voir le commentaire sur l'import de `runtime`.
-  return runtime.LedgerEntry.aggregate(pipeline).option({
+  return runtime.LedgerEntry.aggregate([
+    { $match: liveOnlyFilter() },
+    ...pipeline,
+  ]).option({
     maxTimeMS: AGG_TIMEOUT_MS,
   });
 }

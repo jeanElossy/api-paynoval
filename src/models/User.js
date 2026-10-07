@@ -657,6 +657,24 @@ const userSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * Mode du compte (2026-10-06) — `utils/accountMode.js`. La base Users est
+     * écrite par le backend principal, qui pose ce champ à la création et ne
+     * le modifie jamais ; il est déclaré ici pour être LU tel quel.
+     */
+    mode: {
+      type: String,
+      enum: ["live", "sandbox"],
+      immutable: true,
+    },
+
+    /** Jeu de comptes de démonstration : les comptes d'un groupe se voient. */
+    sandboxGroupId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+      immutable: true,
+    },
+
     isSandbox: {
       type: Boolean,
       default: false,

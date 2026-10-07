@@ -6,15 +6,7 @@ const runtime = require("../shared/runtime");
 const { canTransition } = require("../../transactionStateMachine");
 const { resolveExecutor } = require("../providers/providerExecutorRegistry");
 
-const {
-  isSandboxUser,
-  resolveUserId,
-} = require("../../../utils/sandboxUser");
-
-const {
-  assertProviderAllowedForUser,
-  normalizeProvider,
-} = require("../../../utils/sandboxProviderGuard");
+const { requireMode } = require("../../../utils/accountMode");
 
 const {
   startTxSession,
@@ -142,158 +134,6 @@ function safeEndSession(session) {
   } catch (_) {}
 }
 
-function safeObject(v) {
-  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
-}
-
-function normalizeId(v) {
-  return String(v || "").trim();
-}
-
-function buildSandboxCheckUser({ req, tx }) {
-  const reqUser = safeObject(req?.user);
-
-  return {
-    ...reqUser,
-
-    _id:
-      reqUser._id ||
-      reqUser.id ||
-      tx?.sender ||
-      tx?.userId ||
-      tx?.user ||
-      tx?.createdBy ||
-      tx?.ownerUserId ||
-      null,
-
-    id:
-      reqUser.id ||
-      reqUser._id ||
-      tx?.sender ||
-      tx?.userId ||
-      tx?.user ||
-      tx?.createdBy ||
-      tx?.ownerUserId ||
-      null,
-
-    email:
-      reqUser.email ||
-      tx?.senderEmail ||
-      tx?.recipientEmail ||
-      tx?.metadata?.requesterEmail ||
-      tx?.meta?.requesterEmail ||
-      null,
-
-    isSandbox:
-      reqUser.isSandbox === true ||
-      tx?.isSandbox === true ||
-      tx?.metadata?.sandbox === true ||
-      tx?.meta?.sandbox === true,
-
-    isReviewerAccount:
-      reqUser.isReviewerAccount === true ||
-      tx?.metadata?.isReviewerAccount === true ||
-      tx?.meta?.isReviewerAccount === true,
-  };
-}
-
-function isSandboxTransaction({ req, tx }) {
-  const user = buildSandboxCheckUser({ req, tx });
-
-  return Boolean(
-    tx?.isSandbox === true ||
-      tx?.provider === "sandbox" ||
-      tx?.channel === "sandbox" ||
-      tx?.metadata?.source === "apple_review_sandbox" ||
-      tx?.meta?.source === "apple_review_sandbox" ||
-      isSandboxUser(user)
-  );
-}
-
-function buildSandboxProviderReference(tx) {
-  if (tx?.providerReference) return tx.providerReference;
-
-  const txId = tx?._id ? String(tx._id).slice(-8).toUpperCase() : "NOID";
-  return `SBX-PROVIDER-SKIPPED-${txId}`;
-}
-
-async function markSandboxExecutionSkipped({ tx, sessOpts }) {
-  const now = new Date();
-
-  tx.provider = "sandbox";
-  tx.channel = "sandbox";
-  tx.providerStatus = "sandbox_completed";
-  tx.providerReference = buildSandboxProviderReference(tx);
-
-  /**
-   * ⚠️ CORRECTIF — même défaut que dans `confirmTransaction.js`.
-   *
-   * `"completed"` n'appartient pas à `STATUSES` (`models/Transaction.js:47-58`) :
-   * le `tx.save()` plus bas levait une erreur de validation Mongoose, et la
-   * barrière sandbox de la revue App Store échouait en 500.
-   *
-   * Le statut de succès déclaré est `"confirmed"`. Voir le commentaire détaillé
-   * dans `confirmTransaction.js` (`applySandboxConfirm`) pour la raison de ne
-   * PAS élargir l'énumération à la place.
-   */
-  if (!tx.status || ["pending", "processing", "initiated"].includes(String(tx.status))) {
-    tx.status = "confirmed";
-  }
-
-  tx.isSandbox = true;
-  tx.fundsCaptured = tx.fundsCaptured === true ? true : true;
-
-  tx.metadata = {
-    ...(tx.metadata || {}),
-    sandbox: true,
-    execution: {
-      ...(tx.metadata?.execution || {}),
-      skippedProviderExecution: true,
-      skippedReason: "APPLE_REVIEW_SANDBOX",
-      submittedAt: now.toISOString(),
-      resolvedProvider: "sandbox",
-      providerResponse: {
-        ok: true,
-        sandbox: true,
-        message: "Aucun provider réel appelé pour Apple Review.",
-      },
-    },
-  };
-
-  tx.meta = {
-    ...(tx.meta || {}),
-    sandbox: true,
-    providerExecutionSkipped: true,
-  };
-
-  tx.completedAt = tx.completedAt || now;
-  tx.updatedAt = now;
-
-  await tx.save(sessOpts);
-
-  return {
-    success: true,
-    sandbox: true,
-    providerSkipped: true,
-    transactionId: tx._id.toString(),
-    status: tx.status,
-    providerStatus: tx.providerStatus,
-    providerReference: tx.providerReference,
-    provider: "sandbox",
-  };
-}
-
-function resolveProviderCandidate({ tx, resolved }) {
-  return normalizeProvider(
-    tx?.provider ||
-      resolved?.provider ||
-      tx?.channel ||
-      tx?.metadata?.provider ||
-      tx?.meta?.provider ||
-      ""
-  );
-}
-
 /**
  * ============================================================================
  * SOUMISSION AU PRESTATAIRE — L'APPEL RÉSEAU EST HORS TRANSACTION
@@ -330,23 +170,18 @@ async function submitExternalExecution({ req, transactionId }) {
   }
 
   /**
-   * Barriere de securite Apple Review :
-   * Une transaction sandbox ne doit jamais appeler un executor reel.
+   * MODE DE SIMULATION (2026-10-06) — AUCUNE BRANCHE ICI.
+   *
+   * Une transaction sandbox suit EXACTEMENT ce chemin : l'exécuteur passe son
+   * `mode` à la fabrique (`providerSelector.getProviderAdapter`), qui rend
+   * l'adapter de simulation. L'ancien raccourci Apple Review — marquer la
+   * transaction « confirmée » sans exécuteur ni règlement — est retiré : il
+   * faisait de la simulation un chemin parallèle, sans frais ni grand livre.
+   *
+   * Le mode est EXIGÉ avant tout appel : une transaction au mode illisible ne
+   * part chez aucun prestataire (règle B.2).
    */
-  if (isSandboxTransaction({ req, tx })) {
-    const session = await startTxSession();
-
-    try {
-      return await runInTransaction(session, (activeSession) =>
-        markSandboxExecutionSkipped({
-          tx,
-          sessOpts: maybeSessionOpts(activeSession),
-        })
-      );
-    } finally {
-      safeEndSession(session);
-    }
-  }
+  requireMode(tx.mode, `transaction ${String(tx._id)}`);
 
   const resolved = resolveExecutor({
     flow: tx.flow,
@@ -356,16 +191,6 @@ async function submitExternalExecution({ req, transactionId }) {
   if (!resolved || typeof resolved.execute !== "function") {
     throw createError(400, `Aucun executor trouve pour le flow ${tx.flow}`);
   }
-
-  const sandboxCheckUser = buildSandboxCheckUser({ req, tx });
-  const providerCandidate = resolveProviderCandidate({ tx, resolved });
-
-  /**
-   * Deuxieme barriere :
-   * Meme si la tx n'est pas marquee isSandbox, si le user Apple Review tente un
-   * provider reel, on bloque.
-   */
-  assertProviderAllowedForUser(sandboxCheckUser, providerCandidate);
 
   if (!tx.provider && resolved.provider) {
     tx.provider = resolved.provider;
@@ -475,6 +300,8 @@ async function submitExternalExecution({ req, transactionId }) {
     providerStatus: tx.providerStatus,
     providerReference: tx.providerReference,
     provider: tx.provider || resolved.provider || null,
+    // Déjà passée en liste blanche par l'exécuteur (`providers/nextAction`).
+    nextAction: result?.nextAction || null,
   };
 }
 

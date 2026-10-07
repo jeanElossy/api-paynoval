@@ -239,6 +239,7 @@ test("une portée fournie pose une clé sur CHAQUE jambe", async () => {
   const svc = loadService(ledger);
 
   await svc.postDoubleEntry({
+    mode: "live",
     transactionId: "tx1",
     entryType: "RESERVE",
     legs: BALANCED_LEGS,
@@ -256,6 +257,7 @@ test("sans portée, le champ n'est pas écrit du tout", async () => {
   const svc = loadService(ledger);
 
   await svc.postDoubleEntry({
+    mode: "live",
     transactionId: "tx1",
     entryType: "REFUND",
     legs: BALANCED_LEGS,
@@ -284,6 +286,7 @@ test("un rejeu déjà enregistré réussit en silence — il ne double rien", as
   ledger.state.throwDuplicate = true;
 
   const result = await svc.postDoubleEntry({
+    mode: "live",
     transactionId: "tx1",
     entryType: "RESERVE",
     legs: BALANCED_LEGS,
@@ -310,6 +313,7 @@ test("un lot INCOMPLET est signalé, jamais absorbé", async () => {
   await assert.rejects(
     () =>
       svc.postDoubleEntry({
+        mode: "live",
         transactionId: "tx1",
         entryType: "RESERVE",
         legs: BALANCED_LEGS,
@@ -337,6 +341,7 @@ test("sous une VRAIE transaction, la collision est relancée", async () => {
   await assert.rejects(
     () =>
       svc.postDoubleEntry({
+        mode: "live",
         transactionId: "tx1",
         entryType: "RESERVE",
         legs: BALANCED_LEGS,
@@ -375,6 +380,7 @@ test("EN MODE DÉGRADÉ, une session ne suffit pas à désactiver le rattrapage"
   ledger.state.throwDuplicate = true;
 
   const result = await svc.postDoubleEntry({
+    mode: "live",
     transactionId: "tx1",
     entryType: "RESERVE",
     legs: BALANCED_LEGS,
@@ -396,6 +402,7 @@ test("le lot part en UNE commande ordonnée, pas en écritures parallèles", asy
   const svc = loadService(ledger);
 
   await svc.postDoubleEntry({
+    mode: "live",
     transactionId: "tx1",
     entryType: "RESERVE",
     legs: BALANCED_LEGS,
@@ -422,6 +429,7 @@ test("le rattrapage rend les jambes DANS L'ORDRE du lot", async () => {
   ledger.state.throwDuplicate = true;
 
   const result = await svc.postDoubleEntry({
+    mode: "live",
     transactionId: "tx1",
     entryType: "RESERVE",
     legs: BALANCED_LEGS,
@@ -444,6 +452,7 @@ test("une erreur qui n'est PAS un doublon remonte intacte", async () => {
   await assert.rejects(
     () =>
       svc.postDoubleEntry({
+        mode: "live",
         transactionId: "tx1",
         entryType: "RESERVE",
         legs: BALANCED_LEGS,

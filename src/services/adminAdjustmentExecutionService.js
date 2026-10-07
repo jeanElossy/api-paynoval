@@ -47,6 +47,16 @@ try {
 
 /** Contrepartie unique de tout ajustement manuel. */
 const TREASURY_SYSTEM_TYPE = "OPERATIONS_TREASURY";
+
+/**
+ * Un ajustement du back-office est une opération de PRODUCTION : il débite ou
+ * crédite la vraie trésorerie d'opérations. Le mode est donc posé « live » en
+ * dur, et c'est ce qui le rend inapplicable à un compte sandbox — le
+ * portefeuille de simulation ne répond pas à une opération live
+ * (`TxWalletBalance.ensureWallet` lève `MODE_MISMATCH`). Un compte de
+ * simulation se recharge par son propre robinet (`services/sandbox/`).
+ */
+const ADJUSTMENT_MODE = "live";
 const TREASURY_LABEL = "PayNoval Operations Treasury";
 
 const DIRECTIONS = new Set(["credit", "debit"]);
@@ -260,6 +270,7 @@ function buildAdjustmentTransaction({
   };
 
   return {
+    mode: ADJUSTMENT_MODE,
     reference,
     idempotencyKey,
     internalImported: false,
@@ -452,9 +463,15 @@ async function executeAdminAdjustment(payload = {}) {
           session,
         });
 
-        await TxWalletBalance.credit(userId, currency, amount, sessionOpts);
+        await TxWalletBalance.credit(userId, currency, amount, {
+          ...sessionOpts,
+          mode: ADJUSTMENT_MODE,
+        });
       } else {
-        await TxWalletBalance.debit(userId, currency, amount, sessionOpts);
+        await TxWalletBalance.debit(userId, currency, amount, {
+          ...sessionOpts,
+          mode: ADJUSTMENT_MODE,
+        });
 
         await ledger.creditSystemWallet({
           treasuryUserId,
@@ -495,6 +512,7 @@ async function executeAdminAdjustment(payload = {}) {
        * `currency`, l'équilibre par devise est donc trivialement satisfait.
        */
       await ledger.postDoubleEntry({
+        mode: ADJUSTMENT_MODE,
         transactionId: transaction._id,
         reference,
         entryType: "ADJUSTMENT",

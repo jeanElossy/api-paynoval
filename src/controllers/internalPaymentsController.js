@@ -34,6 +34,31 @@ const { runWithTransaction } = require("../utils/transactionRunner");
  * laisserait exactement l'incohérence qu'on vient de fermer.
  */
 const { postInternalPaymentEntries } = require("../services/ledgerService");
+const { ACCOUNT_MODES, resolveUserMode } = require("../utils/accountMode");
+
+/**
+ * PAIEMENTS INTERNES : PRODUCTION SEULEMENT.
+ *
+ * Ce point de terminaison porte les participations aux cagnottes et les
+ * mouvements contre le compte administrateur — deux usages qui n'existent pas
+ * en simulation. Un compte sandbox est refusé ici, et les mouvements sont
+ * posés « live » en dur : même si la garde venait à manquer, un portefeuille
+ * de simulation ne répondrait pas (`TxWalletBalance` lève `MODE_MISMATCH`).
+ */
+const INTERNAL_PAYMENT_MODE = ACCOUNT_MODES.LIVE;
+const USER_MODE_FIELDS = "mode isSandbox isReviewerAccount";
+
+function assertLiveParticipant(user, role) {
+  if (user && resolveUserMode(user) !== ACCOUNT_MODES.LIVE) {
+    const err = createError(
+      403,
+      "Opération indisponible pour un compte de simulation."
+    );
+    err.code = "SANDBOX_FEATURE_UNAVAILABLE";
+    err.details = { role };
+    throw err;
+  }
+}
 
 const sanitize = (text) =>
   String(text || "").replace(/[<>\\/{};]/g, "").trim();
@@ -199,6 +224,7 @@ async function createInternalTransactionDocument({
   const [tx] = await Transaction.create(
     [
       {
+        mode: INTERNAL_PAYMENT_MODE,
         reference,
         sender: senderUser._id,
         receiver: receiverId,
@@ -408,7 +434,7 @@ exports.createInternalPayment = async (req, res, next) => {
       if (fromUserId) {
         logger.info("[internal-payments] load-fromUser", { correlationId, fromUserId });
         fromUser = await User.findById(fromUserId)
-          .select("_id email fullName country")
+          .select(`_id email fullName country ${USER_MODE_FIELDS}`)
           .session(session || null);
 
         if (!fromUser) throw createError(404, "Utilisateur fromUserId introuvable.");
@@ -417,11 +443,14 @@ exports.createInternalPayment = async (req, res, next) => {
       if (toUserId) {
         logger.info("[internal-payments] load-toUser", { correlationId, toUserId });
         toUser = await User.findById(toUserId)
-          .select("_id email fullName country")
+          .select(`_id email fullName country ${USER_MODE_FIELDS}`)
           .session(session || null);
 
         if (!toUser) throw createError(404, "Utilisateur toUserId introuvable.");
       }
+
+      assertLiveParticipant(fromUser, "from");
+      assertLiveParticipant(toUser, "to");
 
       if (mode === "credit" && !fromUser) fromUser = adminUser;
       if (mode === "debit" && !toUser) toUser = adminUser;
@@ -525,7 +554,7 @@ exports.createInternalPayment = async (req, res, next) => {
           sourceUser._id,
           effectiveCurrency,
           amt,
-          maybeSessionOpts(session)
+          { ...maybeSessionOpts(session), mode: INTERNAL_PAYMENT_MODE }
         );
 
         debited = true;
@@ -548,7 +577,7 @@ exports.createInternalPayment = async (req, res, next) => {
           targetUser._id,
           effectiveCurrency,
           amt,
-          maybeSessionOpts(session)
+          { ...maybeSessionOpts(session), mode: INTERNAL_PAYMENT_MODE }
         );
 
         credited = true;

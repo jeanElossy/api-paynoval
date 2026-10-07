@@ -1,5 +1,8 @@
 "use strict";
 
+/** Parrainage : production seulement — voir `internalReferralTransferService`. */
+const REFERRAL_ACCOUNT_MODE = "live";
+
 /**
  * ============================================================================
  * REPRISE D'UN BONUS DE PARRAINAGE (CLAWBACK)
@@ -186,6 +189,7 @@ async function reverseReferralBonus({
         /* 2. Le portefeuille peut-il rendre le bonus ? Lu DANS la transaction. */
         const wallet = await TxWalletBalance.findWallet(p.beneficiaryId, currency, {
           session,
+          mode: REFERRAL_ACCOUNT_MODE,
         });
 
         if (!wallet || wallet.status !== "active") {
@@ -209,6 +213,7 @@ async function reverseReferralBonus({
 
         const updated = await TxWalletBalance.debit(p.beneficiaryId, currency, amount, {
           session,
+          mode: REFERRAL_ACCOUNT_MODE,
         });
 
         /* 3. La trésorerie récupère exactement ce qu'elle a déboursé. */
@@ -241,6 +246,7 @@ async function reverseReferralBonus({
         const [txDoc] = await Transaction.create(
           [
             {
+              mode: REFERRAL_ACCOUNT_MODE,
               reference,
               idempotencyKey: buildClawbackIdempotencyKey(reward, p.beneficiaryId),
               internalImported: false,

@@ -194,10 +194,12 @@ test("toute transition déclarée mène vers un statut valide", () => {
   }
 });
 
-test("le statut de succès du chemin sandbox est bien le statut déclaré", () => {
+test("aucun chemin d'exécution n'écrit le statut inexistant « completed »", () => {
   /**
-   * Test ciblé sur les deux sites précis qui portaient le défaut, pour que la
-   * régression soit nommée et non seulement couverte par l'invariant général.
+   * Test ciblé sur les deux sites qui portaient le défaut (l'ancien raccourci
+   * sandbox de la revue App Store). Ce raccourci a été RETIRÉ le 2026-10-06 :
+   * une transaction sandbox suit désormais le chemin réel. La garde reste — un
+   * statut hors énumération lève à l'écriture.
    */
   const files = [
     "services/transactions/handlers/confirmTransaction.js",
@@ -213,8 +215,16 @@ test("le statut de succès du chemin sandbox est bien le statut déclaré", () =
     );
 
     assert.ok(
-      /\.status\s*=\s*["']confirmed["']/.test(src),
-      `${rel} doit écrire « confirmed »`
+      !/sandbox_completed/.test(src),
+      `${rel} contient encore le raccourci sandbox (« sandbox_completed »)`
     );
   }
+
+  const confirm = stripComments(
+    fs.readFileSync(path.join(SRC, "services/transactions/handlers/confirmTransaction.js"), "utf8")
+  );
+  assert.ok(
+    /\.status\s*=\s*["']confirmed["']/.test(confirm),
+    "confirmTransaction.js doit écrire « confirmed »"
+  );
 });

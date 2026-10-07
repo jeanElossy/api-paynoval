@@ -15,6 +15,7 @@ function normCurrency(v) {
 }
 
 const { serializeTransaction } = require("./transactionSerializer");
+const { MODE_VALUES } = require("../utils/accountMode");
 
 function normalizeMixedObject(v) {
   return isPlainObject(v) ? v : null;
@@ -95,6 +96,21 @@ function requiresSecurityChallenge(flow) {
 
 const transactionSchema = new mongoose.Schema(
   {
+    /**
+     * Mode du compte qui a initié la transaction — `utils/accountMode.js`.
+     *
+     * Requis, SANS défaut : une transaction dont le mode n'a pas été posé
+     * explicitement ne s'écrit pas (règle B.2). Un défaut « live » ferait
+     * d'un oubli dans un handler de simulation un ordre de paiement réel.
+     * Immuable : le mode d'une transaction ne se réécrit jamais.
+     */
+    mode: {
+      type: String,
+      enum: MODE_VALUES,
+      required: true,
+      immutable: true,
+    },
+
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

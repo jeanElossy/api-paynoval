@@ -46,6 +46,7 @@
  */
 
 const mongoose = require("mongoose");
+const { resolveUserMode } = require("../utils/accountMode");
 
 const logger = require("../logger");
 
@@ -96,6 +97,12 @@ async function ensureWallet(req, res) {
     "admin", "superadmin", "compliance", "security", "fraud-analyst",
   ];
 
+  /**
+   * Le portefeuille naît dans le mode de son propriétaire, lu dans la base
+   * Users (qui fait foi) — jamais dans celui que l'appelant voudrait donner.
+   */
+  let ownerMode = null;
+
   try {
     const { getUsersConn } = require("../config/db");
 
@@ -103,7 +110,18 @@ async function ensureWallet(req, res) {
       .db.collection("users")
       .findOne(
         { _id: new mongoose.Types.ObjectId(userId) },
-        { projection: { isSystem: 1, isStaff: 1, userType: 1, role: 1, systemType: 1 } }
+        {
+          projection: {
+            isSystem: 1,
+            isStaff: 1,
+            userType: 1,
+            role: 1,
+            systemType: 1,
+            mode: 1,
+            isSandbox: 1,
+            isReviewerAccount: 1,
+          },
+        }
       );
 
     if (!owner) {
@@ -113,6 +131,8 @@ async function ensureWallet(req, res) {
         error: "Compte introuvable : aucun portefeuille ouvert.",
       });
     }
+
+    ownerMode = resolveUserMode(owner);
 
     const interne =
       owner.isSystem === true ||
@@ -170,7 +190,9 @@ async function ensureWallet(req, res) {
       });
     }
 
-    const wallet = await TxWalletBalance.ensureWallet(userId, currency);
+    const wallet = await TxWalletBalance.ensureWallet(userId, currency, {
+      mode: ownerMode,
+    });
 
     if (!wallet) {
       return res.status(500).json({

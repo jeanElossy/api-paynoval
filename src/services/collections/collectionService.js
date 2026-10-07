@@ -287,6 +287,32 @@ async function initiateCollection(conn, entree = {}) {
     );
   }
 
+  /**
+   * CAGNOTTE DE SIMULATION : AUCUN PAIEMENT INVITÉ (2026-10-06).
+   *
+   * Un invité paie par un VRAI moyen de paiement, sans compte : sur une
+   * cagnotte de simulation, son argent réel atterrirait dans un coffre fictif.
+   * Les cagnottes de simulation se démontrent dans l'application, entre
+   * comptes sandbox d'un même groupe. Ici on refuse, en fermeture : un code
+   * qui ne désigne aucune cagnotte connue est laissé au contrôle existant.
+   */
+  if (purpose === "cagnotte_participation") {
+    const { loadCagnotteScope, loadCagnotteScopeByCode } = require("../cagnotte/cagnotteScope");
+    const scope = norm(entree.target?.cagnotteId)
+      ? await loadCagnotteScope(entree.target.cagnotteId).catch((err) =>
+          err?.code === "CAGNOTTE_NOT_FOUND" ? null : Promise.reject(err)
+        )
+      : await loadCagnotteScopeByCode(entree.target?.cagnotteCode);
+
+    if (scope?.mode === "sandbox") {
+      throw new CollectionError(
+        403,
+        "SANDBOX_GUEST_PAYMENT_DISABLED",
+        "Paiement invité indisponible pour une cagnotte de simulation."
+      );
+    }
+  }
+
   const reference = referenceFromIdempotencyKey(entree.idempotencyKey);
   const Model = getModel(conn);
 
@@ -352,7 +378,9 @@ async function initiateCollection(conn, entree = {}) {
    * appeler d'abord, écrire ensuite — perdrait la trace d'un prélèvement
    * réellement demandé au prestataire.
    */
-  const adapter = getProviderAdapter({ rail, provider });
+  // Encaissement public (payeur sans compte) : production seulement — aucune
+  // cagnotte ni lien d'encaissement n'existe en simulation.
+  const adapter = getProviderAdapter({ rail, provider, mode: "live" });
 
   if (!adapter || typeof adapter.collect !== "function") {
     await Model.updateOne(

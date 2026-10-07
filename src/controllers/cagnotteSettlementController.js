@@ -37,6 +37,16 @@
 const crypto = require("node:crypto");
 const asyncHandler = require("express-async-handler");
 const mongoose = require("mongoose");
+const {
+  resolveUserMode,
+  modeMatchFilter,
+  storedModeOf,
+} = require("../utils/accountMode");
+const { treasurySystemTypeForMode } = require("../services/treasuryRegistry");
+const {
+  loadCagnotteScope,
+  assertUserInCagnotteScope,
+} = require("../services/cagnotte/cagnotteScope");
 
 const { getTxConn, getUsersConn } = require("../config/db");
 const buildTxWalletBalanceModel = require("../models/TxWalletBalance");
@@ -158,7 +168,13 @@ function walletAfter(doc) {
   };
 }
 
-function treasuryFor(systemType) {
+/**
+ * Trésorerie d'un rôle DANS LE MODE de la cagnotte : une cagnotte de
+ * simulation verse ses frais à `SANDBOX_CAGNOTTE_FEES_TREASURY`, jamais à la
+ * vraie (`treasuryRegistry.treasurySystemTypeForMode`).
+ */
+function treasuryFor(liveSystemType, mode) {
+  const systemType = treasurySystemTypeForMode(liveSystemType, mode);
   try {
     return { userId: getTreasuryUserIdBySystemType(systemType), systemType };
   } catch {
@@ -254,13 +270,24 @@ async function loadParticipant(userId) {
  * (`middleware/aml.js`) — même porte que les virements, aucune architecture
  * parallèle. Le participant est lu en base, jamais pris dans le corps.
  */
+/** Vue minimale du participant : identité, devise, et sa portée de mode. */
+function participantOf(user, currency) {
+  return {
+    userId: String(user._id),
+    currency,
+    country: user.country || null,
+    mode: resolveUserMode(user),
+    sandboxGroupId: user.sandboxGroupId ? String(user.sandboxGroupId) : null,
+  };
+}
+
 async function attachCagnotteParticipant(req, res, next) {
   try {
     const { user, currency } = await loadParticipant(req.body?.userId);
 
     req.user = user;
     req.routedProvider = "paynoval";
-    req.cagnotteParticipant = { userId: String(user._id), currency, country: user.country || null };
+    req.cagnotteParticipant = participantOf(user, currency);
 
     // `amlMiddleware` lit le montant et la devise dans le corps.
     req.body = { ...req.body, amountSource: req.body.amount, currency };
@@ -348,14 +375,21 @@ const quoteCagnotteParticipation = asyncHandler(async (req, res) => {
     const participant =
       req.cagnotteParticipant && req.cagnotteParticipant.userId === userId
         ? req.cagnotteParticipant
-        : await loadParticipant(userId).then(({ user, currency }) => ({
-            userId: String(user._id),
-            currency,
-            country: user.country || null,
-          }));
+        : await loadParticipant(userId).then(({ user, currency }) => participantOf(user, currency));
+
+    // Mode de la cagnotte, relu en base ; un participant d'un autre monde (ou
+    // d'un autre jeu de démo) la voit introuvable.
+    const scope = await loadCagnotteScope(cagnotteId);
+    assertUserInCagnotteScope(participant, scope);
 
     // La position fige la devise du coffre à sa première ouverture (R3).
-    const position = await openPosition({ Model: Position, vaultId, cagnotteId, currency: target });
+    const position = await openPosition({
+      Model: Position,
+      vaultId,
+      cagnotteId,
+      currency: target,
+      mode: scope.mode,
+    });
 
     if (position.closedAt) {
       throw httpError(409, "VAULT_CLOSED", "La cagnotte est clôturée : elle ne reçoit plus de participation.");
@@ -375,6 +409,7 @@ const quoteCagnotteParticipation = asyncHandler(async (req, res) => {
     const now = Date.now();
 
     const quote = await Quote.create({
+      mode: scope.mode,
       quoteId: crypto.randomUUID(),
       userId: participant.userId,
       cagnotteId,
@@ -426,9 +461,10 @@ async function diagnoseQuote({ Quote, quoteId, userId, cagnotteId, vaultId, sess
   return httpError(409, "QUOTE_EXPIRED", "Le devis a expiré. Redemandez un devis : le taux a pu changer.");
 }
 
-async function debitPayerWallet({ TxWalletBalance, userId, currency, amount, session }) {
+async function debitPayerWallet({ TxWalletBalance, userId, currency, amount, mode, session }) {
   const wallet = await TxWalletBalance.findOne({
     currency,
+    ...modeMatchFilter(mode),
     $or: [{ user: userId }, { userId }],
   }).session(session);
 
@@ -439,7 +475,8 @@ async function debitPayerWallet({ TxWalletBalance, userId, currency, amount, ses
   const dec = decimal(amount, currency);
 
   const updated = await TxWalletBalance.findOneAndUpdate(
-    { _id: wallet._id, amount: { $gte: dec }, availableAmount: { $gte: dec } },
+    // Portefeuille du mode de la cagnotte : jamais d'argent d'un monde à l'autre.
+    { _id: wallet._id, ...modeMatchFilter(mode), amount: { $gte: dec }, availableAmount: { $gte: dec } },
     { $inc: { amount: decimal(amount, currency, { negative: true }), availableAmount: decimal(amount, currency, { negative: true }) } },
     { new: true, session }
   );
@@ -497,6 +534,17 @@ const settleCagnotteParticipation = asyncHandler(async (req, res) => {
 
   if (refuseWithoutAtomicSession(res, ref, "participation")) return undefined;
 
+  let mode;
+
+  try {
+    const scope = await loadCagnotteScope(cagnotteId);
+    const { user, currency } = await loadParticipant(userId);
+    assertUserInCagnotteScope(participantOf(user, currency), scope);
+    mode = scope.mode;
+  } catch (err) {
+    return sendError(res, err, "règlement");
+  }
+
   const settlementId = settlementObjectIdFromReference(ref, "cagnotte.participation");
 
   const existing = await Settlement.findOne({ reference: ref }).lean();
@@ -551,8 +599,12 @@ const settleCagnotteParticipation = asyncHandler(async (req, res) => {
       const netTarget = quote.destination.amount;
       const fxRevenue = Number(quote.fx?.revenue?.amount || 0);
 
-      const feesTreasury = fee > 0 ? treasuryFor(CAGNOTTE_FEES) : null;
-      const fxMarginTreasury = fxRevenue > 0 ? treasuryFor(FX_MARGIN) : null;
+      if (storedModeOf(quote) !== mode) {
+        throw httpError(409, "QUOTE_MISMATCH", "Ce devis ne correspond pas à cette participation.");
+      }
+
+      const feesTreasury = fee > 0 ? treasuryFor(CAGNOTTE_FEES, mode) : null;
+      const fxMarginTreasury = fxRevenue > 0 ? treasuryFor(FX_MARGIN, mode) : null;
 
       // Construit AVANT toute écriture : une incohérence lève sans rien déplacer.
       const lots = buildCagnotteCreditLots({
@@ -582,13 +634,14 @@ const settleCagnotteParticipation = asyncHandler(async (req, res) => {
         userId,
         currency: S,
         amount: gross,
+        mode,
         session,
       });
 
       let treasuryWallet = null;
 
       if (fee > 0) {
-        treasuryWallet = await TxSystemBalance.credit(feesTreasury.userId, CAGNOTTE_FEES, S, fee, {
+        treasuryWallet = await TxSystemBalance.credit(feesTreasury.userId, feesTreasury.systemType, S, fee, {
           session,
           fullName: "Cagnotte Fees Treasury",
           reference: ref,
@@ -597,7 +650,7 @@ const settleCagnotteParticipation = asyncHandler(async (req, res) => {
       }
 
       if (fxRevenue > 0) {
-        await TxSystemBalance.credit(fxMarginTreasury.userId, FX_MARGIN, target, fxRevenue, {
+        await TxSystemBalance.credit(fxMarginTreasury.userId, fxMarginTreasury.systemType, target, fxRevenue, {
           session,
           fullName: "FX Margin Treasury",
           reference: ref,
@@ -609,11 +662,12 @@ const settleCagnotteParticipation = asyncHandler(async (req, res) => {
         [
           {
             _id: settlementId,
+            mode,
             reference: ref,
             idempotencyKey: idem,
             userId,
             treasuryUserId: feesTreasury?.userId || "",
-            treasurySystemType: feesTreasury ? CAGNOTTE_FEES : "",
+            treasurySystemType: feesTreasury ? feesTreasury.systemType : "",
             treasuryLabel: feesTreasury ? "Cagnotte Fees Treasury" : "",
             payer: { amount: gross, currency: S },
             feeCredit: { amount: fee, currency: S, baseAmount: 0, baseCurrencyCode: "" },
@@ -651,6 +705,7 @@ const settleCagnotteParticipation = asyncHandler(async (req, res) => {
        * ici annule le débit, le crédit de position et la consommation du devis.
        */
       await postCagnotteLotEntries({
+        mode,
         settlementId: settlement._id,
         reference: ref,
         lots,
@@ -749,6 +804,9 @@ const refundCagnotteParticipation = asyncHandler(async (req, res) => {
         requestedTarget,
       });
 
+      // Le remboursement suit le mode de la participation d'origine.
+      const mode = storedModeOf(original);
+
       const lots = buildCagnotteRefundLots({
         payerUserId: original.userId,
         sourceCurrency: S,
@@ -785,7 +843,11 @@ const refundCagnotteParticipation = asyncHandler(async (req, res) => {
       });
 
       const wallet = await TxWalletBalance.findOneAndUpdate(
-        { currency: S, $or: [{ user: original.userId }, { userId: original.userId }] },
+        {
+          currency: S,
+          ...modeMatchFilter(mode),
+          $or: [{ user: original.userId }, { userId: original.userId }],
+        },
         {
           $inc: {
             amount: decimal(amounts.refundSource, S),
@@ -807,6 +869,7 @@ const refundCagnotteParticipation = asyncHandler(async (req, res) => {
         [
           {
             _id: settlementId,
+            mode,
             reference: ref,
             idempotencyKey: idem,
             participationReference,
@@ -828,6 +891,7 @@ const refundCagnotteParticipation = asyncHandler(async (req, res) => {
       );
 
       await postCagnotteLotEntries({
+        mode,
         settlementId: refund._id,
         reference: ref,
         lots,
@@ -877,11 +941,13 @@ const openCagnotteVaultPosition = asyncHandler(async (req, res) => {
 
   try {
     const currency = assertSupportedCagnotteCurrency(req.body?.currency, process.env, "devise du coffre");
+    const scope = await loadCagnotteScope(req.body?.cagnotteId);
     const doc = await openPosition({
       Model: Position,
       vaultId: req.body?.vaultId,
       cagnotteId: req.body?.cagnotteId,
       currency,
+      mode: scope.mode,
     });
     return res.status(200).json({ success: true, data: positionToJSON(doc) });
   } catch (err) {

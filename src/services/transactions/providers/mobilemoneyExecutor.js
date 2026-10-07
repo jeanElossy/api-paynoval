@@ -113,19 +113,30 @@ function buildMobileMoneyCollectionPayload(tx) {
 }
 
 async function executeMobileMoneyPayout({ req, transaction }) {
+  /**
+   * ⚠️ PLUS DE REPLI `|| "wave"` (2026-10-06). Il contredisait la règle B.2,
+   * pourtant énoncée dans `providerExecutorRegistry` : un ordre dont
+   * l'opérateur n'est pas résolu partait chez Wave en silence. On lève.
+   */
   const provider = String(
     transaction.provider ||
       transaction.metadata?.provider ||
       transaction.metadata?.externalRecipient?.operator ||
       transaction.operator ||
-      "wave"
+      ""
   )
     .trim()
     .toLowerCase();
 
+  if (!provider) {
+    throw createError(422, "Opérateur mobile money non résolu — aucun repli n'est appliqué.");
+  }
+
+  // Le mode de la transaction choisit le monde (réel ou simulation).
   const adapter = getProviderAdapter({
     rail: "mobilemoney",
     provider,
+    mode: transaction.mode,
   });
 
   if (!adapter || typeof adapter.payout !== "function") {
@@ -170,19 +181,30 @@ async function executeMobileMoneyPayout({ req, transaction }) {
 }
 
 async function startMobileMoneyCollection({ req, transaction }) {
+  /**
+   * ⚠️ PLUS DE REPLI `|| "wave"` (2026-10-06). Il contredisait la règle B.2,
+   * pourtant énoncée dans `providerExecutorRegistry` : un ordre dont
+   * l'opérateur n'est pas résolu partait chez Wave en silence. On lève.
+   */
   const provider = String(
     transaction.provider ||
       transaction.metadata?.provider ||
       transaction.metadata?.externalSource?.operator ||
       transaction.operator ||
-      "wave"
+      ""
   )
     .trim()
     .toLowerCase();
 
+  if (!provider) {
+    throw createError(422, "Opérateur mobile money non résolu — aucun repli n'est appliqué.");
+  }
+
+  // Le mode de la transaction choisit le monde (réel ou simulation).
   const adapter = getProviderAdapter({
     rail: "mobilemoney",
     provider,
+    mode: transaction.mode,
   });
 
   if (!adapter || typeof adapter.collect !== "function") {

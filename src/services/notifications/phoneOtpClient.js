@@ -131,9 +131,16 @@ async function appeler(chemin, corps) {
   return charge?.data || {};
 }
 
-/** Demande l'envoi d'un code. Rend `{ sent, channel, phoneE164 }`. */
-async function envoyerCode({ phoneE164, channel = "sms" }) {
-  return appeler("start", { phoneE164, channel });
+/**
+ * Demande l'envoi d'un code. Rend `{ sent, channel, phoneE164 }`.
+ *
+ * `sandboxUserId` : compte de SIMULATION. Le principal n'envoie alors AUCUN
+ * SMS et vérifiera le code fixe de ce compte (le monteur n'a pas la SIM du
+ * numéro de démonstration). C'est le principal — qui possède le canal et le
+ * compte — qui en décide, pas cet appelant.
+ */
+async function envoyerCode({ phoneE164, channel = "sms", sandboxUserId = undefined }) {
+  return appeler("start", { phoneE164, channel, ...(sandboxUserId ? { sandboxUserId } : {}) });
 }
 
 /**
@@ -144,8 +151,8 @@ async function envoyerCode({ phoneE164, channel = "sms" }) {
  * vérification non. Confondre les deux laisserait un code erroné établir la
  * confiance sur un numéro.
  */
-async function verifierCode({ phoneE164, code }) {
-  return appeler("check", { phoneE164, code });
+async function verifierCode({ phoneE164, code, sandboxUserId = undefined }) {
+  return appeler("check", { phoneE164, code, ...(sandboxUserId ? { sandboxUserId } : {}) });
 }
 
 module.exports = { envoyerCode, verifierCode, DELAI_MS };

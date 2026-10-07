@@ -4,6 +4,7 @@ const runtime = require("../shared/runtime");
 const { pickAuthedUserId } = require("../shared/helpers");
 const { toPublicTransaction } = require("../../../models/transactionSerializer");
 const { buildOwnershipQuery } = require("../shared/ownershipQuery");
+const { resolveHistoryStart, applyHistoryStart } = require("../../sandbox/historyWindow");
 
 /**
  * HISTORIQUE DES TRANSACTIONS
@@ -124,6 +125,7 @@ function createListInternal({
   secretFields = require("../../../models/transactionSerializer").SECRET_FIELDS,
   projection = LIST_PROJECTION,
   maxLimit = DEFAULT_MAX_LIMIT,
+  resolveHistoryStart = async () => null,
 } = {}) {
   if (!Transaction) {
     throw new Error("listInternal : dépendance `Transaction` manquante");
@@ -149,7 +151,12 @@ function createListInternal({
         maxLimit
       );
 
-      const query = buildOwnershipQuery(Transaction, userId);
+      // Compte sandbox réinitialisé : l'historique affiché repart de la date
+      // de réinitialisation (`services/sandbox/historyWindow.js`).
+      const query = applyHistoryStart(
+        buildOwnershipQuery(Transaction, userId),
+        await resolveHistoryStart(req)
+      );
 
       /**
        * Les deux requêtes sont indépendantes : elles partent ensemble, la page
@@ -209,7 +216,10 @@ let _composed = null;
 
 function getHandler() {
   if (!_composed) {
-    _composed = createListInternal({ Transaction: runtime.Transaction });
+    _composed = createListInternal({
+      Transaction: runtime.Transaction,
+      resolveHistoryStart,
+    });
   }
 
   return _composed;

@@ -275,6 +275,12 @@ async function verifyWithFallback(token) {
  * chemin d'autorisation finit toujours par diverger du mauvais côté.
  */
 const { timingSafeEqualStr: comparaisonSure } = require("../utils/internalTokens");
+const {
+  ACCOUNT_MODES,
+  resolveUserMode,
+  isSandboxEnabled,
+} = require("../utils/accountMode");
+const { evaluateModeBoundary } = require("./modeBoundary");
 
 function timingSafeEqualStr(a, b) {
   // Un token vide n'authentifie personne : garde conservée de l'implémentation
@@ -366,9 +372,20 @@ const USER_SAFE_EXCLUDE = [
  * Map User -> req.user (format stable)
  */
 function mapUserToReqUser(userDoc) {
+  const mode = resolveUserMode(userDoc);
+
   return {
     _id: String(userDoc._id),
     id: String(userDoc._id),
+
+    /**
+     * Mode du compte, lu dans la base Users — c'est elle qui fait foi, pas le
+     * jeton (`utils/accountMode.js`). Tout le moteur le lit ici.
+     */
+    mode,
+    isSandbox: mode === ACCOUNT_MODES.SANDBOX,
+    sandboxGroupId: userDoc.sandboxGroupId ? String(userDoc.sandboxGroupId) : null,
+    sandboxDisabledAt: userDoc.sandboxDisabledAt || null,
 
     email: userDoc.email,
     role: userDoc.role,
@@ -387,6 +404,44 @@ function mapUserToReqUser(userDoc) {
     countryCode: userDoc.countryCode,
     selectedCountry: userDoc.selectedCountry,
   };
+}
+
+/**
+ * ============================================================================
+ * FRONTIÈRE DES MODES — LE CONTRÔLE CENTRAL
+ * ============================================================================
+ *
+ * Trois règles, appliquées à CHAQUE identité utilisateur résolue ici (la
+ * décision vit dans `modeBoundary.js`, pure et testée) :
+ *
+ *  1. Le mode porté par le jeton doit être celui de la base. Un écart veut
+ *     dire qu'un jeton émis pour un monde est présenté dans l'autre (compte
+ *     reclassé, jeton forgé avec la bonne clé mais la mauvaise revendication) :
+ *     on refuse la session, comme Stripe refuse une clé de test sur un objet
+ *     live. Un jeton antérieur sans revendication `mode` est jugé sur l'ancien
+ *     drapeau `isSandbox`.
+ *  2. Un compte sandbox n'est servi que si la simulation est ouverte
+ *     (`SANDBOX_MODE_ENABLED`). Fermée, toute requête sandbox est refusée —
+ *     c'est l'interrupteur qui clôt un tournage d'un geste.
+ *  3. Un compte sandbox désactivé n'est plus servi — il ne redevient jamais
+ *     un compte réel.
+ *
+ * Les ressources elles-mêmes (portefeuilles, transactions, écritures,
+ * trésoreries) portent leur mode et le vérifient à chaque mouvement : ce
+ * contrôle est la première barrière, pas la seule.
+ */
+function assertModeBoundary(reqUser, decoded = null) {
+  const verdict = evaluateModeBoundary({
+    user: reqUser,
+    decoded,
+    sandboxEnabled: isSandboxEnabled(),
+  });
+
+  if (!verdict.ok) {
+    const err = createError(verdict.status, verdict.message);
+    err.code = verdict.code;
+    throw err;
+  }
 }
 
 /**
@@ -424,6 +479,7 @@ exports.internalProtect = asyncHandler(async (req, _res, next) => {
   }
 
   req.user = mapUserToReqUser(user);
+  assertModeBoundary(req.user);
   req.auth = {
     internal: true,
     scope: "internal",
@@ -526,6 +582,7 @@ exports.protect = asyncHandler(async (req, _res, next) => {
      * légitimes (miroir de transactions, relance de file) ont besoin.
      */
     req.user = { ...mapped, role: "user", assertedRole: true };
+    assertModeBoundary(req.user);
     req.auth = {
       internal: true,
       scope: "gateway",
@@ -636,6 +693,7 @@ exports.protect = asyncHandler(async (req, _res, next) => {
   }
 
   req.user = mapUserToReqUser(user);
+  assertModeBoundary(req.user, decoded);
 
   req.auth = {
     tokenPreview: `${token.slice(0, 10)}...`,

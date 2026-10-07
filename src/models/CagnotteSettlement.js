@@ -87,6 +87,13 @@ module.exports = function buildCagnotteSettlementModel(conn) {
 
   const walletAfterSchema = new mongoose.Schema(
     {
+      /**
+       * Mode de la cagnotte (2026-10-06) — `utils/accountMode.js`. Les règlements
+       * de simulation sont écartés des rapports et des files du back-office.
+       * Absent sur un document antérieur : production.
+       */
+      mode: { type: String, enum: ["live", "sandbox"], immutable: true },
+
       walletId: { type: String, default: "", trim: true },
       currency: { type: String, default: "", uppercase: true, trim: true },
       amount: { type: Number, default: 0, min: 0 },

@@ -72,6 +72,7 @@ async function verdict(operation) {
  */
 const documentValide = () =>
   new LedgerEntry({
+    mode: "live",
     transactionId: new mongoose.Types.ObjectId(),
     entryType: "RESERVE",
     direction: "DEBIT",

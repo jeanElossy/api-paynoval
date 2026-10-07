@@ -1030,6 +1030,7 @@ app.use(
 // ─────────────────────────────────────────────────────────────
 let server = null;
 let autoCancelWorker = null;
+let sandboxSettlementWorker = null;
 let reconciliationWorker = null;
 let settlementReplayWorker = null;
 let referralOutboxWorker = null;
@@ -1193,6 +1194,32 @@ async function bootstrap() {
 
       const rows = auditTreasuryRegistry({ wallets, envIds, systemUsers });
       const ecarts = rows.filter((r) => r.status !== STATUS.OK);
+
+      /**
+       * Trésoreries de SIMULATION — contrôlées seulement si la simulation est
+       * ouverte : fermée, leur absence ne gêne personne et l'annoncer serait
+       * du bruit. Ouverte, une trésorerie manquante fait échouer en fermeture
+       * toute transaction sandbox portant des frais : on le dit maintenant.
+       */
+      const { isSandboxEnabled } = require("./utils/accountMode");
+      if (isSandboxEnabled()) {
+        const { SANDBOX_TREASURY_SYSTEM_TYPES } = require("./services/treasuryRegistry");
+        const sandboxRows = auditTreasuryRegistry({
+          wallets,
+          envIds: {},
+          systemUsers,
+          types: SANDBOX_TREASURY_SYSTEM_TYPES,
+        });
+
+        for (const row of sandboxRows) {
+          if (row.status === STATUS.OK) continue;
+          logger.warn(
+            `⚠️ Trésorerie de simulation ${row.systemType} : ${row.status}. Conséquence : ` +
+              "les transactions sandbox avec frais ou change seront REFUSÉES. " +
+              "Provisionner en créant un compte de simulation depuis le back-office."
+          );
+        }
+      }
 
       if (!ecarts.length) {
         logger.info(
@@ -1617,6 +1644,14 @@ async function bootstrap() {
     // Public / user.
     app.use("/api/v1/transactions", transactionRoutes);
 
+    /**
+     * Mode simulation (2026-10-06) — outils du compte sandbox, page 3DS de
+     * test (passerelle seule) et provisionnement (backend principal seul).
+     * Voir `services/sandbox/` et `utils/accountMode.js`.
+     */
+    app.use("/api/v1/sandbox", require("./routes/sandboxRoutes"));
+    app.use("/api/v1/internal/sandbox", require("./routes/internalSandboxRoutes"));
+
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);
 
@@ -1702,6 +1737,11 @@ async function bootstrap() {
 
     // Démarrage des workers après la connexion DB et le montage des routes.
     autoCancelWorker = startAutoCancelWorker();
+
+    // Rappels prestataire simulés : démarré seulement si la simulation est
+    // ouverte, et le démarrage le dit dans les deux cas (règle B.6).
+    sandboxSettlementWorker = require("./services/sandbox/sandboxSettlementWorker")
+      .startSandboxSettlementWorker();
     referralOutboxWorker = startReferralWorker();
 
     /**
@@ -1906,6 +1946,7 @@ const graceful = async (signal) => {
 
     try {
       autoCancelWorker?.stop?.();
+      sandboxSettlementWorker?.stop?.();
       logger.info("⏱️ Auto-cancel TX worker arrêté");
     } catch (err) {
       logger.warn("Erreur arrêt auto-cancel TX worker", {

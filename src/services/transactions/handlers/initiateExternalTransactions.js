@@ -2,6 +2,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { USER_MODE_FIELDS, resolveUserMode } = require("../../../utils/accountMode");
 const { getTxMetrics } = require("../../txMetrics");
 const { resoudreTypeExterne } = require("../shared/externalTxType");
 
@@ -74,6 +75,7 @@ const DEFAULT_FEES_TREASURY_LABEL = "PayNoval Fees Treasury";
 const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
 
 const USER_CORRIDOR_SELECT = [
+  ...USER_MODE_FIELDS,
   "_id",
   "fullName",
   "email",
@@ -805,6 +807,9 @@ async function initiateOutboundExternal(req, res, next) {
       const [tx] = await Transaction.create(
         [
           {
+            // Mode de l'expéditeur relu en base : il choisit, plus loin,
+            // l'adaptateur prestataire (réel ou de simulation).
+            mode: resolveUserMode(senderUser),
             userId: senderUser._id,
             internalImported: false,
 
@@ -1101,6 +1106,8 @@ async function initiateOutboundExternal(req, res, next) {
       providerStatus: execution?.providerStatus || tx.providerStatus,
       providerReference:
         execution?.providerReference || tx.providerReference || null,
+      // Authentification demandée au titulaire (3-D Secure) — `next_action`.
+      nextAction: execution?.nextAction || null,
       securityQuestion: q,
       autoCancelAt: tx.autoCancelAt || null,
       autoCancelAfterDays: getAutoCancelAfterDays(),
@@ -1379,6 +1386,7 @@ async function initiateInboundExternal(req, res, next) {
       const [tx] = await Transaction.create(
         [
           {
+            mode: resolveUserMode(receiverUser),
             userId: receiverUser._id,
             internalImported: false,
 
@@ -1631,6 +1639,8 @@ async function initiateInboundExternal(req, res, next) {
       providerStatus: execution?.providerStatus || tx.providerStatus,
       providerReference:
         execution?.providerReference || tx.providerReference || null,
+      // Authentification demandée au titulaire (3-D Secure) — `next_action`.
+      nextAction: execution?.nextAction || null,
       autoCancelAt: tx.autoCancelAt || null,
       autoCancelAfterDays: getAutoCancelAfterDays(),
       pricing: {

@@ -2,6 +2,11 @@
 "use strict";
 
 const createError = require("http-errors");
+const {
+  USER_MODE_FIELDS,
+  isCounterpartyInScope,
+  resolveUserMode,
+} = require("../../../utils/accountMode");
 const { getTxMetrics } = require("../../txMetrics");
 const runtime = require("../shared/runtime");
 const { openStepUpReview } = require("../../risk/stepUpReview");
@@ -48,6 +53,7 @@ const DEFAULT_AUTO_CANCEL_AFTER_DAYS = 7;
 
 const USER_CORRIDOR_SELECT = [
   "_id",
+  ...USER_MODE_FIELDS,
   "fullName",
   "email",
   "phone",
@@ -470,7 +476,12 @@ async function initiateInternal(req, res, next) {
       throw createError(403, "Utilisateur invalide");
     }
 
-    if (!receiver) {
+    /**
+     * Un compte d'un autre mode — ou, en simulation, d'un autre jeu de démo —
+     * est INTROUVABLE, exactement comme un compte inexistant : le message ne
+     * doit pas révéler qu'il existe ailleurs (`utils/accountMode.js`).
+     */
+    if (!receiver || !isCounterpartyInScope(senderUser, receiver)) {
       throw createError(404, "Destinataire introuvable");
     }
 
@@ -734,6 +745,9 @@ async function initiateInternal(req, res, next) {
     );
 
     const txDoc = {
+      // Le mode de l'expéditeur, relu en base. Le destinataire est du même
+      // mode (contrôle ci-dessus) : la transaction n'a qu'un monde.
+      mode: resolveUserMode(senderUser),
       userId: senderUser._id,
       internalImported: false,
 
@@ -926,6 +940,7 @@ async function initiateInternal(req, res, next) {
             senderCountry: corridorLock?.snapshot?.senderCountry || "",
             receiverCountry: corridorLock?.snapshot?.receiverCountry || "",
             initiatedAt: (tx.createdAt || new Date()).toISOString(),
+            mode: String(tx.mode || ""),
           },
         },
         sess

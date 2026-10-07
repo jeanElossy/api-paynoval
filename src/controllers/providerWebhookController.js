@@ -738,7 +738,10 @@ async function providerWebhookController(req, res, next) {
     let adapter;
 
     try {
-      adapter = getProviderAdapter({ rail, provider });
+      // Un rappel HTTP vient d'un VRAI prestataire : adapter de production.
+      // Les rappels de simulation ne passent jamais par ici
+      // (`services/sandbox/sandboxSettlementWorker.js`).
+      adapter = getProviderAdapter({ rail, provider, mode: "live" });
     } catch (_err) {
       throw createError(
         400,

@@ -17,6 +17,7 @@
 const runtime = require("../shared/runtime");
 const { pickAuthedUserId } = require("../shared/helpers");
 const { buildOwnershipQuery } = require("../shared/ownershipQuery");
+const { resolveHistoryStart } = require("../../sandbox/historyWindow");
 const {
   RANGES,
   aggregateInsights,
@@ -42,7 +43,12 @@ const INSIGHTS_PROJECTION = Object.freeze({
   confirmedAt: 1,
 });
 
-function createInsightsHandler({ Transaction, now = () => Date.now(), maxDocs = MAX_DOCS } = {}) {
+function createInsightsHandler({
+  Transaction,
+  now = () => Date.now(),
+  maxDocs = MAX_DOCS,
+  resolveHistoryStart = async () => null,
+} = {}) {
   if (!Transaction) throw new Error("insights : dépendance `Transaction` manquante");
 
   return async function transactionInsights(req, res, next) {
@@ -52,7 +58,10 @@ function createInsightsHandler({ Transaction, now = () => Date.now(), maxDocs = 
 
       const range = RANGES[req.query.range] ? req.query.range : "30d";
       const at = now();
-      const from = new Date(rangeStart(range, at));
+      const rangeFrom = new Date(rangeStart(range, at));
+      // Compte sandbox réinitialisé : rien d'antérieur à la réinitialisation.
+      const historyStart = await resolveHistoryStart(req);
+      const from = historyStart && historyStart > rangeFrom ? historyStart : rangeFrom;
 
       const query = {
         ...buildOwnershipQuery(Transaction, userId),
@@ -89,7 +98,12 @@ function createInsightsHandler({ Transaction, now = () => Date.now(), maxDocs = 
 let _composed = null;
 
 function transactionInsights(req, res, next) {
-  if (!_composed) _composed = createInsightsHandler({ Transaction: runtime.Transaction });
+  if (!_composed) {
+    _composed = createInsightsHandler({
+      Transaction: runtime.Transaction,
+      resolveHistoryStart,
+    });
+  }
   return _composed(req, res, next);
 }
 

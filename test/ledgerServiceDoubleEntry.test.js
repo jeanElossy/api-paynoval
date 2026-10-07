@@ -143,6 +143,7 @@ const ledger = loadLedgerService();
 
 const TX = {
   _id: "1a1a1a1a1a1a1a1a1a1a1a1a",
+  mode: "live",
   reference: "PNV-TEST-001",
   flow: "PAYNOVAL_INTERNAL_TRANSFER",
 };
@@ -300,6 +301,7 @@ test("le cycle complet d'un virement boucle à zéro", async () => {
   // Les frais : compensation → trésorerie. C'est ce que fait la primitive
   // interne de revenus ; on l'exprime ici par l'API publique.
   await ledger.postDoubleEntry({
+    mode: "live",
     transactionId: TX._id,
     reference: TX.reference,
     entryType: "FEE_REVENUE",
@@ -398,6 +400,7 @@ test("postDoubleEntry REFUSE d'écrire un jeu déséquilibré", async () => {
   await assert.rejects(
     () =>
       ledger.postDoubleEntry({
+        mode: "live",
         transactionId: TX._id,
         entryType: "ADJUSTMENT",
         legs: [
@@ -468,6 +471,7 @@ test("participation XOF → XOF : un lot de frais, un lot de crédit, chacun éq
   written.length = 0;
 
   await ledger.postCagnotteLotEntries({
+    mode: "live",
     settlementId: REGLEMENT,
     reference: "CAGPART-TEST-001",
     lots: buildCagnotteCreditLots({
@@ -505,6 +509,7 @@ test("participation CAD → XOF : le coffre ne reçoit QUE des XOF, la conversio
   written.length = 0;
 
   await ledger.postCagnotteLotEntries({
+    mode: "live",
     settlementId: REGLEMENT,
     reference: "CAGPART-TEST-002",
     lots: buildCagnotteCreditLots({
@@ -548,6 +553,7 @@ test("participation sans frais : AUCUN lot de frais, et pas un lot à zéro", as
   written.length = 0;
 
   await ledger.postCagnotteLotEntries({
+    mode: "live",
     settlementId: REGLEMENT,
     reference: "CAGPART-TEST-003",
     lots: buildCagnotteCreditLots({
@@ -567,6 +573,7 @@ test("participation sans frais : AUCUN lot de frais, et pas un lot à zéro", as
 test("retrait de coffre : compensation cagnotte → bénéficiaire", async () => {
   const batch = await expectBalancedPair("retrait", () =>
     ledger.postCagnotteVaultWithdrawalEntries({
+      mode: "live",
       settlementId: REGLEMENT,
       reference: "CAGVLT-TEST-001",
       beneficiary: { userId: BENEFICIAIRE, amount: 4500, currency: "XOF" },
@@ -589,6 +596,7 @@ test("retrait de coffre : compensation cagnotte → bénéficiaire", async () =>
 test("frais de clôture : prélevés sur le coffre, versés à la trésorerie", async () => {
   const batch = await expectBalancedPair("clôture", () =>
     ledger.postCagnotteClosureFeeEntries({
+      mode: "live",
       settlementId: REGLEMENT,
       reference: "CAGCLO-TEST-001",
       feeCredit: {
@@ -618,6 +626,7 @@ test("une écriture de cagnotte REFUSE une autre trésorerie", async () => {
   await assert.rejects(
     () =>
       ledger.postCagnotteClosureFeeEntries({
+        mode: "live",
         settlementId: REGLEMENT,
         reference: "CAGCLO-TEST-002",
         feeCredit: {
@@ -640,6 +649,7 @@ test("les primitives de cagnotte échouent en FERMETURE, jamais par défaut", as
   await assert.rejects(
     () =>
       ledger.postCagnotteLotEntries({
+        mode: "live",
         settlementId: REGLEMENT,
         reference: "CAGPART-TEST-004",
         lots: [],
@@ -651,6 +661,7 @@ test("les primitives de cagnotte échouent en FERMETURE, jamais par défaut", as
   await assert.rejects(
     () =>
       ledger.postCagnotteVaultWithdrawalEntries({
+        mode: "live",
         settlementId: null,
         reference: "CAGVLT-TEST-002",
         beneficiary: { userId: BENEFICIAIRE, amount: 100, currency: "XOF" },
@@ -663,6 +674,7 @@ test("les primitives de cagnotte échouent en FERMETURE, jamais par défaut", as
   await assert.rejects(
     () =>
       ledger.postCagnotteClosureFeeEntries({
+        mode: "live",
         settlementId: REGLEMENT,
         reference: "CAGCLO-TEST-003",
         feeCredit: {

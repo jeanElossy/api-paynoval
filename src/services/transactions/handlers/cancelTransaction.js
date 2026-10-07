@@ -50,18 +50,6 @@ function isOutboundExternalPayout(tx) {
   return OUTBOUND_EXTERNAL_FLOWS.has(String(tx?.flow || ""));
 }
 
-function isSandboxTx(tx) {
-  return Boolean(
-    tx?.isSandbox === true ||
-      String(tx?.provider || "").toLowerCase() === "sandbox" ||
-      String(tx?.channel || "").toLowerCase() === "sandbox" ||
-      tx?.metadata?.source === "apple_review_sandbox" ||
-      tx?.meta?.source === "apple_review_sandbox" ||
-      tx?.meta?.sandbox === true ||
-      tx?.metadata?.sandbox === true
-  );
-}
-
 function getAuthedUserId(req) {
   return String(req.user?.id || req.user?._id || req.user?.userId || "").trim();
 }
@@ -84,101 +72,6 @@ function assertTxOwner({ req, tx }) {
   if (!userId || !allowedIds.includes(userId)) {
     throw createError(403, "Vous n’êtes pas autorisé à annuler cette transaction.");
   }
-}
-
-function isSandboxFinalStatus(status) {
-  return ["completed", "confirmed", "success", "cancelled", "canceled"].includes(
-    normalizeStatus(status)
-  );
-}
-
-/**
- * Volet sandbox.
- *
- * Ne valide plus lui-même la session et NE RÉPOND PLUS : il mute la
- * transaction, l'enregistre dans la session qu'on lui donne, et rend le corps
- * de la réponse à l'appelant. C'est l'appelant qui décide quand la transaction
- * est acquise, et lui seul qui écrit sur `res` — une fois, après le commit.
- *
- * La raison est le rejeu : `session.withTransaction()` peut réexécuter tout le
- * corps si Mongo signale un conflit d'écriture. Une réponse HTTP émise depuis
- * l'intérieur serait envoyée deux fois, et la seconde lèverait
- * ERR_HTTP_HEADERS_SENT sur une transaction pourtant valide.
- */
-async function applySandboxCancel({ req, tx, reason, sessOpts }) {
-  assertTxOwner({ req, tx });
-
-  if (isSandboxFinalStatus(tx.status)) {
-    throw createError(
-      409,
-      "Transaction sandbox déjà terminée, annulation impossible."
-    );
-  }
-
-  const now = new Date();
-  const safeReason = sanitize(reason || "Annulé");
-
-  tx.status = "cancelled";
-  tx.provider = "sandbox";
-  tx.channel = "sandbox";
-  tx.providerStatus = "sandbox_cancelled";
-  tx.cancelledAt = now;
-  tx.cancelReason = `Annulé en mode sandbox : ${safeReason}`;
-  tx.isSandbox = true;
-
-  tx.cancellationFee = 0;
-  tx.cancellationFeeType = "fixed";
-  tx.cancellationFeePercent = 0;
-  tx.cancellationFeeId = null;
-
-  tx.reserveReleased = tx.reserveReleased === true ? true : false;
-  tx.fundsCaptured = tx.fundsCaptured === true ? true : false;
-  tx.beneficiaryCredited = tx.beneficiaryCredited === true ? true : false;
-
-  tx.metadata = {
-    ...(tx.metadata || {}),
-    sandbox: true,
-    sandboxCancel: {
-      skippedFinancialOperations: true,
-      reason: "SANDBOX_NO_REAL_RESERVE_NO_REAL_TREASURY",
-      at: now.toISOString(),
-    },
-  };
-
-  tx.meta = {
-    ...(tx.meta || {}),
-    sandbox: true,
-    cancellationFeeSource: "SANDBOX_NO_FEE",
-    providerExecutionSkipped: true,
-  };
-
-  await tx.save(sessOpts);
-
-  return {
-    success: true,
-    sandbox: true,
-    transactionId: tx._id.toString(),
-    reference: tx.reference,
-    flow: tx.flow,
-    status: tx.status,
-    providerStatus: tx.providerStatus,
-    reserveReleased: false,
-    releasedAmount: 0,
-    refundedToSenderAfterFee: 0,
-    currency: tx.senderCurrencySymbol || tx.currencySource || null,
-    cancellationFeeInSenderCurrency: 0,
-    cancellationFeeType: "fixed",
-    cancellationFeePercent: 0,
-    cancellationFeeSource: "SANDBOX_NO_FEE",
-    treasuryFeeCredited: 0,
-    treasuryFeeCurrency: null,
-    treasuryConversionRate: 1,
-    treasuryUserId: null,
-    treasurySystemType: null,
-    treasuryLabel: null,
-    feeChargeResult: null,
-    message: "Transaction sandbox annulée sans frais.",
-  };
 }
 
 function resolveFeesTreasuryMeta(tx) {
@@ -305,7 +198,7 @@ const CANCEL_SELECT = [
   "+channel",
   "+providerStatus",
   "+providerReference",
-  "+isSandbox",
+  "+mode",
 
   "+amount",
   "+netAmount",
@@ -473,42 +366,42 @@ async function cancelController(req, res, next) {
       throw createError(404, "Transaction introuvable");
     }
 
-    const previewIsSandbox = isSandboxTx(preview);
+    // Une transaction sandbox s'annule EXACTEMENT comme une réelle : mêmes
+    // contrôles, mêmes frais d'annulation — versés à la trésorerie de
+    // simulation par `ledgerService` (2026-10-06).
     let quote = null;
 
-    if (!previewIsSandbox) {
-      logTransaction({
-        userId: getAuthedUserId(req) || null,
-        type: "cancel",
-        provider: preview.provider || preview.funds || "paynoval",
-        amount: toFloat(preview.amount),
-        currency: preview.senderCurrencySymbol,
-        toEmail: preview.recipientEmail || "",
-        details: {
-          transactionId: preview._id.toString(),
-          reason,
-          flow: preview.flow,
-          treasurySystemType: FEES_TREASURY_SYSTEM_TYPE,
-        },
-        flagged: false,
-        flagReason: "",
-        transactionId: preview._id,
-        ip: req.ip,
-      }).catch(() => {});
+    logTransaction({
+      userId: getAuthedUserId(req) || null,
+      type: "cancel",
+      provider: preview.provider || preview.funds || "paynoval",
+      amount: toFloat(preview.amount),
+      currency: preview.senderCurrencySymbol,
+      toEmail: preview.recipientEmail || "",
+      details: {
+        transactionId: preview._id.toString(),
+        reason,
+        flow: preview.flow,
+        treasurySystemType: FEES_TREASURY_SYSTEM_TYPE,
+      },
+      flagged: false,
+      flagReason: "",
+      transactionId: preview._id,
+      ip: req.ip,
+    }).catch(() => {});
 
-      const previewCheck = assertCancellable({ req, tx: preview });
+    const previewCheck = assertCancellable({ req, tx: preview });
 
-      const fx = await resolveTreasuryCreditInCad({
-        cancellationFee: previewCheck.cancellationFee,
-        sourceCurrency: previewCheck.sourceCurrency,
-      });
+    const fx = await resolveTreasuryCreditInCad({
+      cancellationFee: previewCheck.cancellationFee,
+      sourceCurrency: previewCheck.sourceCurrency,
+    });
 
-      quote = {
-        sourceCurrency: previewCheck.sourceCurrency,
-        cancellationFee: previewCheck.cancellationFee,
-        ...fx,
-      };
-    }
+    quote = {
+      sourceCurrency: previewCheck.sourceCurrency,
+      cancellationFee: previewCheck.cancellationFee,
+      ...fx,
+    };
 
     /**
      * ════════════════════════════════════════════════════════════════════
@@ -527,10 +420,6 @@ async function cancelController(req, res, next) {
 
       if (!tx) {
         throw createError(404, "Transaction introuvable");
-      }
-
-      if (isSandboxTx(tx)) {
-        return applySandboxCancel({ req, tx, reason, sessOpts });
       }
 
       const {
@@ -697,6 +586,7 @@ async function cancelController(req, res, next) {
             currency: String(sourceCurrency || ""),
             reason: String(tx.cancelReason || tx.providerStatus || "CANCELLED"),
             cancelledAt: new Date().toISOString(),
+            mode: String(tx.mode || ""),
           },
         },
         sess

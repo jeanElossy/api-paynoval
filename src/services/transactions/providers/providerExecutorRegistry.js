@@ -9,8 +9,8 @@
  * - Ne jamais résoudre un vrai executor pour un flow/provider sandbox.
  *
  * Important :
- * - La sécurité principale sandbox est dans initiateByFlow.
- * - La sécurité secondaire est dans submitExternalExecution.
+ * - Le choix réel / simulation se fait dans `providerSelector.getProviderAdapter`,
+ *   par le `mode` de la transaction — jamais ici.
  * - Ce fichier ne doit pas appeler de provider directement.
  */
 
@@ -196,9 +196,13 @@ function resolveExecutor({ flow, provider } = {}) {
   const p = normalizeProvider(provider);
 
   /**
-   * Sécurité :
-   * Un flow/provider sandbox ne doit jamais être résolu vers un vrai executor.
-   * Si une tx sandbox arrive ici, submitExternalExecution va la traiter sans provider.
+   * Héritage de l'ancien raccourci Apple Review : une transaction portant le
+   * prestataire ou le flux « sandbox » n'a AUCUN exécuteur, et `null` est
+   * traité par l'appelant comme un refus.
+   *
+   * Le mode simulation actuel n'emprunte pas cette voie : une transaction
+   * sandbox porte le VRAI nom d'opérateur, et c'est son `mode` qui fait
+   * choisir l'adapter de simulation par la fabrique (`providerSelector`).
    */
   if (isSandboxFlow(f) || isSandboxProvider(p)) {
     return null;

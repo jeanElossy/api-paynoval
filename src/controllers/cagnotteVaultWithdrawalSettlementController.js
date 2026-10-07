@@ -353,6 +353,11 @@ const {
 const buildCagnotteVaultPositionModel = require("../models/CagnotteVaultPosition");
 const { debitPosition, positionToJSON } = require("../services/cagnotte/vaultPosition");
 const { assertSupportedCagnotteCurrency } = require("../services/cagnotte/currencies");
+const { modeMatchFilter } = require("../utils/accountMode");
+const {
+  loadCagnotteScope,
+  assertUserInCagnotteScope,
+} = require("../services/cagnotte/cagnotteScope");
 const logger = require("../utils/logger");
 
 function normalizeCurrencyCode(raw) {
@@ -396,19 +401,21 @@ function toUserClauses(userId) {
   return clauses;
 }
 
-async function findWalletForUser({ TxWalletBalance, userId, currency, session }) {
+async function findWalletForUser({ TxWalletBalance, userId, currency, accountMode, session }) {
   const cur = normalizeCurrencyCode(currency);
   return TxWalletBalance.findOne({
     currency: cur,
+    ...modeMatchFilter(accountMode),
     $or: toUserClauses(userId),
   }).session(session);
 }
 
-async function ensureWalletForUser({ TxWalletBalance, userId, currency, session }) {
+async function ensureWalletForUser({ TxWalletBalance, userId, currency, accountMode, session }) {
   let wallet = await findWalletForUser({
     TxWalletBalance,
     userId,
     currency,
+    accountMode,
     session,
   });
 
@@ -417,6 +424,7 @@ async function ensureWalletForUser({ TxWalletBalance, userId, currency, session 
   const docs = await TxWalletBalance.create(
     [
       {
+        mode: accountMode,
         userId: String(userId),
         currency: normalizeCurrencyCode(currency),
         amount: 0,
@@ -519,6 +527,33 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
     });
   }
 
+  /**
+   * Mode de la cagnotte, relu en base ; le bénéficiaire (son propriétaire) est
+   * du même monde. Un coffre de simulation ne crédite qu'un portefeuille de
+   * simulation, et réciproquement.
+   */
+  let accountMode;
+  if (!mongoose.Types.ObjectId.isValid(beneficiaryUserId)) {
+    return res.status(400).json({ success: false, code: "INVALID_USER_ID", error: "Identifiant du bénéficiaire invalide." });
+  }
+  try {
+    const scope = await loadCagnotteScope(cId);
+    const beneficiary = await getUsersConn()
+      .db.collection("users")
+      .findOne(
+        { _id: new mongoose.Types.ObjectId(beneficiaryUserId) },
+        { projection: { mode: 1, isSandbox: 1, isReviewerAccount: 1, sandboxGroupId: 1 } }
+      );
+    if (!beneficiary) {
+      return res.status(404).json({ success: false, code: "USER_NOT_FOUND", error: "Bénéficiaire introuvable." });
+    }
+    accountMode = assertUserInCagnotteScope(beneficiary, scope);
+  } catch (err) {
+    return res
+      .status(err.status || 500)
+      .json({ success: false, code: err.code || "SCOPE_UNAVAILABLE", error: err.message });
+  }
+
   const settlementId = settlementObjectIdFromReference(
     ref,
     "cagnotte.vaultWithdrawal"
@@ -599,11 +634,13 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
         TxWalletBalance,
         userId: beneficiaryUserId,
         currency: creditCurrency,
+        accountMode,
         session,
       });
 
       const updatedUserWallet = await TxWalletBalance.findOneAndUpdate(
-        { _id: userWallet._id },
+        // Portefeuille du mode de la cagnotte : jamais d'un monde à l'autre.
+        { _id: userWallet._id, ...modeMatchFilter(accountMode) },
         {
           $inc: {
             amount: creditAmount,
@@ -623,6 +660,7 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
         [
           {
             _id: settlementId,
+            accountMode,
             reference: ref,
             idempotencyKey: idem,
             userId: beneficiaryUserId,
@@ -672,6 +710,7 @@ exports.settleCagnotteVaultWithdrawal = asyncHandler(async (req, res) => {
        * compensation cagnotte que la participation avait remplie.
        */
       await postCagnotteVaultWithdrawalEntries({
+        mode: accountMode,
         settlementId: settlementDocs[0]._id,
         reference: ref,
         beneficiary: {

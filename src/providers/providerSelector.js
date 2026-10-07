@@ -25,6 +25,8 @@ const moovAdapter = require("./mobilemoney/moovAdapter");
 const visaDirectAdapter = require("./card/visaDirectAdapter");
 
 const { getTxMetrics } = require("../services/txMetrics");
+const { ACCOUNT_MODES, requireMode } = require("../utils/accountMode");
+const { getSandboxAdapter } = require("./sandbox/sandboxAdapters");
 
 function norm(v) {
   return String(v || "").trim().toLowerCase();
@@ -91,7 +93,45 @@ function getCardAdapter(provider) {
  * l'identité — les appels fonctionnent exactement comme avant, simplement non
  * mesurés. Voir `services/txMetrics.js`.
  */
-function getProviderAdapter({ rail, provider }) {
+/**
+ * ═══ LE MODE CHOISIT LE MONDE — EN UN SEUL ENDROIT ═══════════════════════
+ *
+ * `mode` est OBLIGATOIRE (`utils/accountMode.js`). C'est ici, et nulle part
+ * ailleurs, que se décide si un ordre part chez un vrai prestataire ou chez
+ * son homologue de simulation (`providers/sandbox/`). Aucun handler ne teste
+ * « est-ce un compte de démo ? » : il passe le mode de sa transaction, et la
+ * fabrique rend l'adapter qui va avec — même interface, même contrat.
+ *
+ * Un mode absent LÈVE (règle B.2) : un appelant oublié ne doit pas pouvoir
+ * router un ordre de simulation vers un vrai rail, ni l'inverse.
+ *
+ * L'adapter de simulation n'est PAS instrumenté : ses latences fabriquées
+ * fausseraient les mesures des vrais prestataires.
+ */
+function getProviderAdapter({ rail, provider, mode }) {
+  const resolvedMode = requireMode(mode, `adapter ${norm(rail)}/${norm(provider)}`);
+
+  if (resolvedMode === ACCOUNT_MODES.SANDBOX) {
+    // Le vrai adapter est résolu d'abord : il valide le couple rail /
+    // prestataire avec EXACTEMENT les mêmes règles (rail retiré, prestataire
+    // inconnu, Stripe). Aucun appel n'est fait sur lui.
+    const real = resolveRealAdapter({ rail, provider });
+    return getSandboxAdapter({ rail: norm(rail), realAdapter: real });
+  }
+
+  const adapter = resolveRealAdapter({ rail, provider });
+  const normalizedRail = norm(rail);
+
+  return getTxMetrics().instrumentAdapter(adapter, {
+    rail: normalizedRail,
+    // `adapter.provider` est le nom CANONIQUE ("visa_direct"), là où l'argument
+    // peut être un alias ("visa-direct"). Étiqueter avec l'alias créerait deux
+    // séries pour un même prestataire.
+    provider: adapter?.provider || provider,
+  });
+}
+
+function resolveRealAdapter({ rail, provider }) {
   const normalizedRail = norm(rail);
 
   let adapter;
@@ -127,13 +167,7 @@ function getProviderAdapter({ rail, provider }) {
       throw new Error(`Unsupported rail: ${rail}`);
   }
 
-  return getTxMetrics().instrumentAdapter(adapter, {
-    rail: normalizedRail,
-    // `adapter.provider` est le nom CANONIQUE ("visa_direct"), là où l'argument
-    // peut être un alias ("visa-direct"). Étiqueter avec l'alias créerait deux
-    // séries pour un même prestataire.
-    provider: adapter?.provider || provider,
-  });
+  return adapter;
 }
 
 module.exports = {

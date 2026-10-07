@@ -36,6 +36,7 @@ const mongoose = require("mongoose");
 const { getTxConn } = require("../../config/db");
 
 const { computeTrialBalance } = require("../ledger/doubleEntry");
+const { liveOnlyFilter } = require("../../utils/accountMode");
 
 let logger = console;
 try {
@@ -131,16 +132,17 @@ async function checkWalletBalances({ limit }) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Les transactions du parcours sandbox (revue Apple) ne produisent
- * DÉLIBÉRÉMENT aucune écriture comptable : elles n'engagent aucun argent réel.
- * Les signaler serait crier au loup — et une réconciliation qui crie au loup
- * finit par ne plus être lue. On les exclut donc à la source.
+ * La réconciliation est un contrôle de PRODUCTION : les transactions de
+ * simulation en sont exclues à la source (`utils/accountMode.liveOnlyFilter`).
  *
- * Le prédicat reprend celui de `confirmTransaction.isSandboxTx`, dans sa forme
- * requêtable.
+ * Depuis le 2026-10-06, une transaction sandbox passe par le vrai moteur et
+ * écrit au grand livre, en mode sandbox. Les critères hérités qui suivent
+ * `mode` reconnaissent les transactions de l'ancien raccourci Apple Review,
+ * qui n'écrivaient AUCUNE écriture et crieraient au loup.
  */
 const NOT_SANDBOX = Object.freeze({
   $and: [
+    { mode: { $ne: "sandbox" } },
     { isSandbox: { $ne: true } },
     { provider: { $nin: ["sandbox", "SANDBOX", "Sandbox"] } },
     { channel: { $nin: ["sandbox", "SANDBOX", "Sandbox"] } },
@@ -406,6 +408,10 @@ async function checkOrphanLedgerEntries({ sinceHours, limit }) {
   const entries = await LedgerEntry.find({
     createdAt: { $gte: since },
     transactionId: { $ne: null },
+    // Contrôle de production : les écritures de simulation se rattachent à
+    // leurs propres parents (`SandboxLedgerOperation`) et ne sont pas
+    // examinées ici (`utils/accountMode.liveOnlyFilter`).
+    ...liveOnlyFilter(),
   })
     .select("_id transactionId reference entryType amount currency")
     .limit(limit)

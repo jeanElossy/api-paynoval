@@ -397,10 +397,7 @@ const {
   mergeEligibilityMetadata,
 } = require("../services/transactions/shared/transactionEligibility");
 
-const {
-  isAppleReviewUserId,
-  isAppleReviewEmail,
-} = require("../utils/sandboxUser");
+const { ACCOUNT_MODES, resolveUserMode } = require("../utils/accountMode");
 
 /**
  * --------------------------------------------------------------------------
@@ -425,6 +422,8 @@ const {
  */
 
 const SANDBOX_SELECT_FIELDS = [
+  "mode",
+  "sandboxGroupId",
   "isSandbox",
   "isReviewerAccount",
   "sandboxReason",
@@ -500,36 +499,23 @@ function getUserSelectString() {
   return uniqueWords(`${base} ${SANDBOX_SELECT_FIELDS.join(" ")}`);
 }
 
-function isAppleReviewerProfile(user = {}) {
-  return (
-    isAppleReviewUserId(user?._id || user?.id || user?.userId) ||
-    isAppleReviewEmail(user?.email)
-  );
-}
-
+/**
+ * Drapeaux de simulation DÉRIVÉS DU MODE (2026-10-06) — `utils/accountMode.js`.
+ *
+ * ⚠️ L'ancienne version rendait `isSandbox: false` pour un compte de revue
+ * DÉSACTIVÉ (`sandboxDisabledAt`) : un compte de démonstration désactivé
+ * redevenait un compte réel, éligible aux vrais prestataires. Le mode est
+ * désormais immuable ; la désactivation BLOQUE le compte, elle ne le change
+ * pas de monde.
+ */
 function resolveSandboxFlags(user = {}) {
-  const isAppleReviewer = isAppleReviewerProfile(user);
-
-  const disabled =
-    user?.sandboxDisabledAt instanceof Date ||
-    Boolean(user?.sandboxDisabledAt);
-
-  const isSandbox =
-    disabled === false &&
-    (user?.isSandbox === true ||
-      user?.isReviewerAccount === true ||
-      isAppleReviewer);
-
-  const isReviewerAccount =
-    disabled === false &&
-    (user?.isReviewerAccount === true || isAppleReviewer);
+  const mode = resolveUserMode(user);
 
   return {
-    isSandbox,
-    isReviewerAccount,
-    sandboxReason:
-      user?.sandboxReason ||
-      (isAppleReviewer ? "Apple App Review" : null),
+    mode,
+    isSandbox: mode === ACCOUNT_MODES.SANDBOX,
+    isReviewerAccount: user?.isReviewerAccount === true,
+    sandboxReason: user?.sandboxReason || null,
     sandboxCreatedAt: user?.sandboxCreatedAt || null,
     sandboxDisabledAt: user?.sandboxDisabledAt || null,
   };
@@ -702,6 +688,8 @@ function hydrateReqUserFromFreshProfile(req, user, snapshot) {
     isDeleted: user.isDeleted === true,
     deletedAt: user.deletedAt || null,
 
+    mode: sandbox.mode,
+    sandboxGroupId: user.sandboxGroupId ? String(user.sandboxGroupId) : null,
     isSandbox: sandbox.isSandbox,
     isReviewerAccount: sandbox.isReviewerAccount,
     sandboxReason: sandbox.sandboxReason,

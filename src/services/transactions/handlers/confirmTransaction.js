@@ -2,6 +2,7 @@
 "use strict";
 
 const createError = require("http-errors");
+const { isReferralEligibleMode } = require("../../../utils/accountMode");
 const { getTxMetrics } = require("../../txMetrics");
 
 const runtime = require("../shared/runtime");
@@ -179,43 +180,8 @@ function getCorridorLock(tx) {
   );
 }
 
-function isSandboxTx(tx) {
-  return Boolean(
-    tx?.isSandbox === true ||
-      String(tx?.provider || "").toLowerCase() === "sandbox" ||
-      String(tx?.channel || "").toLowerCase() === "sandbox" ||
-      tx?.metadata?.source === "apple_review_sandbox" ||
-      tx?.meta?.source === "apple_review_sandbox" ||
-      tx?.meta?.sandbox === true ||
-      tx?.metadata?.sandbox === true
-  );
-}
-
 function getAuthedUserId(req) {
   return String(req.user?.id || req.user?._id || req.user?.userId || "").trim();
-}
-
-function assertSandboxOwner({ req, tx }) {
-  const userId = getAuthedUserId(req);
-
-  const allowedIds = [
-    tx?.sender,
-    tx?.receiver,
-    tx?.receiverUserId,
-    tx?.createdBy,
-    tx?.ownerUserId,
-    tx?.userId,
-    tx?.user,
-  ]
-    .map((v) => String(v || "").trim())
-    .filter(Boolean);
-
-  if (!userId || !allowedIds.includes(userId)) {
-    throw createError(
-      403,
-      "Vous n’êtes pas autorisé à confirmer cette transaction."
-    );
-  }
 }
 
 function normalizeStatus(status) {
@@ -252,110 +218,6 @@ function normalizeStatus(status) {
  * réintroduit un statut que la machine refuse.
  */
 const PAYOUT_CONFIRMABLE_DEPUIS = Object.freeze(["pending", "pending_review"]);
-
-function isFinalNegativeStatus(status) {
-  return ["cancelled", "canceled", "failed", "refunded", "reversed"].includes(
-    normalizeStatus(status)
-  );
-}
-
-/**
- * Volet sandbox : mute et enregistre dans la session reçue, puis rend le corps
- * de la réponse. Ne valide pas la session et n'écrit pas sur `res` — la
- * transaction pouvant être rejouée, une réponse émise d'ici partirait deux
- * fois.
- */
-async function applySandboxConfirm({ req, tx, sessOpts }) {
-  assertSandboxOwner({ req, tx });
-
-  if (isFinalNegativeStatus(tx.status)) {
-    throw createError(410, "Cette transaction sandbox n’est plus confirmable.");
-  }
-
-  const now = new Date();
-
-  /**
-   * ⚠️ CORRECTIF — CE CHEMIN NE POUVAIT PAS ABOUTIR.
-   *
-   * Ces trois lignes écrivaient `tx.status = "completed"`. Or `"completed"`
-   * n'existe pas dans `STATUSES` (`models/Transaction.js:47-58`), qui déclare
-   * `created, pending, pending_review, processing, confirmed, cancelled,
-   * refunded, relaunch, locked, failed`.
-   *
-   * Le `await tx.save()` en fin de fonction déclenche donc la validation
-   * d'énumération de Mongoose et LÈVE. `applySandboxConfirm()` — le chemin
-   * emprunté pour la revue App Store — échouait systématiquement en 500.
-   *
-   * Le statut de succès déclaré est `"confirmed"` : c'est ce qu'écrit le
-   * chemin réel (ligne 1760 de ce fichier), c'est le terminal `CONFIRMED` de
-   * la machine à états, et il figure dans les vocabulaires de lecture
-   * (`autoCancelPolicy.FINAL_STATUSES`) — donc une transaction sandbox ne
-   * partira pas en auto-annulation.
-   *
-   * ⚠️ NE PAS « corriger » en ajoutant `"completed"` à l'énumération : cela
-   * créerait deux statuts de succès pour la même réalité, ce que §24 de
-   * l'architecture interdit explicitement (ne jamais mélanger statut de
-   * transaction, statut prestataire et statut de règlement). `"completed"`
-   * reste un statut PRESTATAIRE, rendu par `canonicalStatus()` des adapters.
-   *
-   * `"initiated"` dans le test d'appartenance ci-dessous n'existe pas non plus,
-   * mais en LECTURE c'est sans conséquence — on le laisse par tolérance aux
-   * documents hérités.
-   */
-  tx.status = tx.status || "confirmed";
-  if (["pending", "processing", "initiated", "pending_review", "relaunch"].includes(normalizeStatus(tx.status))) {
-    tx.status = "confirmed";
-  }
-
-  tx.provider = "sandbox";
-  tx.channel = "sandbox";
-  tx.providerStatus = tx.providerStatus || "sandbox_completed";
-  tx.providerReference =
-    tx.providerReference ||
-    `SBX-CONFIRM-${String(tx._id || "").slice(-8).toUpperCase()}`;
-
-  tx.confirmedAt = tx.confirmedAt || now;
-  tx.executedAt = tx.executedAt || now;
-  tx.completedAt = tx.completedAt || now;
-
-  tx.isSandbox = true;
-  tx.fundsCaptured = true;
-
-  tx.metadata = {
-    ...(tx.metadata || {}),
-    sandbox: true,
-    sandboxConfirm: {
-      skipped: true,
-      reason: "APPLE_REVIEW_SANDBOX_ALREADY_SIMULATED",
-      at: now.toISOString(),
-    },
-  };
-
-  tx.meta = {
-    ...(tx.meta || {}),
-    sandbox: true,
-    providerExecutionSkipped: true,
-  };
-
-  await tx.save(sessOpts);
-
-  return {
-    statusCode: 200,
-    body: {
-      success: true,
-      sandbox: true,
-      transactionId: tx._id.toString(),
-      reference: tx.reference,
-      flow: tx.flow,
-      status: tx.status,
-      providerStatus: tx.providerStatus,
-      providerReference: tx.providerReference,
-      fundsCaptured: !!tx.fundsCaptured,
-      beneficiaryCredited: !!tx.beneficiaryCredited,
-      message: "Transaction sandbox déjà simulée avec succès.",
-    },
-  };
-}
 
 function assertCorridorLockIsValid(tx) {
   const lock = getCorridorLock(tx);
@@ -583,7 +445,7 @@ const CONFIRM_SELECT = [
   "+channel",
   "+providerStatus",
   "+providerReference",
-  "+isSandbox",
+  "+mode",
   "+securityAnswerHash",
   "+securityCode",
 
@@ -869,18 +731,16 @@ async function confirmController(req, res, next) {
       throw createError(404, "Transaction introuvable");
     }
 
-    const previewIsSandbox = isSandboxTx(preview);
+    // Une transaction sandbox se confirme EXACTEMENT comme une réelle : même
+    // réponse de sécurité, mêmes tentatives comptées (2026-10-06).
+    if (!provided) {
+      throw createError(400, "securityAnswer est requis");
+    }
 
-    if (!previewIsSandbox) {
-      if (!provided) {
-        throw createError(400, "securityAnswer est requis");
-      }
+    assertConfirmable({ req, tx: preview, now });
 
-      assertConfirmable({ req, tx: preview, now });
-
-      if (!securityAnswerMatches(preview, provided)) {
-        await registerFailedAttempt({ transactionId: preview._id, now });
-      }
+    if (!securityAnswerMatches(preview, provided)) {
+      await registerFailedAttempt({ transactionId: preview._id, now });
     }
 
     /**
@@ -900,10 +760,6 @@ async function confirmController(req, res, next) {
 
       if (!tx) {
         throw createError(404, "Transaction introuvable");
-      }
-
-      if (isSandboxTx(tx)) {
-        return applySandboxConfirm({ req, tx, sessOpts });
       }
 
       assertConfirmable({ req, tx, now });
@@ -1066,6 +922,7 @@ async function confirmController(req, res, next) {
               amount: Number(tx.amountSource ?? tx.amount ?? 0),
               currency: String(sourceCurrency || tx.currencySource || ""),
               confirmedAt: (tx.confirmedAt || new Date()).toISOString(),
+              mode: String(tx.mode || ""),
             },
           },
           sess
@@ -1115,7 +972,11 @@ async function confirmController(req, res, next) {
            */
           const refereeId = String(tx?.userId || tx?.sender || "").trim();
 
-          if (refereeId) {
+          // Pas de parrainage en simulation : une prime serait payée en argent
+          // réel (`utils/accountMode.isReferralEligibleMode`).
+          if (!isReferralEligibleMode(tx?.mode)) {
+            referralSync = { enqueued: false, reason: "SANDBOX_NO_REFERRAL" };
+          } else if (refereeId) {
             await publishDomainEvent(
               {
                 name: "referral.activity.confirmed.v1",

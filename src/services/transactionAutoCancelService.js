@@ -12,6 +12,8 @@ try {
 const runtime = require("./transactions/shared/runtime");
 const { WORKERS, declareWorker } = require("./workerMetrics");
 const TxWalletBalanceFactory = require("../models/TxWalletBalance");
+const { requireMode } = require("../utils/accountMode");
+const { releaseSenderReserve } = require("./ledgerService");
 
 const {
   AUTO_CANCELLABLE_STATUSES,
@@ -340,21 +342,14 @@ async function releaseReservedFundsIfNeeded(tx, session) {
     };
   }
 
-  const wallet =
-    typeof TxWalletBalance.findWallet === "function"
-      ? await TxWalletBalance.findWallet(
-          senderId,
-          currency,
-          getSessionOptions(session)
-        )
-      : await TxWalletBalance.findOne(
-          {
-            user: senderId,
-            currency,
-          },
-          null,
-          getSessionOptions(session)
-        );
+  // Le mode vient de la transaction (requis, immuable) : une annulation ne
+  // touche que le portefeuille du même monde, live ou sandbox.
+  const mode = requireMode(tx?.mode, `transaction ${getTxId(tx)}`);
+
+  const wallet = await TxWalletBalance.findWallet(senderId, currency, {
+    ...getSessionOptions(session),
+    mode,
+  });
 
   const actualReserved = toNumber(wallet?.reservedAmount || 0);
 
@@ -382,18 +377,27 @@ async function releaseReservedFundsIfNeeded(tx, session) {
     };
   }
 
-  const releaseFn =
-    typeof TxWalletBalance.releaseReserveForAutoCancel === "function"
-      ? TxWalletBalance.releaseReserveForAutoCancel.bind(TxWalletBalance)
-      : TxWalletBalance.releaseReserve.bind(TxWalletBalance);
-
+  /**
+   * ⚠️ CORRECTIF DU 2026-10-06 — LA LIBÉRATION PASSE PAR LE GRAND LIVRE.
+   *
+   * Ce bloc appelait `TxWalletBalance.releaseReserveForAutoCancel` en direct :
+   * le solde disponible remontait, mais AUCUNE écriture `RESERVE_RELEASE`
+   * n'était posée. `system_reserve:<expéditeur>` restait donc débiteur à vie
+   * de chaque réserve annulée par le worker — le grand livre et sa projection
+   * divergeaient à chaque expiration (invariants 2 et 4).
+   *
+   * `ledgerService.releaseSenderReserve` fait les deux, dans la même session,
+   * avec une clé de déduplication par transaction : un rejeu du worker ne
+   * double ni le mouvement ni l'écriture.
+   */
   try {
-    await releaseFn(
+    await releaseSenderReserve({
+      transaction: tx,
       senderId,
+      amount: amountToRelease,
       currency,
-      amountToRelease,
-      getSessionOptions(session)
-    );
+      session,
+    });
 
     return {
       released: true,
@@ -723,6 +727,21 @@ async function processExpiredTransactions({
   };
 }
 
+/**
+ * Annule MAINTENANT une transaction déjà échue, par le chemin exact du worker
+ * (verrou propriétaire + durée de vie, libération par le grand livre, machine
+ * à états). Rend `null` si la transaction n'est pas échue ou déjà prise.
+ *
+ * Seul usage : « réinitialiser la démo » d'un compte sandbox, qui rend échues
+ * ses transactions ouvertes puis les fait annuler ici — sans chemin parallèle.
+ */
+async function cancelExpiredTransactionNow({ transactionId, workerId } = {}) {
+  const wid = workerId || buildWorkerId();
+  const lockedTx = await lockTransaction({ _id: transactionId }, wid);
+  if (!lockedTx) return null;
+  return cancelLockedTransaction(lockedTx, wid);
+}
+
 function startTransactionAutoCancelWorker({
   intervalMs = AUTO_CANCEL_INTERVAL_MS,
   batchSize = AUTO_CANCEL_BATCH_SIZE,
@@ -819,6 +838,7 @@ function startTransactionAutoCancelWorker({
 }
 
 module.exports = {
+  cancelExpiredTransactionNow,
   processExpiredTransactions,
   startTransactionAutoCancelWorker,
 };

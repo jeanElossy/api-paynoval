@@ -162,6 +162,7 @@ async function detecterFractionnement({ sujetId, devise, maintenant }) {
       occurredAt: { $gte: depuis, $lte: maintenant },
       "payload.senderId": String(sujetId),
       "payload.currency": String(devise).toUpperCase(),
+      "payload.mode": { $ne: "sandbox" },
     })
     .select({ payload: 1, occurredAt: 1 })
     .lean();
@@ -223,6 +224,7 @@ async function ouvrirDossier({ sujetId, constat, devise, evenement }) {
    * entrer des données personnelles qui n'aident pas à l'instruction.
    */
   await AMLLog().create({
+    mode: "live",
     userId: sujetId || null,
     type: "initiate",
     provider: "surveillance",
@@ -284,7 +286,16 @@ async function handler(message) {
 
   let outcome = "aucun-motif";
 
-  if (sujetId && devise && message.name !== "collection.succeeded.v1") {
+  /**
+   * Les opérations de SIMULATION ne sont pas surveillées (2026-10-06) : aucun
+   * argent réel ne bouge, et un dossier de conformité ouvert sur un compte de
+   * démonstration encombrerait la file des analystes. L'événement est tout de
+   * même marqué traité, pour ne pas être relivré.
+   */
+  const simulation = message?.payload?.mode === "sandbox";
+  if (simulation) outcome = "simulation-ignoree";
+
+  if (!simulation && sujetId && devise && message.name !== "collection.succeeded.v1") {
     const constat = await detecterFractionnement({
       sujetId,
       devise,

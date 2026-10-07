@@ -6,6 +6,59 @@ const { normalizeAccountCurrency } = require("../utils/currency");
 
 const mongoose = require("mongoose");
 const logger = require("../utils/logger");
+const {
+  ACCOUNT_MODES,
+  MODE_VALUES,
+  requireMode,
+} = require("../utils/accountMode");
+
+/**
+ * ============================================================================
+ * LE MODE EST EXIGÉ À CHAQUE MOUVEMENT DE PORTEFEUILLE
+ * ============================================================================
+ *
+ * Toute opération qui modifie un solde reçoit `opts.mode` ("live" | "sandbox")
+ * et ne touche QUE le portefeuille de ce mode. Un portefeuille d'un autre mode
+ * n'est jamais modifié : la requête ne le trouve pas, et `ensureWallet` lève
+ * `MODE_MISMATCH` au lieu de laisser l'index unique répondre par un E11000
+ * incompréhensible.
+ *
+ * Un mode absent LÈVE (règle B.2) : c'est ce qui garantit qu'aucun appelant
+ * oublié ne déplace de l'argent sans avoir dit dans quel monde il opère.
+ *
+ * Le filtre « live » est `$ne: "sandbox"` et non une égalité : un portefeuille
+ * antérieur à la migration n'a pas de champ `mode`, et c'est un portefeuille
+ * de production (voir `utils/accountMode.liveOnlyFilter`).
+ */
+function splitModeOpts(opts = {}, operation = "portefeuille") {
+  const { mode, ...queryOpts } = opts || {};
+  const resolved = requireMode(mode, `TxWalletBalance.${operation}`);
+
+  return {
+    mode: resolved,
+    modeMatch:
+      resolved === ACCOUNT_MODES.SANDBOX
+        ? { mode: ACCOUNT_MODES.SANDBOX }
+        : { mode: { $ne: ACCOUNT_MODES.SANDBOX } },
+    queryOpts,
+  };
+}
+
+function walletModeOf(doc) {
+  return doc?.mode === ACCOUNT_MODES.SANDBOX
+    ? ACCOUNT_MODES.SANDBOX
+    : ACCOUNT_MODES.LIVE;
+}
+
+function modeMismatchError(userId, currency, expected, actual) {
+  const err = new Error(
+    `Portefeuille ${currency} de ${userId} en mode ${actual}, opération en mode ${expected} : refusé.`
+  );
+  err.code = "MODE_MISMATCH";
+  err.status = 403;
+  err.statusCode = 403;
+  return err;
+}
 
 /**
  * ============================================================================
@@ -164,10 +217,15 @@ module.exports = (conn = mongoose) => {
         index: true,
       },
 
-      isSandbox: {
-        type: Boolean,
-        default: false,
-        index: true,
+      /**
+       * Mode du propriétaire, posé à la création, jamais réécrit. Remplace
+       * l'ancien `isSandbox`, que rien n'empêchait de modifier.
+       */
+      mode: {
+        type: String,
+        enum: MODE_VALUES,
+        required: true,
+        immutable: true,
       },
 
       metadata: {
@@ -185,7 +243,6 @@ module.exports = (conn = mongoose) => {
 
   balanceSchema.index({ user: 1, currency: 1 }, { unique: true });
   balanceSchema.index({ user: 1, currency: 1, status: 1 });
-  balanceSchema.index({ user: 1, currency: 1, isSandbox: 1 });
 
   balanceSchema.pre("validate", function (next) {
     this.currency = normCurrency(this.currency);
@@ -215,14 +272,17 @@ module.exports = (conn = mongoose) => {
   ) {
     const cur = normCurrency(currency);
 
-    return this.findOne(
-      {
-        user: userId,
-        currency: cur,
-      },
-      null,
-      opts
-    );
+    /**
+     * Lecture : le mode est facultatif. Fourni, il restreint ; absent, on lit
+     * le portefeuille tel qu'il est (son propre `mode` dit lequel c'est).
+     */
+    const { mode, ...queryOpts } = opts || {};
+    const filter = { user: userId, currency: cur };
+    if (mode !== undefined) {
+      Object.assign(filter, splitModeOpts({ mode }, "findWallet").modeMatch);
+    }
+
+    return this.findOne(filter, null, queryOpts);
   };
 
   balanceSchema.statics.ensureWallet = async function (
@@ -231,29 +291,51 @@ module.exports = (conn = mongoose) => {
     opts = {}
   ) {
     const cur = normCurrency(currency);
+    const { mode, modeMatch, queryOpts } = splitModeOpts(opts, "ensureWallet");
 
-    return this.findOneAndUpdate(
-      {
-        user: userId,
-        currency: cur,
-      },
-      {
-        $setOnInsert: {
-          user: userId,
-          currency: cur,
-          amount: toFixedAmount(0, cur),
-          reservedAmount: toFixedAmount(0, cur),
-          availableAmount: toFixedAmount(0, cur),
-          status: "active",
-        },
-      },
-      {
-        new: true,
-        upsert: true,
-        setDefaultsOnInsert: true,
-        ...opts,
-      }
+    const existing = await this.findOne(
+      { user: userId, currency: cur },
+      null,
+      queryOpts
     );
+
+    if (existing) {
+      if (walletModeOf(existing) !== mode) {
+        throw modeMismatchError(userId, cur, mode, walletModeOf(existing));
+      }
+      return existing;
+    }
+
+    try {
+      return await this.findOneAndUpdate(
+        { user: userId, currency: cur, ...modeMatch },
+        {
+          $setOnInsert: {
+            user: userId,
+            currency: cur,
+            mode,
+            amount: toFixedAmount(0, cur),
+            reservedAmount: toFixedAmount(0, cur),
+            availableAmount: toFixedAmount(0, cur),
+            status: "active",
+          },
+        },
+        {
+          new: true,
+          upsert: true,
+          setDefaultsOnInsert: true,
+          ...queryOpts,
+        }
+      );
+    } catch (err) {
+      // Course entre deux créations : l'index unique {user, currency} a
+      // refusé la seconde. On relit et on rend une erreur qui dit la vérité.
+      if (err?.code !== 11000) throw err;
+
+      const raced = await this.findOne({ user: userId, currency: cur }, null, queryOpts);
+      if (raced && walletModeOf(raced) === mode) return raced;
+      throw modeMismatchError(userId, cur, mode, walletModeOf(raced));
+    }
   };
 
   balanceSchema.statics.credit = async function (
@@ -265,12 +347,14 @@ module.exports = (conn = mongoose) => {
     const cur = normCurrency(currency);
     const n = ensurePositiveAmount(amount, cur, "Le montant à créditer");
 
+    const { modeMatch, queryOpts } = splitModeOpts(opts, "mouvement");
     await this.ensureWallet(userId, cur, opts);
 
     const doc = await this.findOneAndUpdate(
       {
         user: userId,
         currency: cur,
+        ...modeMatch,
         status: "active",
       },
       {
@@ -281,7 +365,7 @@ module.exports = (conn = mongoose) => {
       },
       {
         new: true,
-        ...opts,
+        ...queryOpts,
       }
     );
 
@@ -305,12 +389,14 @@ module.exports = (conn = mongoose) => {
     const cur = normCurrency(currency);
     const n = ensurePositiveAmount(amount, cur, "Le montant à débiter");
 
+    const { modeMatch, queryOpts } = splitModeOpts(opts, "mouvement");
     await this.ensureWallet(userId, cur, opts);
 
     const doc = await this.findOneAndUpdate(
       {
         user: userId,
         currency: cur,
+        ...modeMatch,
         status: "active",
         availableAmount: { $gte: n },
         amount: { $gte: n },
@@ -323,7 +409,7 @@ module.exports = (conn = mongoose) => {
       },
       {
         new: true,
-        ...opts,
+        ...queryOpts,
       }
     );
 
@@ -347,12 +433,14 @@ module.exports = (conn = mongoose) => {
     const cur = normCurrency(currency);
     const n = ensurePositiveAmount(amount, cur, "Le montant à réserver");
 
+    const { modeMatch, queryOpts } = splitModeOpts(opts, "mouvement");
     await this.ensureWallet(userId, cur, opts);
 
     const doc = await this.findOneAndUpdate(
       {
         user: userId,
         currency: cur,
+        ...modeMatch,
         status: "active",
         availableAmount: { $gte: n },
       },
@@ -364,7 +452,7 @@ module.exports = (conn = mongoose) => {
       },
       {
         new: true,
-        ...opts,
+        ...queryOpts,
       }
     );
 
@@ -387,11 +475,13 @@ module.exports = (conn = mongoose) => {
   ) {
     const cur = normCurrency(currency);
     const n = ensurePositiveAmount(amount, cur, "Le montant à libérer");
+    const { modeMatch, queryOpts } = splitModeOpts(opts, "releaseReserve");
 
     const doc = await this.findOneAndUpdate(
       {
         user: userId,
         currency: cur,
+        ...modeMatch,
         status: "active",
         reservedAmount: { $gte: n },
       },
@@ -403,7 +493,7 @@ module.exports = (conn = mongoose) => {
       },
       {
         new: true,
-        ...opts,
+        ...queryOpts,
       }
     );
 
@@ -443,11 +533,13 @@ module.exports = (conn = mongoose) => {
   ) {
     const cur = normCurrency(currency);
     const n = ensurePositiveAmount(amount, cur, "Le montant à capturer");
+    const { modeMatch, queryOpts } = splitModeOpts(opts, "captureReserve");
 
     const doc = await this.findOneAndUpdate(
       {
         user: userId,
         currency: cur,
+        ...modeMatch,
         status: "active",
         reservedAmount: { $gte: n },
         amount: { $gte: n },
@@ -460,7 +552,7 @@ module.exports = (conn = mongoose) => {
       },
       {
         new: true,
-        ...opts,
+        ...queryOpts,
       }
     );
 
@@ -548,10 +640,13 @@ module.exports = (conn = mongoose) => {
       update.$inc.amount = -feeAmount;
     }
 
+    const { modeMatch, queryOpts } = splitModeOpts(opts, "cancelReservedWithFee");
+
     const doc = await this.findOneAndUpdate(
       {
         user: userId,
         currency: cur,
+        ...modeMatch,
         status: "active",
         reservedAmount: { $gte: totalReservedAmount },
         amount: { $gte: feeAmount },
@@ -559,7 +654,7 @@ module.exports = (conn = mongoose) => {
       update,
       {
         new: true,
-        ...opts,
+        ...queryOpts,
       }
     );
 
@@ -585,7 +680,7 @@ module.exports = (conn = mongoose) => {
       reservedAmount: Number(this.reservedAmount?.toString?.() || 0),
       availableAmount: Number(this.availableAmount?.toString?.() || 0),
       status: this.status,
-      isSandbox: this.isSandbox === true,
+      mode: walletModeOf(this),
       metadata: this.metadata,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,

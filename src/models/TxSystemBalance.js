@@ -1,6 +1,11 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const { MODE_VALUES } = require("../utils/accountMode");
+const {
+  ALL_TREASURY_SYSTEM_TYPES,
+  SANDBOX_TREASURY_SYSTEM_TYPES,
+} = require("../services/treasuryRegistry");
 
 const {
   balancesAsNumbers,
@@ -20,13 +25,12 @@ module.exports = function buildTxSystemBalanceModel(conn) {
   }
   
 
-  const SYSTEM_TYPES = [
-    "REFERRAL_TREASURY",
-    "FEES_TREASURY",
-    "OPERATIONS_TREASURY",
-    "CAGNOTTE_FEES_TREASURY",
-    "FX_MARGIN_TREASURY",
-  ];
+  /**
+   * Les rôles de simulation viennent du registre, seule définition : une
+   * seconde liste ici finirait par diverger. Voir `services/treasuryRegistry`.
+   */
+  const SYSTEM_TYPES = [...ALL_TREASURY_SYSTEM_TYPES];
+  const SANDBOX_SYSTEM_TYPES = new Set(SANDBOX_TREASURY_SYSTEM_TYPES);
 
   const SINGLE_CURRENCY_SYSTEM_TYPES = new Set([
     "REFERRAL_TREASURY",
@@ -164,6 +168,17 @@ module.exports = function buildTxSystemBalanceModel(conn) {
         // sur les comptes actifs, que cet index couvre.
       },
 
+      /**
+       * Mode de la trésorerie, DÉRIVÉ de son rôle (`SANDBOX_*` ⇒ sandbox) dans
+       * le `pre("validate")` : il ne se déclare pas, il ne peut donc pas
+       * contredire le rôle. Immuable.
+       */
+      mode: {
+        type: String,
+        enum: MODE_VALUES,
+        immutable: true,
+      },
+
       fullName: {
         type: String,
         trim: true,
@@ -270,6 +285,12 @@ module.exports = function buildTxSystemBalanceModel(conn) {
   TxSystemBalanceSchema.pre("validate", function preValidate(next) {
     try {
       this.systemType = cleanSystemType(this.systemType);
+      // Posé à la création seulement : `immutable` refuse toute écriture
+      // ultérieure, même sur un champ absent. Les comptes antérieurs sont
+      // marqués par `scripts/migrateAccountMode.js`.
+      if (this.isNew) {
+        this.mode = SANDBOX_SYSTEM_TYPES.has(this.systemType) ? "sandbox" : "live";
+      }
       this.defaultCurrency = cleanCurrency(this.defaultCurrency || "CAD");
 
       if (!this.managedCurrency) {

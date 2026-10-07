@@ -2,6 +2,7 @@
 "use strict";
 
 const AMLLog = require("../models/AMLLog");
+const { isAccountMode, resolveUserMode } = require("../utils/accountMode");
 
 const { getSingleTxLimit } = require("../tools/amlLimits");
 const { getCurrencySymbolByCode } = require("../tools/currency");
@@ -97,7 +98,42 @@ function safeNumber(v) {
 /* AML log                                                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Mode du compte pour l'entrée d'audit. Fourni par l'appelant quand il le
+ * connaît ; sinon relu dans la base Users (l'audit est écrit hors du chemin
+ * critique, une lecture par `_id` y est acceptable). Une lecture impossible
+ * n'empêche JAMAIS l'audit : l'entrée part avec `mode: null`, et le journal
+ * le dit.
+ */
+async function resolveLogMode({ mode, userId }) {
+  if (isAccountMode(mode)) return mode;
+  if (!userId) return "live";
+
+  try {
+    const mongoose = require("mongoose");
+    const id = String(userId);
+    if (!mongoose.isValidObjectId(id)) return null;
+
+    const user = await mongoose.connection.db
+      .collection("users")
+      .findOne(
+        { _id: new mongoose.Types.ObjectId(id) },
+        { projection: { mode: 1, isSandbox: 1, isReviewerAccount: 1 } }
+      );
+
+    return user ? resolveUserMode(user) : null;
+  } catch (err) {
+    console.error("[AML] mode du compte illisible pour l'audit", {
+      userId: String(userId),
+      message: err?.message || String(err),
+      consequence: "entrée d'audit écrite avec mode=null (comptée comme production)",
+    });
+    return null;
+  }
+}
+
 async function logTransaction({
+  mode = undefined,
   userId,
   type,
   provider,
@@ -112,6 +148,7 @@ async function logTransaction({
 }) {
   try {
     await AMLLog.create({
+      mode: await resolveLogMode({ mode, userId }),
       userId: userId || null,
       type: type || "initiate",
       provider: provider || "unknown",

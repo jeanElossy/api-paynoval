@@ -44,6 +44,85 @@ const TREASURY_SYSTEM_TYPES = Object.freeze([
   "FX_MARGIN_TREASURY",
 ]);
 
+/**
+ * TRÉSORERIES DE SIMULATION (2026-10-06) — `utils/accountMode.js`.
+ *
+ * Une transaction sandbox exécute le vrai moteur, frais et marge de change
+ * compris. Ses revenus ne peuvent pas atterrir sur les vraies trésoreries :
+ * de l'argent fictif gonflerait le chiffre d'affaires réel. Chaque rôle
+ * qu'un parcours de simulation peut atteindre a donc son homologue, avec son
+ * propre compte système — c'est ainsi que la balance de vérification
+ * s'équilibre séparément dans chaque mode.
+ *
+ * Seuls les rôles atteignables en simulation existent : le parrainage est
+ * refusé aux comptes sandbox, il n'a pas d'homologue. Un
+ * rôle sans homologue LÈVE (`treasurySystemTypeForMode`), il ne retombe
+ * jamais sur la trésorerie réelle.
+ *
+ * Ces types sont tenus HORS de `TREASURY_SYSTEM_TYPES` : l'audit de démarrage
+ * et les plans de réparation des vraies trésoreries ne doivent ni les exiger
+ * ni les toucher. `auditTreasuryRegistry({ types })` les contrôle à part.
+ */
+const SANDBOX_TREASURY_BY_LIVE_TYPE = Object.freeze({
+  FEES_TREASURY: "SANDBOX_FEES_TREASURY",
+  FX_MARGIN_TREASURY: "SANDBOX_FX_MARGIN_TREASURY",
+  OPERATIONS_TREASURY: "SANDBOX_OPERATIONS_TREASURY",
+  // Cagnottes de simulation (création, participation, clôture, retrait) :
+  // leurs frais ont leur propre trésorerie fictive.
+  CAGNOTTE_FEES_TREASURY: "SANDBOX_CAGNOTTE_FEES_TREASURY",
+});
+
+const SANDBOX_TREASURY_SYSTEM_TYPES = Object.freeze(
+  Object.values(SANDBOX_TREASURY_BY_LIVE_TYPE)
+);
+
+const ALL_TREASURY_SYSTEM_TYPES = Object.freeze([
+  ...TREASURY_SYSTEM_TYPES,
+  ...SANDBOX_TREASURY_SYSTEM_TYPES,
+]);
+
+/**
+ * Rôle de trésorerie effectif pour un mode. Fonction pure.
+ * Un rôle déjà sandbox est rendu tel quel en mode sandbox ; un rôle sandbox
+ * demandé en mode live, ou un rôle sans homologue en sandbox, LÈVE.
+ */
+function treasurySystemTypeForMode(systemType, mode) {
+  const type = idOf(systemType).toUpperCase();
+  const isSandboxType = SANDBOX_TREASURY_SYSTEM_TYPES.includes(type);
+
+  if (mode === "sandbox") {
+    if (isSandboxType) return type;
+    const mapped = SANDBOX_TREASURY_BY_LIVE_TYPE[type];
+    if (mapped) return mapped;
+
+    const err = new Error(
+      `Aucune trésorerie de simulation pour ${type} : ce rôle n'est pas ouvert aux comptes sandbox.`
+    );
+    err.code = "SANDBOX_TREASURY_UNSUPPORTED";
+    err.status = 403;
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (mode === "live") {
+    if (!isSandboxType) return type;
+
+    const err = new Error(
+      `Trésorerie de simulation ${type} demandée par une opération live : refusé.`
+    );
+    err.code = "MODE_MISMATCH";
+    err.status = 403;
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const err = new Error(`Mode illisible pour la trésorerie ${type} : opération refusée.`);
+  err.code = "MODE_REQUIRED";
+  err.status = 500;
+  err.statusCode = 500;
+  throw err;
+}
+
 const STATUS = Object.freeze({
   OK: "OK",
   MISSING: "MISSING",
@@ -77,7 +156,7 @@ function buildRegistry(wallets = []) {
 
   for (const wallet of activeOnly(wallets)) {
     const type = idOf(wallet?.systemType);
-    if (!TREASURY_SYSTEM_TYPES.includes(type)) continue;
+    if (!ALL_TREASURY_SYSTEM_TYPES.includes(type)) continue;
 
     if (byType.has(type)) {
       duplicates.add(type);
@@ -97,11 +176,16 @@ function buildRegistry(wallets = []) {
  * système de la base Users (`{ _id, systemType }`), qui disent si le
  * propriétaire du compte interne existe encore.
  */
-function auditTreasuryRegistry({ wallets = [], envIds = {}, systemUsers = [] } = {}) {
+function auditTreasuryRegistry({
+  wallets = [],
+  envIds = {},
+  systemUsers = [],
+  types = TREASURY_SYSTEM_TYPES,
+} = {}) {
   const { registry, duplicates } = buildRegistry(wallets);
   const ownerIds = new Set(systemUsers.map((u) => idOf(u?._id)));
 
-  return TREASURY_SYSTEM_TYPES.map((systemType) => {
+  return types.map((systemType) => {
     const envId = idOf(envIds[systemType]);
     const registryId = registry.get(systemType) || "";
 
@@ -328,6 +412,10 @@ function resetTreasuryRegistry() {
 
 module.exports = {
   TREASURY_SYSTEM_TYPES,
+  SANDBOX_TREASURY_SYSTEM_TYPES,
+  SANDBOX_TREASURY_BY_LIVE_TYPE,
+  ALL_TREASURY_SYSTEM_TYPES,
+  treasurySystemTypeForMode,
   STATUS,
   isEmptyTreasury,
   buildRegistry,

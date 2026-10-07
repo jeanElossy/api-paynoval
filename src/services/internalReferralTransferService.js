@@ -1,5 +1,13 @@
 "use strict";
 
+/**
+ * Le parrainage n'existe qu'en production : les comptes sandbox n'y ont pas
+ * accès (`utils/accountMode.js`). Ses mouvements sont donc posés « live » en
+ * dur — un portefeuille de simulation ne répond pas à une opération live, ce
+ * qui ferme le chemin même si une garde amont venait à manquer.
+ */
+const REFERRAL_ACCOUNT_MODE = "live";
+
 let logger = console;
 try {
   logger = require("../utils/logger");
@@ -222,6 +230,7 @@ async function postReferralLedgerEntries({
 
   for (const lot of lots) {
     await postDoubleEntry({
+      mode: REFERRAL_ACCOUNT_MODE,
       transactionId,
       reference: String(reference),
       entryType: lot.entryType,
@@ -265,7 +274,10 @@ async function ensureWallet(userId, currency, session) {
     });
   }
 
-  return TxWalletBalance.ensureWallet(userId, cur, { session });
+  return TxWalletBalance.ensureWallet(userId, cur, {
+    session,
+    mode: REFERRAL_ACCOUNT_MODE,
+  });
 }
 
 async function convertAmountViaInternalFx({
@@ -739,7 +751,10 @@ async function creditWalletWithBalances({
   const before = await ensureWallet(userId, cur, session);
   const balanceBefore = decimalToNumber(before?.amount);
 
-  const updated = await TxWalletBalance.credit(userId, cur, amt, { session });
+  const updated = await TxWalletBalance.credit(userId, cur, amt, {
+    session,
+    mode: REFERRAL_ACCOUNT_MODE,
+  });
 
   if (!updated) {
     throw Object.assign(new Error(errorCode || "WALLET_CREDIT_FAILED"), {
@@ -858,7 +873,10 @@ function buildUserVisibleReferralTx({
 async function insertReferralHistoryTransaction(doc, session) {
   const Transaction = getTransactionModel();
 
-  const [created] = await Transaction.create([doc], { session });
+  const [created] = await Transaction.create(
+    [{ ...doc, mode: REFERRAL_ACCOUNT_MODE }],
+    { session }
+  );
   return created;
 }
 

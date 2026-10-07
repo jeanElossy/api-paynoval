@@ -291,7 +291,7 @@ test("le sélecteur d'adapters instrumente sans rien changer au contrat", async 
 
   try {
     const { getProviderAdapter } = require("../src/providers/providerSelector");
-    const adapter = getProviderAdapter({ rail: "card", provider: "visa-direct" });
+    const adapter = getProviderAdapter({ rail: "card", provider: "visa-direct", mode: "live" });
 
     // L'alias "visa-direct" doit être étiqueté sous le nom CANONIQUE.
     assert.equal(adapter.provider, "visa_direct");

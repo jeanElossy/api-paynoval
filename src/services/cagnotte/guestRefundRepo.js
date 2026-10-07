@@ -197,7 +197,12 @@ function makeGuestRefundRepo() {
 
 /** Dépendances réelles de `guestRefund.js`. */
 function guestRefundDeps() {
-  return { repo: makeGuestRefundRepo(), getAdapter: getProviderAdapter, now: () => new Date() };
+  return {
+    repo: makeGuestRefundRepo(),
+    // Remboursement d'un invité de cagnotte : production seulement.
+    getAdapter: (args) => getProviderAdapter({ ...args, mode: "live" }),
+    now: () => new Date(),
+  };
 }
 
 module.exports = { makeGuestRefundRepo, guestRefundDeps, eqOrMissing };

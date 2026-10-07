@@ -77,7 +77,7 @@ function positionToJSON(doc) {
 }
 
 /** PURE — la position appartient-elle bien à ce coffre, dans cette devise ? */
-function assertPositionIdentity(doc, { cagnotteId = null, currency = null } = {}) {
+function assertPositionIdentity(doc, { cagnotteId = null, currency = null, mode = null } = {}) {
   if (!doc) {
     throw positionError(
       404,
@@ -94,6 +94,16 @@ function assertPositionIdentity(doc, { cagnotteId = null, currency = null } = {}
       `Le coffre est tenu en ${doc.currency}, l'opération présente ${upper(currency)}. ` +
         "La devise d'un coffre est immuable : aucune opération ne la re-libelle.",
       { positionCurrency: doc.currency, requestedCurrency: upper(currency) }
+    );
+  }
+
+  // Une position sans mode est antérieure à la migration : production.
+  const docMode = doc.mode === "sandbox" ? "sandbox" : "live";
+  if (mode && docMode !== mode) {
+    throw positionError(
+      409,
+      "VAULT_MODE_MISMATCH",
+      `Le coffre est en mode ${docMode}, l'opération en mode ${mode} : refusé.`
     );
   }
 
@@ -171,7 +181,11 @@ function diagnoseDebitRefusal(doc, { currency, amount, requireClosed = false, fo
  * unique est rejoué par le serveur, alors qu'un conflit de clé dans une
  * transaction l'annulerait entière.
  */
-async function openPosition({ Model, vaultId, cagnotteId, currency }) {
+async function openPosition({ Model, vaultId, cagnotteId, currency, mode }) {
+  if (mode !== "live" && mode !== "sandbox") {
+    throw positionError(500, "MODE_REQUIRED", "Mode de la cagnotte requis pour ouvrir son coffre.");
+  }
+
   const cur = upper(currency);
   const vId = String(vaultId || "").trim();
   const cId = String(cagnotteId || "").trim();
@@ -182,11 +196,11 @@ async function openPosition({ Model, vaultId, cagnotteId, currency }) {
 
   const doc = await Model.findOneAndUpdate(
     { vaultId: vId },
-    { $setOnInsert: { vaultId: vId, cagnotteId: cId, currency: cur, origin: "live" } },
+    { $setOnInsert: { vaultId: vId, cagnotteId: cId, currency: cur, mode, origin: "live" } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
-  return assertPositionIdentity(doc, { cagnotteId: cId, currency: cur });
+  return assertPositionIdentity(doc, { cagnotteId: cId, currency: cur, mode });
 }
 
 async function getPosition({ Model, vaultId, session = null }) {

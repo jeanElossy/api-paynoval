@@ -324,6 +324,8 @@ const {
   assertPositionIdentity,
 } = require("../services/cagnotte/vaultPosition");
 const { roundMoney } = require("../services/pricing/pricingEngine");
+const { treasurySystemTypeForMode } = require("../services/treasuryRegistry");
+const { loadCagnotteScope } = require("../services/cagnotte/cagnotteScope");
 const logger = require("../utils/logger");
 
 const CAGNOTTE_TREASURY_SYSTEM_TYPE = "CAGNOTTE_FEES_TREASURY";
@@ -425,9 +427,16 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
   let snapshot;
   let feeAmount = 0;
   let rule = null;
+  let accountMode;
 
   try {
-    snapshot = assertPositionIdentity(await getPosition({ Model: Position, vaultId: vId }), { cagnotteId: cId });
+    // Mode de la cagnotte relu en base : les frais d'une cagnotte de
+    // simulation vont à la trésorerie de simulation.
+    accountMode = (await loadCagnotteScope(cId)).mode;
+    snapshot = assertPositionIdentity(await getPosition({ Model: Position, vaultId: vId }), {
+      cagnotteId: cId,
+      mode: accountMode,
+    });
 
     if (snapshot.closedAt) {
       throw httpError(409, "VAULT_ALREADY_CLOSED", "Ce coffre est déjà clôturé : ses frais de clôture ont été réglés.");
@@ -457,9 +466,10 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
 
   const currency = snapshot.currency;
   const base = decToNumber(snapshot.collected);
+  const treasurySystemType = treasurySystemTypeForMode(CAGNOTTE_TREASURY_SYSTEM_TYPE, accountMode);
   const treasuryUserId = feeAmount > 0 ? (() => {
     try {
-      return getTreasuryUserIdBySystemType(CAGNOTTE_TREASURY_SYSTEM_TYPE);
+      return getTreasuryUserIdBySystemType(treasurySystemType);
     } catch {
       return null;
     }
@@ -506,7 +516,7 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
           session,
         });
 
-        const t = await TxSystemBalance.credit(treasuryUserId, CAGNOTTE_TREASURY_SYSTEM_TYPE, currency, feeAmount, {
+        const t = await TxSystemBalance.credit(treasuryUserId, treasurySystemType, currency, feeAmount, {
           session,
           fullName: CAGNOTTE_TREASURY_LABEL,
           reference: ref,
@@ -522,11 +532,12 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
         [
           {
             _id: settlementId,
+            accountMode,
             reference: ref,
             idempotencyKey: idem,
             userId: initiatorId,
             treasuryUserId: treasuryUserId || "",
-            treasurySystemType: feeAmount > 0 ? CAGNOTTE_TREASURY_SYSTEM_TYPE : "",
+            treasurySystemType: feeAmount > 0 ? treasurySystemType : "",
             treasuryLabel: feeAmount > 0 ? CAGNOTTE_TREASURY_LABEL : "",
             vaultId: vId,
             cagnotteId: cId,
@@ -553,12 +564,13 @@ exports.settleCagnotteClosureFees = asyncHandler(async (req, res) => {
        */
       if (feeAmount > 0) {
         await postCagnotteClosureFeeEntries({
+          mode: accountMode,
           settlementId: settlementDocs[0]._id,
           reference: ref,
           session,
           feeCredit: {
             treasuryUserId,
-            treasurySystemType: CAGNOTTE_TREASURY_SYSTEM_TYPE,
+            treasurySystemType: treasurySystemType,
             amount: feeAmount,
             currency,
           },

@@ -53,7 +53,7 @@ const OWNERSHIP_FIELDS = Object.freeze([
 /**
  * Vrai si le schéma du modèle déclare ce chemin.
  *
- * Repris de `sandboxTransaction.service.js:165`. Volontairement tolérant : un
+ * Repris de l'ancien `sandboxTransaction.service.js` (retiré le 2026-10-06). Volontairement tolérant : un
  * modèle absent ou un schéma inattendu rend `false`, jamais une exception. Une
  * consultation d'historique ne doit pas échouer parce qu'une introspection a
  * mal tourné.

@@ -26,7 +26,7 @@ npm run reconcile:referral               # reconciliation des versements de parr
 npm run verify:referral-idempotency      # 100 tentatives simultanees -> 1 versement
 
 node scripts/seedBalance.js              # solde de test (utilise MONGO_URI_USERS)
-node scripts/seedAppleReviewerWallet.js  # wallet du compte sandbox Apple Review
+npm run migrate:account-mode -- --target=test   # pose `mode` (simulation par défaut)
 ```
 
 **Une suite de tests existe depuis le 2026-08-18** (elle n'existait pas avant, plusieurs sections de ce fichier le disaient) : runner natif `node:test`, aucune dépendance ajoutée, logique pure uniquement — aucun test ne démarre le service ni n'ouvre de connexion Mongo. **68 tests au 2026-08-19** (28 initiaux + 40 ajoutés : idempotence du parrainage, signature des webhooks, tokens internes, rejeu du commit, exécution transactionnelle, clés d'idempotence de l'API). Le glob est indispensable : `node --test test/` résout `test/` comme un module CommonJS et échoue en `MODULE_NOT_FOUND` sur Node 22.
@@ -104,7 +104,7 @@ routes/*.js  →  controllers/transactionsController.js  →  services/transacti
 
 - Les **routes** ([src/routes/transactionsRoutes.js](src/routes/transactionsRoutes.js)) portent : rate limit, middlewares de normalisation du payload (`normalizeProviderRails`, `normalizeInitiateBody`), validateurs `express-validator`, puis `requestValidator`, `requireTransactionEligibility`, `amlMiddleware`.
 - Le **contrôleur** [src/controllers/transactionsController.js](src/controllers/transactionsController.js) ne contient aucune logique : il ré-exporte les handlers via `wrapController()` (log entrée/sortie + `next(err)`).
-- Les **handlers** dans [src/services/transactions/handlers/](src/services/transactions/handlers/) contiennent toute la logique métier. `initiateByFlow` est l'aiguilleur : sandbox → interne (`initiateInternal`) → externe sortant/entrant (`initiateExternalTransactions`), selon `funds` / `destination` / `provider` / `method`.
+- Les **handlers** dans [src/services/transactions/handlers/](src/services/transactions/handlers/) contiennent toute la logique métier. `initiateByFlow` est l'aiguilleur : interne (`initiateInternal`) → externe sortant/entrant (`initiateExternalTransactions`), selon `funds` / `destination` / `provider` / `method`. Aucun aiguillage sandbox ici : voir « Mode simulation ».
 
 ### Flows et rails
 
@@ -152,7 +152,7 @@ Double écriture dans `LedgerEntry` avec des `accountId` conventionnels : `user_
 ## Providers externes et webhooks
 
 - Adapters bas niveau par rail dans [src/providers/](src/providers/) : **deux rails, pas quatre** — mobilemoney (wave/orange/mtn/moov) et card (`visaDirectAdapter`). Chaque adapter normalise le statut provider vers `completed | processing | failed | cancelled | pending`. Le rail `bank` a été retiré (verrouillé par `test/noBankRail.test.js`) et `stripeAdapter.js` l'a été le 2026-09-08 : les transactions par carte passent par un partenaire Visa, jamais par Stripe. Un rail supprimé se **refuse**, il ne se substitue pas — voir `providerExecutorRegistry.js`.
-- Au-dessus : `services/transactions/providers/` — `providerExecutorRegistry.resolveExecutor({flow, provider})` choisit l'executor, et **retourne `null` pour tout flow/provider sandbox** (garde-fou secondaire).
+- Au-dessus : `services/transactions/providers/` — `providerExecutorRegistry.resolveExecutor({flow, provider})` choisit l'executor ; l'executor passe le `mode` de la transaction à `getProviderAdapter`, qui choisit réel ou simulation.
 - Webhooks entrants : `POST /webhooks/providers/:rail/:provider` → [src/controllers/providerWebhookController.js](src/controllers/providerWebhookController.js). La signature est vérifiée par `verifyHmacWebhook()` ([shared/webhookSecurity.js](src/services/transactions/shared/webhookSecurity.js)) : HMAC sur `rawBody` ou `${timestamp}.${rawBody}`, comparaison timing-safe, fenêtre de fraîcheur. **Si aucun secret n'est configuré, la requête est REFUSÉE** (`verified: false`, 401). Ce n'était pas le cas avant le 2026-08-19 : la fonction renvoyait `verified: true`, donc un oubli de variable d'environnement transformait l'endpoint en porte ouverte — n'importe qui pouvait forger un webhook de prestataire de paiement. Échappatoire de développement : `WEBHOOK_ALLOW_UNSIGNED=true`, **sans effet en production**. Le contrôleur exige par ailleurs un `verified === true` explicite : « tout sauf `false` » laissait passer un `undefined`.
 - **Ordre de montage critique** dans [src/server.js](src/server.js) : `/webhooks/providers` est monté **avant** `mountSanitizers()` (`express-mongo-sanitize`, `xss-clean`, `hpp`) pour préserver la charge utile ; `express.json({ verify })` alimente `req.rawBody`, indispensable au HMAC. Ne pas déplacer ces appels.
 
@@ -224,9 +224,18 @@ elle échapperait au rejeu.
 2. **Token interne** — en-tête `x-internal-token` (ou `x-paynoval-internal-token`), comparaison timing-safe. Trois implémentations coexistent : `middleware/internalAuth.js` (`requireInternalAuth('gateway'|'principal'|'any')`), `middleware/onlyGateway.js`, et des fonctions locales dans `routes/cagnotte*Routes.js` et `routes/internalAdminTransactions.routes.js`. Chacune a sa propre chaîne de fallback de variables d'environnement — vérifier laquelle s'applique avant d'ajouter une route interne.
 3. **Éligibilité métier** — `requireTransactionEligibility` (email/téléphone vérifiés, KYC/KYB, statut du compte, rechargement du profil frais depuis la base Users) puis `amlMiddleware` (blacklist [src/aml/blacklist.json](src/aml/blacklist.json), limites, sanctions, alerte fraude). Ces deux middlewares s'appliquent à `/initiate` et `/confirm`, **pas** à `/cancel` (un compte bloqué doit pouvoir libérer ses fonds).
 
-## Sandbox / Apple Review
+## Mode simulation (sandbox) — depuis le 2026-10-06
 
-Un chemin parallèle complet existe pour le compte de revue Apple : `utils/sandboxUser.js` (détection), `services/sandboxTransaction.service.js` (simulation), `utils/sandboxProviderGuard.js`. L'interception se fait **en tête de `initiateByFlow`** et via `isSandboxTx(tx)` dans `confirmTransaction`, avant tout appel provider réel et tout crédit d'un vrai bénéficiaire. Toute nouvelle route financière doit préserver cette interception.
+Contrat complet : [`../docs/architecture/sandbox.md`](../docs/architecture/sandbox.md). Modèle `livemode` de Stripe : chaque objet financier porte `mode: "live" | "sandbox"` (requis, immuable, SANS défaut) — `Transaction`, `LedgerEntry`, `TxWalletBalance` ; dérivé sur `TxSystemBalance` ; posé sur `AMLLog`, `TransactionReviewCase`, `CagnotteVaultPosition`, règlements de cagnotte, `CollectionIntent`.
+
+- **Une seule définition** : `src/utils/accountMode.js` (pur). La base Users fait foi ; le jeton n'est qu'un contrôle de cohérence (`middleware/modeBoundary.js`, appliqué par `protect` à CHAQUE identité). `SANDBOX_MODE_ENABLED` ÉTEINT par défaut : fermée, aucune requête sandbox n'est servie et le worker de simulation ne démarre pas.
+- **Aucune branche sandbox dans les handlers.** Le seul aiguillage réel / simulation est `providers/providerSelector.getProviderAdapter({ rail, provider, mode })` (mode OBLIGATOIRE) → `providers/sandbox/sandboxAdapters.js` (même interface, aucun réseau). L'ordre est enregistré (`SandboxProviderEvent`), et `services/sandbox/sandboxSettlementWorker.js` livre le rappel au MÊME `settleExternalTransaction` que les vrais prestataires, avec `sourceMode: "sandbox"` ; le moteur refuse un rappel venu de l'autre monde.
+- **Grand livre** : `postDoubleEntry` / `createLedgerEntry` exigent `mode` ; les primitives le prennent de la transaction ; les portefeuilles filtrent sur le mode (`TxWalletBalance` lève `MODE_MISMATCH`). Trésoreries de simulation `SANDBOX_*` (`treasuryRegistry.treasurySystemTypeForMode`) ; balance par mode (`doubleEntry.computeTrialBalanceByMode`). Robinet : `ledgerService.applySandboxFunding` (contrepartie `system_clearing:SANDBOX_FUNDING`).
+- **Cagnottes** : leur mode est relu dans la base Users (`services/cagnotte/cagnotteScope.js`) à chaque règlement ; paiement invité REFUSÉ sur une cagnotte de simulation.
+- **Outils** (`/api/v1/sandbox/*`, 404 pour un compte live) : état, scénario (issue + délai), robinet, vider, réinitialiser (contre-écritures + fenêtre d'historique `historyStartsAt`, rien n'est effacé). Page 3DS de test : jeton haché à usage unique, page rendue par la passerelle. Provisionnement : `/api/v1/internal/sandbox/*` (backend).
+- **Production seulement** : réconciliations, analytics de trésorerie, tableau de bord, liste admin (`?mode=` pour voir la simulation), surveillance AML, parrainage (`isReferralEligibleMode`), ajustements admin, paiements internes.
+- **Migration** : `npm run migrate:account-mode -- --target=test` (simulation) puis `--apply --confirm=<baseTx>,<baseUsers>`. Indispensable AVANT de servir ce code : une transaction sans `mode` ne s'enregistre plus.
+- Garde : `test/sandboxMode.test.js`.
 
 ## Worker auto-cancel
 

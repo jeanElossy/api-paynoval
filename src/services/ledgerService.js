@@ -44,6 +44,7 @@ const {
    */
   userWalletAccountId,
   treasuryAccountId,
+  sandboxFundingClearingAccountId,
   buildDedupKey,
 } = require("./ledger/doubleEntry");
 
@@ -102,15 +103,41 @@ function systemWalletModel() {
   return _SystemWalletBalance;
 }
 
-const { treasuryUserIdFromRegistry } = require("./treasuryRegistry");
+const {
+  treasuryUserIdFromRegistry,
+  treasurySystemTypeForMode,
+  ALL_TREASURY_SYSTEM_TYPES,
+} = require("./treasuryRegistry");
+const { ACCOUNT_MODES, requireMode } = require("../utils/accountMode");
 
-const TREASURY_SYSTEM_TYPES = new Set([
-  "REFERRAL_TREASURY",
-  "FEES_TREASURY",
-  "OPERATIONS_TREASURY",
-  "CAGNOTTE_FEES_TREASURY",
-  "FX_MARGIN_TREASURY",
-]);
+/**
+ * Rôles connus, réels ET de simulation. La correspondance entre les deux est
+ * l'affaire de `treasurySystemTypeForMode` : ce fichier ne choisit jamais un
+ * rôle de simulation par lui-même.
+ */
+const TREASURY_SYSTEM_TYPES = new Set(ALL_TREASURY_SYSTEM_TYPES);
+
+/**
+ * ============================================================================
+ * LE MODE D'UNE ÉCRITURE VIENT DE SA TRANSACTION, ET D'ELLE SEULE
+ * ============================================================================
+ *
+ * Chaque primitive reçoit la transaction qui justifie le mouvement. Son
+ * `mode` (requis et immuable sur le schéma) est propagé au portefeuille, aux
+ * écritures et au choix de la trésorerie. Un mode illisible ARRÊTE le
+ * mouvement : on ne déplace pas d'argent sans savoir dans quel monde.
+ */
+function modeOfTransaction(transaction) {
+  return requireMode(
+    transaction?.mode,
+    `transaction ${transaction?._id ? String(transaction._id) : "?"}`
+  );
+}
+
+/** Options d'un mouvement de portefeuille : session éventuelle + mode exigé. */
+function walletOpts(session, mode) {
+  return { ...maybeSessionOpts(session), mode: requireMode(mode, "mouvement de portefeuille") };
+}
 
 const TREASURY_ENV_BY_SYSTEM_TYPE = Object.freeze({
   REFERRAL_TREASURY: String(process.env.REFERRAL_TREASURY_USER_ID || "").trim(),
@@ -267,11 +294,23 @@ function resolveTreasuryContext({
   treasuryUserId = null,
   treasurySystemType,
   treasuryLabel = "",
+  mode,
 }) {
-  const systemType = normalizeTreasurySystemType(treasurySystemType);
-  const resolvedTreasuryUserId = treasuryUserId
-    ? normalizeObjectIdLike(treasuryUserId, "treasuryUserId")
-    : resolveTreasuryFromSystemType(systemType);
+  const resolvedMode = requireMode(mode, "trésorerie");
+  const systemType = normalizeTreasurySystemType(
+    treasurySystemTypeForMode(treasurySystemType, resolvedMode)
+  );
+
+  /**
+   * En simulation, la trésorerie vient TOUJOURS du registre. Un identifiant
+   * explicite vient des métadonnées de la transaction ; il pourrait désigner
+   * une vraie trésorerie, et y créditer des frais fictifs gonflerait le
+   * chiffre d'affaires réel.
+   */
+  const resolvedTreasuryUserId =
+    treasuryUserId && resolvedMode === ACCOUNT_MODES.LIVE
+      ? normalizeObjectIdLike(treasuryUserId, "treasuryUserId")
+      : resolveTreasuryFromSystemType(systemType);
 
   return {
     treasuryUserId: resolvedTreasuryUserId,
@@ -350,6 +389,7 @@ async function debitSystemWallet({
 }
 
 async function createLedgerEntry({
+  mode,
   transactionId,
   reference,
   userId = null,
@@ -403,9 +443,12 @@ async function createLedgerEntry({
     throw new Error(`entryType ledger invalide: ${entryType}`);
   }
 
+  const entryMode = requireMode(mode, "écriture du grand livre");
+
   const [doc] = await ledgerEntryModel().create(
     [
       {
+        mode: entryMode,
         transactionId,
         reference: reference || null,
         userId: userId || null,
@@ -463,6 +506,7 @@ async function createLedgerEntry({
  * porte que sur elles, l'historique en partie simple étant laissé intact.
  */
 async function postDoubleEntry({
+  mode,
   transactionId,
   reference = null,
   entryType,
@@ -472,6 +516,9 @@ async function postDoubleEntry({
   context = "",
   dedupScope = null,
 }) {
+  // Avant l'équilibre : un lot sans mode n'est même pas examiné.
+  const entryMode = requireMode(mode, `écriture ${context || entryType || "?"}`);
+
   assertBalanced(legs, context || entryType || "");
 
   const normalizedType = String(entryType || "").toUpperCase();
@@ -489,6 +536,7 @@ async function postDoubleEntry({
       // Absent — et non `null` — quand aucune portée n'est fournie : l'index
       // unique partiel ne doit pas voir ce document. Voir `models/LedgerEntry`.
       ...(dedupKey ? { dedupKey } : {}),
+      mode: entryMode,
       transactionId,
       reference: reference || null,
       userId: leg.userId || null,
@@ -654,6 +702,7 @@ function isDuplicateKeyError(err) {
 async function reserveSenderFunds({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
+  const mode = modeOfTransaction(transaction);
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
@@ -663,7 +712,7 @@ async function reserveSenderFunds({ transaction, senderId, amount, currency, ses
     sender,
     cur,
     amt,
-    maybeSessionOpts(session)
+    walletOpts(session, mode)
   );
 
   /**
@@ -673,6 +722,7 @@ async function reserveSenderFunds({ transaction, senderId, amount, currency, ses
    * laissait croire à une sortie.
    */
   await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType: "RESERVE",
@@ -704,6 +754,7 @@ async function reserveSenderFunds({ transaction, senderId, amount, currency, ses
 async function captureSenderReserve({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
+  const mode = modeOfTransaction(transaction);
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
@@ -713,7 +764,7 @@ async function captureSenderReserve({ transaction, senderId, amount, currency, s
     sender,
     cur,
     amt,
-    maybeSessionOpts(session)
+    walletOpts(session, mode)
   );
 
   /**
@@ -724,6 +775,7 @@ async function captureSenderReserve({ transaction, senderId, amount, currency, s
    * les deux.
    */
   await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType: "RESERVE_CAPTURE",
@@ -753,6 +805,7 @@ async function captureSenderReserve({ transaction, senderId, amount, currency, s
 async function releaseSenderReserve({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
+  const mode = modeOfTransaction(transaction);
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
@@ -762,7 +815,7 @@ async function releaseSenderReserve({ transaction, senderId, amount, currency, s
     sender,
     cur,
     amt,
-    maybeSessionOpts(session)
+    walletOpts(session, mode)
   );
 
   /**
@@ -770,6 +823,7 @@ async function releaseSenderReserve({ transaction, senderId, amount, currency, s
    * redeviennent disponibles ; rien n'entre ni ne sort du système.
    */
   await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType: "RESERVE_RELEASE",
@@ -799,6 +853,7 @@ async function releaseSenderReserve({ transaction, senderId, amount, currency, s
 async function creditReceiverFunds({ transaction, receiverId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
+  const mode = modeOfTransaction(transaction);
 
   const receiver = normalizeObjectIdLike(receiverId, "receiverId");
   const cur = normalizeCurrency(currency);
@@ -808,7 +863,7 @@ async function creditReceiverFunds({ transaction, receiverId, amount, currency, 
     receiver,
     cur,
     amt,
-    maybeSessionOpts(session)
+    walletOpts(session, mode)
   );
 
   /**
@@ -817,6 +872,7 @@ async function creditReceiverFunds({ transaction, receiverId, amount, currency, 
    * l'expéditeur. La boucle se ferme, et son bouclage devient vérifiable.
    */
   await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType: "USER_CREDIT",
@@ -846,6 +902,7 @@ async function creditReceiverFunds({ transaction, receiverId, amount, currency, 
 async function debitReceiverFunds({ transaction, receiverId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
+  const mode = modeOfTransaction(transaction);
 
   const receiver = normalizeObjectIdLike(receiverId, "receiverId");
   const cur = normalizeCurrency(currency);
@@ -855,7 +912,7 @@ async function debitReceiverFunds({ transaction, receiverId, amount, currency, s
     receiver,
     cur,
     amt,
-    maybeSessionOpts(session)
+    walletOpts(session, mode)
   );
 
   /**
@@ -867,6 +924,7 @@ async function debitReceiverFunds({ transaction, receiverId, amount, currency, s
    * observable plutôt qu'un trou.
    */
   await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType: "REVERSAL",
@@ -896,6 +954,7 @@ async function debitReceiverFunds({ transaction, receiverId, amount, currency, s
 async function refundSenderFunds({ transaction, senderId, amount, currency, session = null }) {
   assertTransactionLike(transaction);
   assertUserWalletModel();
+  const mode = modeOfTransaction(transaction);
 
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const cur = normalizeCurrency(currency);
@@ -905,7 +964,7 @@ async function refundSenderFunds({ transaction, senderId, amount, currency, sess
     sender,
     cur,
     amt,
-    maybeSessionOpts(session)
+    walletOpts(session, mode)
   );
 
   /**
@@ -928,6 +987,7 @@ async function refundSenderFunds({ transaction, senderId, amount, currency, sess
    * qu'une clé fausse.
    */
   await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType: "REFUND",
@@ -961,12 +1021,14 @@ async function creditRevenueLineToTreasury({
   entryType,
   session = null,
 }) {
+  const mode = modeOfTransaction(transaction);
   const systemType = normalizeTreasurySystemType(revenueLine?.systemType);
 
   const treasury = resolveTreasuryContext({
     treasuryUserId: explicitTreasuryUserId,
     treasurySystemType: systemType,
     treasuryLabel: explicitTreasuryLabel,
+    mode,
   });
 
   const treasuryCurrency = normalizeCurrency(revenueLine?.treasuryCurrency || "CAD");
@@ -1071,6 +1133,7 @@ async function creditRevenueLineToTreasury({
    * calcul de tarification en produira un.
    */
   const [entry] = await postDoubleEntry({
+    mode,
     transactionId: transaction._id,
     reference: transaction.reference,
     entryType,
@@ -1184,11 +1247,13 @@ async function chargeCancellationFee({
   assertTransactionLike(transaction);
   assertUserWalletModel();
 
+  const mode = modeOfTransaction(transaction);
   const sender = normalizeObjectIdLike(senderId, "senderId");
   const treasury = resolveTreasuryContext({
     treasuryUserId,
     treasurySystemType,
     treasuryLabel,
+    mode,
   });
 
   const sourceCurrency = normalizeCurrency(senderCurrency);
@@ -1219,7 +1284,7 @@ async function chargeCancellationFee({
       sender,
       out.feeSourceCurrency,
       out.feeSourceAmount,
-      maybeSessionOpts(session)
+      walletOpts(session, mode)
     );
 
     /**
@@ -1232,6 +1297,7 @@ async function chargeCancellationFee({
      * chaque devise de rester équilibrée seule.
      */
     await postDoubleEntry({
+      mode,
       transactionId: transaction._id,
       reference: transaction.reference,
       entryType: "ADJUSTMENT",
@@ -1283,6 +1349,7 @@ async function chargeCancellationFee({
      * Voir `creditRevenueLineToTreasury` pour le raisonnement multidevises.
      */
     await postDoubleEntry({
+      mode,
       transactionId: transaction._id,
       reference: transaction.reference,
       entryType: "FEE_REVENUE",
@@ -1383,6 +1450,7 @@ async function postInternalPaymentEntries({
   session = null,
 }) {
   assertTransactionLike(transaction);
+  const mode = modeOfTransaction(transaction);
 
   if (!debit && !credit) {
     throw new Error(
@@ -1398,6 +1466,7 @@ async function postInternalPaymentEntries({
     const from = normalizeObjectIdLike(debit.userId, "debit.userId");
 
     await postDoubleEntry({
+      mode,
       transactionId: transaction._id,
       reference: transaction.reference,
       entryType: "USER_DEBIT",
@@ -1428,6 +1497,7 @@ async function postInternalPaymentEntries({
     const to = normalizeObjectIdLike(credit.userId, "credit.userId");
 
     await postDoubleEntry({
+      mode,
       transactionId: transaction._id,
       reference: transaction.reference,
       entryType: "USER_CREDIT",
@@ -1564,12 +1634,17 @@ function settlementObjectIdFromReference(reference, scope) {
 }
 
 /** Trésorerie cagnotte, résolue et validée en un seul endroit. */
-function resolveCagnotteTreasury({ treasuryUserId, treasurySystemType }) {
+function resolveCagnotteTreasury({ treasuryUserId, treasurySystemType, mode }) {
+  const resolvedMode = requireMode(mode, "trésorerie de cagnotte");
+  const expected = treasurySystemTypeForMode("CAGNOTTE_FEES_TREASURY", resolvedMode);
+
+  // Le rôle reçu est ramené à son mode : un rôle live demandé pour une
+  // cagnotte de simulation devient son homologue, l'inverse lève.
   const systemType = normalizeTreasurySystemType(
-    treasurySystemType || "CAGNOTTE_FEES_TREASURY"
+    treasurySystemTypeForMode(treasurySystemType || "CAGNOTTE_FEES_TREASURY", resolvedMode)
   );
 
-  if (systemType !== "CAGNOTTE_FEES_TREASURY") {
+  if (systemType !== expected) {
     throw new Error(
       `Trésorerie de cagnotte attendue, reçu ${systemType} — une écriture de ` +
         "cagnotte ne se pose pas sur une autre trésorerie."
@@ -1577,9 +1652,12 @@ function resolveCagnotteTreasury({ treasuryUserId, treasurySystemType }) {
   }
 
   return {
-    treasuryUserId: treasuryUserId
-      ? normalizeObjectIdLike(treasuryUserId, "treasuryUserId")
-      : resolveTreasuryFromSystemType(systemType),
+    // En simulation, toujours le registre : un identifiant explicite pourrait
+    // désigner la vraie trésorerie.
+    treasuryUserId:
+      treasuryUserId && resolvedMode === ACCOUNT_MODES.LIVE
+        ? normalizeObjectIdLike(treasuryUserId, "treasuryUserId")
+        : resolveTreasuryFromSystemType(systemType),
     treasurySystemType: systemType,
   };
 }
@@ -1589,6 +1667,7 @@ function resolveCagnotteTreasury({ treasuryUserId, treasurySystemType }) {
  * Partagé par la participation et la clôture, qui posent la MÊME écriture.
  */
 async function postCagnotteFeeLegs({
+  mode,
   settlementId,
   reference,
   treasuryUserId,
@@ -1601,9 +1680,11 @@ async function postCagnotteFeeLegs({
 }) {
   const cur = normalizeCurrency(currency);
   const amt = normalizePositiveAmount(amount, cur);
-  const treasury = resolveCagnotteTreasury({ treasuryUserId, treasurySystemType });
+  const treasury = resolveCagnotteTreasury({ treasuryUserId, treasurySystemType, mode });
 
   return postDoubleEntry({
+    // Mode de la cagnotte (`services/cagnotte/cagnotteScope.js`), exigé.
+    mode: requireMode(mode, "écriture de cagnotte"),
     transactionId: settlementId,
     reference: reference || null,
     entryType: "FEE_REVENUE",
@@ -1660,6 +1741,7 @@ async function postCagnotteFeeLegs({
  * ⚠️ À APPELER DANS LA MÊME SESSION que les mouvements de solde.
  */
 async function postCagnotteLotEntries({
+  mode,
   settlementId,
   reference,
   lots,
@@ -1686,6 +1768,8 @@ async function postCagnotteLotEntries({
     }
 
     const entries = await postDoubleEntry({
+      // Mode de la cagnotte (`services/cagnotte/cagnotteScope.js`), exigé.
+      mode: requireMode(mode, "écriture de cagnotte"),
       transactionId: settlementId,
       reference: reference || null,
       entryType: lot.entryType,
@@ -1710,6 +1794,7 @@ async function postCagnotteLotEntries({
  * portefeuille du bénéficiaire. C'est la jambe de retour de la participation.
  */
 async function postCagnotteVaultWithdrawalEntries({
+  mode,
   settlementId,
   reference,
   beneficiary,
@@ -1732,6 +1817,8 @@ async function postCagnotteVaultWithdrawalEntries({
   const to = normalizeObjectIdLike(beneficiary.userId, "beneficiary.userId");
 
   await postDoubleEntry({
+    // Mode de la cagnotte (`services/cagnotte/cagnotteScope.js`), exigé.
+    mode: requireMode(mode, "écriture de cagnotte"),
     transactionId: settlementId,
     reference: reference || null,
     entryType: "USER_CREDIT",
@@ -1761,6 +1848,7 @@ async function postCagnotteVaultWithdrawalEntries({
 
 /** Frais de clôture d'une cagnotte : prélevés sur le coffre. */
 async function postCagnotteClosureFeeEntries({
+  mode,
   settlementId,
   reference,
   feeCredit,
@@ -1780,6 +1868,7 @@ async function postCagnotteClosureFeeEntries({
   }
 
   await postCagnotteFeeLegs({
+    mode,
     settlementId,
     reference,
     treasuryUserId: feeCredit.treasuryUserId,
@@ -1795,7 +1884,90 @@ async function postCagnotteClosureFeeEntries({
   });
 }
 
+/**
+ * ============================================================================
+ * ROBINET DE SIMULATION — CRÉDIT OU REPRISE D'ARGENT FICTIF
+ * ============================================================================
+ *
+ * Seul chemin par lequel un solde sandbox change hors d'une transaction :
+ * recharge (« robinet »), « vider le solde », réinitialisation. Il passe par
+ * le portefeuille ET le grand livre, dans la même session — exactement comme
+ * un mouvement réel. L'ancien chemin Apple Review mutait le solde sans
+ * écriture ; c'est ce défaut que cette primitive remplace.
+ *
+ * `operation` est le document parent (`SandboxLedgerOperation`) : il porte
+ * l'identifiant auquel les écritures se rattachent, et son unicité rend
+ * l'opération idempotente.
+ *
+ * ⚠️ SANDBOX EN DUR. Une opération live ici est REFUSÉE : le robinet ne doit
+ * jamais pouvoir créer de l'argent réel.
+ */
+async function applySandboxFunding({
+  operation,
+  userId,
+  currency,
+  amount,
+  direction,
+  session = null,
+}) {
+  assertTransactionLike(operation);
+  assertUserWalletModel();
+
+  if (operation.mode !== ACCOUNT_MODES.SANDBOX) {
+    const err = new Error("Robinet de simulation appelé hors du mode sandbox : refusé.");
+    err.code = "MODE_MISMATCH";
+    err.status = 403;
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (direction !== "credit" && direction !== "debit") {
+    throw new Error(`applySandboxFunding : sens invalide (${direction}).`);
+  }
+
+  const mode = ACCOUNT_MODES.SANDBOX;
+  const owner = normalizeObjectIdLike(userId, "userId");
+  const cur = normalizeCurrency(currency);
+  const amt = normalizePositiveAmount(amount, cur);
+
+  const wallet =
+    direction === "credit"
+      ? await userWalletModel().credit(owner, cur, amt, walletOpts(session, mode))
+      : await userWalletModel().debit(owner, cur, amt, walletOpts(session, mode));
+
+  const funding = {
+    accountType: "SYSTEM_CLEARING",
+    accountId: sandboxFundingClearingAccountId(cur),
+    userId: null,
+  };
+  const userWallet = {
+    accountType: "USER_WALLET",
+    accountId: userWalletAccountId(owner, cur),
+    userId: owner,
+  };
+
+  await postDoubleEntry({
+    mode,
+    transactionId: operation._id,
+    reference: operation.reference || null,
+    entryType: "ADJUSTMENT",
+    context: `sandboxFunding:${direction}`,
+    dedupScope: "sandboxFunding",
+    legs: transferLegs({
+      from: direction === "credit" ? funding : userWallet,
+      to: direction === "credit" ? userWallet : funding,
+      amount: amt,
+      currency: cur,
+    }),
+    metadata: { stage: "sandbox_funding", kind: operation.kind || null },
+    session,
+  });
+
+  return wallet;
+}
+
 module.exports = {
+  applySandboxFunding,
   postDoubleEntry,
   TREASURY_SYSTEM_TYPES,
   TREASURY_ENV_BY_SYSTEM_TYPE,

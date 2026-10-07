@@ -23,13 +23,14 @@
  *
  * ═══ CE QUI EST EXCLU DU BALAYAGE, ET POURQUOI ═══════════════════════════
  *
- * Les portefeuilles `isSandbox: true` sont écartés PAR DÉFAUT. Ce n'est pas du
- * confort : `services/sandboxTransaction.service.js:539` mute directement
- * `amount` et `availableAmount` du portefeuille de revue Apple et **n'écrit
- * aucune écriture comptable** (vérifié le 2026-09-01 : le fichier ne mentionne
- * ni `ledger` ni `LedgerEntry`). C'est délibéré — ce parcours n'engage aucun
- * argent réel — mais ces portefeuilles divergeraient donc systématiquement de
- * leur cumul.
+ * Les portefeuilles de SIMULATION (`mode: "sandbox"`, ou l'ancien drapeau
+ * `isSandbox`) sont écartés PAR DÉFAUT : ce contrôle porte sur la production.
+ *
+ * Depuis le 2026-10-06, un portefeuille sandbox ne bouge plus que par le grand
+ * livre (moteur réel, robinet `ledgerService.applySandboxFunding`) : il se
+ * réconcilie, et `--include-sandbox` le vérifie. Les portefeuilles de l'ancien
+ * raccourci Apple Review, eux, ont été mutés SANS écriture avant cette date et
+ * divergent de leur cumul — c'est l'autre raison de les tenir hors du défaut.
  *
  * Les signaler serait crier au loup, et un contrôle qui crie au loup finit par
  * ne plus être lu. C'est exactement le raisonnement déjà tenu par
@@ -200,7 +201,10 @@ async function reconcileWalletsAgainstLedger({
   const filter = {};
   if (userId) filter.user = userId;
   if (currency) filter.currency = normCurrency(currency);
-  if (!includeSandbox) filter.isSandbox = { $ne: true };
+  if (!includeSandbox) {
+    filter.mode = { $ne: "sandbox" };
+    filter.isSandbox = { $ne: true };
+  }
 
   const startedAt = Date.now();
 
@@ -233,7 +237,7 @@ async function reconcileWalletsAgainstLedger({
      sauté se dit, il ne se devine pas. */
   let sandboxExcluded = 0;
   if (!includeSandbox) {
-    const sandboxFilter = { isSandbox: true };
+    const sandboxFilter = { $or: [{ mode: "sandbox" }, { isSandbox: true }] };
     if (userId) sandboxFilter.user = userId;
     if (currency) sandboxFilter.currency = normCurrency(currency);
     sandboxExcluded = await TxWalletBalance.countDocuments(sandboxFilter);
@@ -255,7 +259,7 @@ async function reconcileWalletsAgainstLedger({
     const pageFilter = lastId ? { ...filter, _id: { $gt: lastId } } : filter;
 
     const wallets = await TxWalletBalance.find(pageFilter)
-      .select("_id user currency amount availableAmount reservedAmount isSandbox")
+      .select("_id user currency amount availableAmount reservedAmount mode isSandbox")
       /* Tri stable sur la clé primaire : sans lui, deux tours peuvent rendre
          deux fois le même document et en sauter un autre. Un portefeuille
          sauté, c'est un écart non vu. */
@@ -435,7 +439,7 @@ async function reconcileOneWallet({
   const LedgerEntry = model("LedgerEntry");
 
   const wallet = await TxWalletBalance.findOne({ user: userId, currency: cur })
-    .select("_id user currency amount availableAmount reservedAmount isSandbox")
+    .select("_id user currency amount availableAmount reservedAmount mode isSandbox")
     .lean();
 
   if (!wallet) return null;

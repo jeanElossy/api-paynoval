@@ -3,6 +3,7 @@
 const createError = require("http-errors");
 const { exigerMontant, exigerDevise } = require("../../../utils/montant");
 const { getProviderAdapter } = require("../../../providers/providerSelector");
+const { sanitizeNextAction } = require("./nextAction");
 
 function buildCardPayoutPayload(tx) {
   const md = tx.metadata || {};
@@ -117,9 +118,12 @@ function buildCardTopupPayload(tx) {
 async function executeCardPayout({ req, transaction }) {
   const provider = String(transaction.provider || "visa_direct").trim().toLowerCase();
 
+  // Le mode de la transaction choisit le monde (réel ou simulation) — dans
+  // la fabrique, et nulle part ailleurs.
   const adapter = getProviderAdapter({
     rail: "card",
     provider,
+    mode: transaction.mode,
   });
 
   if (!adapter || typeof adapter.payout !== "function") {
@@ -172,9 +176,12 @@ async function startCardTopup({ req, transaction }) {
   // Défaut « stripe » remplacé le 2026-09-08 : l'adapter n'existe plus.
   const provider = String(transaction.provider || "visa_direct").trim().toLowerCase();
 
+  // Le mode de la transaction choisit le monde (réel ou simulation) — dans
+  // la fabrique, et nulle part ailleurs.
   const adapter = getProviderAdapter({
     rail: "card",
     provider,
+    mode: transaction.mode,
   });
 
   if (!adapter || typeof adapter.collect !== "function") {
@@ -206,6 +213,11 @@ async function startCardTopup({ req, transaction }) {
       result?.providerReference ||
       transaction.providerReference ||
       null,
+    /**
+     * Action demandée au titulaire (authentification 3-D Secure), forme du
+     * `next_action` de Stripe. Seul le type et le chemin remontent.
+     */
+    nextAction: sanitizeNextAction(result?.nextAction),
     raw: result?.raw || result || null,
   };
 }

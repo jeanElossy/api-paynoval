@@ -14,12 +14,6 @@ const {
   isInboundExternalFlow,
 } = require("./flowHelpers");
 
-const { createSandboxTransaction } = require("../../sandboxTransaction.service");
-
-/**
- * utils/sandboxUser.js
- */
-const { isSandboxUser } = require("../../../utils/sandboxUser");
 
 function norm(v) {
   return String(v || "").trim().toLowerCase();
@@ -117,45 +111,6 @@ function buildDebugBody(body = {}) {
   };
 }
 
-function buildSandboxMetadata(req, body = {}) {
-  return {
-    route: req.originalUrl || req.url || "",
-    method: req.method || "",
-    ip: req.ip || null,
-    userAgent: req.headers?.["user-agent"] || null,
-    requestedFlow: body.flow || null,
-    requestedProvider: body.provider || null,
-    requestedFunds: body.funds || null,
-    requestedDestination: body.destination || null,
-  };
-}
-
-async function handleSandboxInitiation({ req, res, body, reqLogger }) {
-  const userId = pickUserId(req);
-
-  safeLog(reqLogger, "info", "[TX FLOW] sandbox user detected", {
-    userId,
-    email: req.user?.email || null,
-    isSandbox: req.user?.isSandbox === true,
-    isReviewerAccount: req.user?.isReviewerAccount === true,
-    body: buildDebugBody(body),
-  });
-
-  const result = await createSandboxTransaction({
-    user: req.user,
-    body,
-    metadata: buildSandboxMetadata(req, body),
-  });
-
-  return res.status(201).json({
-    success: true,
-    message: "Transaction sandbox simulée avec succès.",
-    data: result.transaction,
-    transaction: result.transaction,
-    wallet: result.wallet,
-  });
-}
-
 async function initiateByFlow(req, res, next) {
   try {
     const body = isTruthyObject(req.body) ? req.body : {};
@@ -176,26 +131,15 @@ async function initiateByFlow(req, res, next) {
     });
 
     /**
-     * IMPORTANT APPLE REVIEW / SANDBOX
+     * MODE SIMULATION (2026-10-06) — AUCUNE INTERCEPTION ICI.
      *
-     * On intercepte le compte sandbox AVANT tous les vrais handlers :
-     * - initiateInternal
-     * - initiateOutboundExternal
-     * - initiateInboundExternal
-     *
-     * Comme ça :
-     * - aucun provider réel n’est appelé,
-     * - aucun vrai receiver n’est crédité,
-     * - la transaction apparaît quand même dans l’historique/reçu.
+     * Un compte sandbox emprunte les MÊMES handlers qu'un compte réel : frais,
+     * réservation, machine à états, grand livre. Ce qui change est en aval :
+     * la transaction porte `mode: "sandbox"`, et la fabrique d'adapters
+     * (`providerSelector`) la confie à un prestataire de simulation. L'ancien
+     * raccourci Apple Review — une transaction « confirmée » écrite d'un coup,
+     * sans frais ni écriture comptable — est retiré.
      */
-    if (isSandboxUser(req.user)) {
-      return handleSandboxInitiation({
-        req,
-        res,
-        body,
-        reqLogger,
-      });
-    }
 
     const hasInternalRails = funds === "paynoval" && destination === "paynoval";
     const hasInternalProvider = isInternalProvider(provider);

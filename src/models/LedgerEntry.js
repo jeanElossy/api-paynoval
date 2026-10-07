@@ -1,6 +1,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const { MODE_VALUES } = require("../utils/accountMode");
 
 function normCurrency(v) {
   return String(v || "").trim().toUpperCase();
@@ -47,6 +48,22 @@ const ENTRY_TYPES = [
 
 const ledgerEntrySchema = new mongoose.Schema(
   {
+    /**
+     * Mode de l'opération qui a produit l'écriture — `utils/accountMode.js`.
+     *
+     * Les écritures de simulation vivent dans la même collection que celles de
+     * production (modèle `livemode` de Stripe) ; c'est ce champ qui les sépare.
+     * Requis, sans défaut, immuable : une écriture dont le mode n'a pas été
+     * posé explicitement est refusée, et la balance de vérification s'équilibre
+     * PAR MODE (`services/ledger/doubleEntry.computeTrialBalanceByMode`).
+     */
+    mode: {
+      type: String,
+      enum: MODE_VALUES,
+      required: true,
+      immutable: true,
+    },
+
     transactionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Transaction",

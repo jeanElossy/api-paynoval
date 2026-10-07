@@ -21,6 +21,7 @@ const { publishDomainEvent } = require("../services/events/publisher");
 const runtime = require("../services/transactions/shared/runtime");
 const { canTransition } = require("../services/transactionStateMachine");
 const logger = require("../utils/logger");
+const { isReferralEligibleMode } = require("../utils/accountMode");
 const { captureSenderReserve, releaseSenderReserve, refundSenderFunds, creditReceiverFunds, creditTreasuryRevenue, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, canUseSharedSession, runInTransaction } = runtime;
 
 /**
@@ -373,6 +374,11 @@ async function abortAndEnd(session) {
  */
 async function runReferralSync(tx, sessionOpts = {}) {
   try {
+    // Pas de parrainage en simulation : une prime serait payée en argent réel.
+    if (!isReferralEligibleMode(tx?.mode)) {
+      return { enqueued: false, reason: "SANDBOX_NO_REFERRAL" };
+    }
+
     const refereeId = String(tx?.userId || tx?.sender || "").trim();
 
     if (!refereeId) {
@@ -738,6 +744,29 @@ async function settleExternalTransaction(payload = {}) {
     );
 
     if (!tx) {
+      throw createError(404, "Transaction webhook introuvable");
+    }
+
+    /**
+     * FRONTIÈRE DES MODES (2026-10-06) — `utils/accountMode.js`.
+     *
+     * Un rappel ne règle QUE les transactions de son monde. Les rappels de
+     * simulation naissent uniquement dans `sandboxSettlementWorker`, qui pose
+     * `sourceMode: "sandbox"` ; tout le reste — route signée, route interne,
+     * rejeu du registre — est un rappel de production. Une référence de
+     * simulation reçue de l'extérieur, ou un rappel de simulation visant une
+     * transaction réelle, est donc INTROUVABLE : on ne crédite pas un monde
+     * avec un signal venu de l'autre.
+     */
+    const expectedMode = payload.sourceMode === "sandbox" ? "sandbox" : "live";
+    const txMode = tx.mode === "sandbox" ? "sandbox" : "live";
+
+    if (txMode !== expectedMode) {
+      logger.error("[settlement] rappel REFUSÉ : mode de la transaction différent", {
+        transactionId: tx._id.toString(),
+        txMode,
+        expectedMode,
+      });
       throw createError(404, "Transaction webhook introuvable");
     }
 

@@ -22,6 +22,7 @@
  */
 
 const createError = require("http-errors");
+const { modeScopeFilter } = require("../utils/accountMode");
 
 // ⚠️ On garde l'objet `runtime` et on résout `Transaction` au moment de
 // l'appel, sans déstructurer. `runtime.Transaction` est un getter qui lie le
@@ -127,8 +128,8 @@ function successRate(countSuccess, countFailed) {
 /* -------------------------------------------------------------------------- */
 
 /** Volume abouti, frais encaissés et répartition par statut, par devise. */
-async function aggregateMoney(since) {
-  const rows = await runAgg([
+async function aggregateMoney(since, run = runAgg) {
+  const rows = await run([
     { $match: { createdAt: { $gte: since } } },
     {
       $group: {
@@ -175,8 +176,8 @@ async function aggregateMoney(since) {
 }
 
 /** Encours : argent engagé, pas encore réglé. Sans borne de temps. */
-async function aggregateInFlight() {
-  const rows = await runAgg([
+async function aggregateInFlight(run = runAgg) {
+  const rows = await run([
     { $match: { status: { $in: STATUS_IN_FLIGHT } } },
     {
       $group: {
@@ -209,8 +210,8 @@ async function aggregateInFlight() {
  * `oldestAt` est indispensable — sans lui, impossible de savoir ce qui est
  * hors délai.
  */
-async function aggregateReviewQueue() {
-  const rows = await runAgg([
+async function aggregateReviewQueue(run = runAgg) {
+  const rows = await run([
     { $match: { status: { $in: STATUS_REVIEW } } },
     {
       $group: {
@@ -231,8 +232,8 @@ async function aggregateReviewQueue() {
 }
 
 /** Série journalière sur 7 jours, pour les sparklines. */
-async function aggregateSeries(sinceSeries) {
-  const rows = await runAgg([
+async function aggregateSeries(sinceSeries, run = runAgg) {
+  const rows = await run([
     { $match: { createdAt: { $gte: sinceSeries } } },
     {
       $group: {
@@ -270,8 +271,8 @@ async function aggregateSeries(sinceSeries) {
  * et c'est de toute façon l'axe sur lequel se lisent les incidents (un rail
  * mobile money qui se dégrade sur XOF, par exemple).
  */
-async function aggregateCorridors(since) {
-  const rows = await runAgg([
+async function aggregateCorridors(since, run = runAgg) {
+  const rows = await run([
     { $match: { createdAt: { $gte: since } } },
     {
       $group: {
@@ -304,8 +305,8 @@ async function aggregateCorridors(since) {
 }
 
 /** Répartition par rail (provider) — où passe réellement l'argent. */
-async function aggregateProviders(since) {
-  const rows = await runAgg([
+async function aggregateProviders(since, run = runAgg) {
+  const rows = await run([
     { $match: { createdAt: { $gte: since } } },
     {
       $group: {
@@ -354,13 +355,21 @@ async function getInternalDashboardStats(req, res, next) {
       "providers",
     ];
 
+    /**
+     * Portée de mode (2026-10-06) : PRODUCTION par défaut — l'argent de
+     * simulation n'entre dans aucun indicateur sauf demande explicite
+     * (`?mode=sandbox|all`). Première étape de CHAQUE agrégation.
+     */
+    const modeMatch = modeScopeFilter(req.query?.mode);
+    const run = (pipeline) => runAgg([{ $match: modeMatch }, ...pipeline]);
+
     const settled = await Promise.allSettled([
-      aggregateMoney(since),
-      aggregateInFlight(),
-      aggregateReviewQueue(),
-      aggregateSeries(sinceSeries),
-      aggregateCorridors(since),
-      aggregateProviders(since),
+      aggregateMoney(since, run),
+      aggregateInFlight(run),
+      aggregateReviewQueue(run),
+      aggregateSeries(sinceSeries, run),
+      aggregateCorridors(since, run),
+      aggregateProviders(since, run),
     ]);
 
     const degraded = [];

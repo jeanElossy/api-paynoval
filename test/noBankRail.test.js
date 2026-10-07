@@ -57,7 +57,7 @@ test("le sélecteur REFUSE le rail bancaire au lieu de replier en silence", () =
 
   for (const rail of ["bank", "bank_transfer", "bank-transfer"]) {
     assert.throws(
-      () => getProviderAdapter({ rail, provider: "bank_generic" }),
+      () => getProviderAdapter({ rail, provider: "bank_generic", mode: "live" }),
       /rail bancaire a été retiré/i,
       `le rail « ${rail} » doit lever`
     );

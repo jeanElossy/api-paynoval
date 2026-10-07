@@ -94,6 +94,14 @@ module.exports = (conn = mongoose) => {
 
   const reviewCaseSchema = new Schema(
     {
+      /** `utils/accountMode.js` — les files d'analystes filtrent sur ce champ. */
+      mode: {
+        type: String,
+        enum: ["live", "sandbox"],
+        default: "live",
+        immutable: true,
+      },
+
       transactionId: {
         type: String,
         required: true,

@@ -10,6 +10,7 @@
     "test:concurrency": "node --test $(find test-concurrency -name '*.test.js' | sort)",
     "reconcile:referral": "node scripts/reconcileReferralPayouts.js",
     "verify:referral-idempotency": "node scripts/verifyReferralIdempotency.js",
+    "migrate:account-mode": "node scripts/migrateAccountMode.js",
     "reconcile:transactions": "node scripts/reconcileTransactions.js",
     "reconcile:wallet-ledger": "node scripts/reconcileWalletLedger.js",
     "replay:settlements": "node scripts/replaySettlements.js",

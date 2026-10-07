@@ -50,6 +50,13 @@ module.exports = function buildCagnotteVaultPositionModel(conn) {
 
   const schema = new mongoose.Schema(
     {
+      /**
+       * Mode de la cagnotte (2026-10-06) — `services/cagnotte/cagnotteScope.js`.
+       * Posé à l'ouverture, immuable : un coffre de simulation ne reçoit et ne
+       * rend que de l'argent de simulation. Absent sur une position antérieure
+       * à la migration : production.
+       */
+      mode: { type: String, enum: ["live", "sandbox"], immutable: true },
       vaultId: { type: String, required: true, trim: true, immutable: true },
       cagnotteId: { type: String, required: true, trim: true, immutable: true },
       currency: {

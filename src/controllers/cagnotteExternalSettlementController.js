@@ -53,6 +53,8 @@ const { buildCagnotteCreditLots } = require("../services/ledger/cagnotteLegs");
 const { computeCagnottePricing, TX_TYPES } = require("../services/cagnotte/participationPricing");
 const { assertSupportedCagnotteCurrency } = require("../services/cagnotte/currencies");
 const { openPosition, creditPosition, positionToJSON } = require("../services/cagnotte/vaultPosition");
+const { treasurySystemTypeForMode } = require("../services/treasuryRegistry");
+const { loadCagnotteScope } = require("../services/cagnotte/cagnotteScope");
 const logger = require("../utils/logger");
 
 const CAGNOTTE_FEES = "CAGNOTTE_FEES_TREASURY";
@@ -100,7 +102,9 @@ function sendError(res, err) {
   });
 }
 
-function treasuryFor(systemType) {
+/** Trésorerie du rôle dans le MODE de la cagnotte (simulation ⇒ `SANDBOX_*`). */
+function treasuryFor(liveSystemType, mode) {
+  const systemType = treasurySystemTypeForMode(liveSystemType, mode);
   try {
     return { userId: getTreasuryUserIdBySystemType(systemType), systemType };
   } catch {
@@ -206,10 +210,15 @@ const settleExternalParticipation = asyncHandler(async (req, res) => {
   let lots;
   let feesTreasury = null;
   let fxMarginTreasury = null;
+  let mode;
 
   try {
+    // Mode de la cagnotte, relu en base : un encaissement de simulation (payé
+    // par un prestataire de simulation) ne crédite qu'un coffre de simulation.
+    mode = (await loadCagnotteScope(cagnotteId)).mode;
+
     // Hors transaction : ouverture idempotente et prix (réseau possible).
-    await openPosition({ Model: Position, vaultId, cagnotteId, currency: target });
+    await openPosition({ Model: Position, vaultId, cagnotteId, currency: target, mode });
 
     pricing = await computeCagnottePricing({
       txType: TX_TYPES.PARTICIPATION,
@@ -222,8 +231,8 @@ const settleExternalParticipation = asyncHandler(async (req, res) => {
       requestId: ref,
     });
 
-    if (pricing.fee.amount > 0) feesTreasury = treasuryFor(CAGNOTTE_FEES);
-    if (pricing.fx.revenue.amount > 0) fxMarginTreasury = treasuryFor(FX_MARGIN);
+    if (pricing.fee.amount > 0) feesTreasury = treasuryFor(CAGNOTTE_FEES, mode);
+    if (pricing.fx.revenue.amount > 0) fxMarginTreasury = treasuryFor(FX_MARGIN, mode);
 
     lots = buildCagnotteCreditLots({
       origin: { kind: "PROVIDER_INBOUND", rail },
@@ -270,16 +279,16 @@ const settleExternalParticipation = asyncHandler(async (req, res) => {
       let treasuryWalletAfter = null;
 
       if (feesTreasury) {
-        const t = await TxSystemBalance.credit(feesTreasury.userId, CAGNOTTE_FEES, source, pricing.fee.amount, {
+        const t = await TxSystemBalance.credit(feesTreasury.userId, feesTreasury.systemType, source, pricing.fee.amount, {
           session,
           reference: ref,
           historyMetadata: { source: "settleExternalParticipation", cagnotteId },
         });
-        treasuryWalletAfter = { walletId: String(t?._id || ""), systemType: CAGNOTTE_FEES, currency: source };
+        treasuryWalletAfter = { walletId: String(t?._id || ""), systemType: feesTreasury.systemType, currency: source };
       }
 
       if (fxMarginTreasury) {
-        await TxSystemBalance.credit(fxMarginTreasury.userId, FX_MARGIN, target, pricing.fx.revenue.amount, {
+        await TxSystemBalance.credit(fxMarginTreasury.userId, fxMarginTreasury.systemType, target, pricing.fx.revenue.amount, {
           session,
           reference: ref,
           historyMetadata: { source: "settleExternalParticipation", cagnotteId },
@@ -290,6 +299,7 @@ const settleExternalParticipation = asyncHandler(async (req, res) => {
         [
           {
             _id: settlementId,
+            mode,
             reference: ref,
             idempotencyKey: idem,
             rail,
@@ -301,7 +311,7 @@ const settleExternalParticipation = asyncHandler(async (req, res) => {
             feeCredit: { amount: pricing.fee.amount, currency: pricing.fee.amount > 0 ? source : "" },
             netToVault: { amount: pricing.destination.amount, currency: target },
             treasuryUserId: feesTreasury?.userId || "",
-            treasurySystemType: feesTreasury ? CAGNOTTE_FEES : "",
+            treasurySystemType: feesTreasury ? feesTreasury.systemType : "",
             treasuryLabel: feesTreasury ? "Cagnotte Fees Treasury" : "",
             status: "confirmed",
             treasuryWalletAfter,
@@ -327,6 +337,7 @@ const settleExternalParticipation = asyncHandler(async (req, res) => {
        * ⚠️ LE GRAND LIVRE, DANS LA MÊME TRANSACTION, AVEC LA SESSION.
        */
       await postCagnotteLotEntries({
+        mode,
         settlementId: settlement._id,
         reference: ref,
         lots,

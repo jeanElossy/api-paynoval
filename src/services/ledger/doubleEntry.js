@@ -333,6 +333,22 @@ function providerOutboundClearingAccountId(rail, currency) {
   return `system_clearing:PROVIDER_OUTBOUND:${r}:${normCurrency(currency)}`;
 }
 
+/**
+ * ARGENT FICTIF DE LA SIMULATION (2026-10-06) — contrepartie du robinet.
+ *
+ * Le robinet d'un compte sandbox crée de l'argent de démonstration ; « vider le
+ * solde » et la réinitialisation le reprennent. On ne l'invente pas en silence :
+ * il sort d'un compte de compensation DÉDIÉ, dont le solde mesure exactement
+ * l'argent fictif en circulation. Le même motif que la reprise de solde
+ * (`OPENING_BALANCE`) : un point d'entrée nommé, jamais une dilution.
+ *
+ * Ces écritures portent `mode: "sandbox"` : elles s'équilibrent dans la balance
+ * de simulation et n'apparaissent dans aucun rapport de production.
+ */
+function sandboxFundingClearingAccountId(currency) {
+  return `system_clearing:SANDBOX_FUNDING:${normCurrency(currency)}`;
+}
+
 function treasuryAccountId({ treasuryUserId, treasurySystemType, currency }) {
   return `treasury:${String(treasurySystemType || "").trim().toUpperCase()}:${normId(
     treasuryUserId
@@ -631,6 +647,29 @@ function computeTrialBalance(entries = [], { minVersion = LEDGER_VERSION } = {})
 }
 
 /**
+ * BALANCE DE VÉRIFICATION PAR MODE.
+ *
+ * Production et simulation partagent la collection, pas la comptabilité :
+ * chaque mode doit s'équilibrer SEUL. Une balance globale équilibrée pourrait
+ * cacher un transfert d'un monde à l'autre — un débit sandbox compensé par un
+ * crédit live s'annulerait dans la somme. Une écriture sans `mode` est
+ * antérieure à la migration, donc de production (`accountMode.liveOnlyFilter`).
+ */
+function computeTrialBalanceByMode(entries = [], options = {}) {
+  const live = [];
+  const sandbox = [];
+
+  for (const e of entries) {
+    (e?.mode === "sandbox" ? sandbox : live).push(e);
+  }
+
+  return {
+    live: computeTrialBalance(live, options),
+    sandbox: computeTrialBalance(sandbox, options),
+  };
+}
+
+/**
  * ============================================================================
  * CLÉ DE DÉDUPLICATION — LE FILET QUAND LA TRANSACTION MONGO N'EST PAS LÀ
  * ============================================================================
@@ -683,11 +722,13 @@ module.exports = {
   providerOutboundClearingAccountId,
   treasuryAccountId,
   openingBalanceClearingAccountId,
+  sandboxFundingClearingAccountId,
 
   summarizeLegs,
   checkBalanced,
   assertBalanced,
   transferLegs,
   computeTrialBalance,
+  computeTrialBalanceByMode,
   buildDedupKey,
 };

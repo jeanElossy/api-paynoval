@@ -3,6 +3,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const { modeScopeFilter } = require("../utils/accountMode");
 const createError = require("http-errors");
 
 const runtime = require("../services/transactions/shared/runtime");
@@ -113,6 +114,9 @@ async function listInternalAdminTransactions(req, res, next) {
     } else if (scopes.length > 1) {
       query.$and = scopes;
     }
+
+    // Production par défaut ; `?mode=sandbox|all` pour la simulation.
+    Object.assign(query, modeScopeFilter(req.query.mode));
 
     if (status && status !== "all") {
       query.status = String(status).trim();

@@ -166,6 +166,9 @@ function buildStepUpRecords({
   const deadlineAt = new Date(now.getTime() + deadlineHours * 60 * 60 * 1000);
 
   const reviewCase = {
+    // Les dossiers de simulation existent (le parcours est réel) mais sont
+    // écartés des files d'analystes, qui filtrent sur `mode`.
+    mode: tx?.mode === "sandbox" ? "sandbox" : "live",
     transactionId,
     reference,
     userId,

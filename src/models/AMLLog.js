@@ -5,6 +5,15 @@ const mongoose = require("mongoose");
 
 const AMLLogSchema = new mongoose.Schema(
   {
+    /**
+     * Mode du compte concerné (2026-10-06) — `utils/accountMode.js`. Les
+     * entrées des comptes de simulation sont conservées (traçabilité) mais
+     * écartées des files et rapports de conformité, qui filtrent sur
+     * `mode != "sandbox"`. `null` : mode non résolu au moment de l'écriture
+     * (compte illisible) — compté comme production, la direction prudente
+     * pour un rapport de conformité.
+     */
+    mode:          { type: String, enum: ["live", "sandbox", null], default: null },
     userId:        { type: mongoose.Schema.Types.ObjectId, ref: "User", required: false },
     /**
      * ⚠️ `auto_cancel` ajouté le 2026-09-03.
@@ -43,6 +52,7 @@ const AMLLogSchema = new mongoose.Schema(
 
 AMLLogSchema.index({ userId: 1, createdAt: -1 });
 AMLLogSchema.index({ flagged: 1, createdAt: -1 });
+AMLLogSchema.index({ mode: 1, flagged: 1, createdAt: -1 });
 AMLLogSchema.index({ provider: 1, createdAt: -1 });
 
 module.exports = mongoose.models.AMLLog || mongoose.model("AMLLog", AMLLogSchema);

@@ -137,6 +137,11 @@ function peutEnvoyer(doc) {
  * consulter — les numéros d'un autre compte. Toutes les lectures de ce fichier
  * sont filtrées par cette valeur.
  */
+/** Compte de simulation : identifiant transmis au principal (code fixe, aucun SMS). */
+function sandboxUserIdOf(req) {
+  return req.user?.mode === "sandbox" ? String(identifiant(req) || "") || undefined : undefined;
+}
+
 function identifiant(req) {
   return req.user?._id || req.user?.id || req.internalUserId || null;
 }
@@ -337,7 +342,7 @@ exports.start = async (req, res) => {
    * quinze minutes sans qu'aucun code ne lui soit jamais parvenu.
    */
   try {
-    await envoyerCode({ phoneE164, channel: canal });
+    await envoyerCode({ phoneE164, channel: canal, sandboxUserId: sandboxUserIdOf(req) });
   } catch (err) {
     return repondreEchecOtp(res, err, "envoi impossible");
   }
@@ -443,7 +448,7 @@ exports.verify = async (req, res) => {
 
   let verdict;
   try {
-    verdict = await verifierCode({ phoneE164, code });
+    verdict = await verifierCode({ phoneE164, code, sandboxUserId: sandboxUserIdOf(req) });
   } catch (err) {
     return repondreEchecOtp(res, err, "vérification impossible");
   }
