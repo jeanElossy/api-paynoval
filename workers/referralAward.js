@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
+/* Règle B.4 : les `console.*` contournent le logger — on les masque aussi. */
+require("../src/utils/logRedaction").installConsoleRedaction();
+
 /**
  * ============================================================================
  * SERVICE DE PARRAINAGE — POINT D'ENTRÉE

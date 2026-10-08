@@ -7,7 +7,6 @@ const {
   logTransaction,
   getUserTransactionsStats,
   getPEPOrSanctionedStatus,
-  getBusinessKYBStatus,
 } = require("../services/aml");
 
 const { sendFraudAlert } = require("../utils/alert");
@@ -268,21 +267,6 @@ function isPhoneVerified(user = {}) {
   );
 }
 
-function isBusinessUser(user = {}) {
-  const userType = normalizeStatus(
-    user.userType || user.type || user.accountType || user.profile?.userType
-  );
-  const role = normalizeStatus(user.role);
-
-  return (
-    user.isBusiness === true ||
-    userType === "business" ||
-    userType === "entreprise" ||
-    userType === "company" ||
-    role === "business"
-  );
-}
-
 function isKycValid(user = {}) {
   const level = Number(user.kycLevel || user.profile?.kycLevel || 0);
 
@@ -295,43 +279,6 @@ function isKycValid(user = {}) {
     isPositiveFlag(user.kycVerified) ||
     isPositiveFlag(user.isKycVerified)
   );
-}
-
-async function isKybValid(user = {}) {
-  const level = Number(
-    user.businessKYBLevel ||
-      user.business?.businessKYBLevel ||
-      user.kybLevel ||
-      0
-  );
-
-  if (
-    level >= 2 ||
-    isApprovedStatus(user.kybStatus) ||
-    isApprovedStatus(user.businessStatus) ||
-    isApprovedStatus(user.kyb?.status) ||
-    isApprovedStatus(user.kyb?.verificationStatus) ||
-    isApprovedStatus(user.business?.kybStatus) ||
-    isApprovedStatus(user.business?.businessStatus) ||
-    isPositiveFlag(user.kybVerified) ||
-    isPositiveFlag(user.isKybVerified)
-  ) {
-    return true;
-  }
-
-  if (typeof getBusinessKYBStatus === "function") {
-    try {
-      const kybStatus = await getBusinessKYBStatus(
-        user.businessId || user._id || user.id
-      );
-
-      return isApprovedStatus(kybStatus);
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
 }
 
 function normalizeCountryToISO(country) {
@@ -555,24 +502,11 @@ function buildEffectiveAmlUser(req) {
     baseUser.isPhoneVerified === true ||
     isPhoneVerified(baseUser);
 
-  const businessUser =
-    snapshot.isBusiness === true ||
-    baseUser.isBusiness === true ||
-    isBusinessUser(baseUser);
-
   const kycVerified =
     snapshot.kycVerified === true ||
     baseUser.kycVerified === true ||
     baseUser.isKycVerified === true ||
     isKycValid(baseUser);
-
-  const kybVerified =
-    snapshot.kybVerified === true ||
-    baseUser.kybVerified === true ||
-    baseUser.isKybVerified === true ||
-    isPositiveFlag(baseUser.kybStatus) ||
-    isPositiveFlag(baseUser.businessStatus) ||
-    Number(baseUser.businessKYBLevel || 0) >= 2;
 
   const userId = getUserId(baseUser);
 
@@ -585,11 +519,8 @@ function buildEffectiveAmlUser(req) {
     isEmailVerified: emailVerified,
     phoneVerified,
     isPhoneVerified: phoneVerified,
-    isBusiness: businessUser,
     kycVerified,
     isKycVerified: kycVerified,
-    kybVerified,
-    isKybVerified: kybVerified,
   };
 }
 
@@ -842,7 +773,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     /**
      * Important :
-     * La vérification email/téléphone/KYC/KYB est déjà faite dans
+     * La vérification email/téléphone/KYC est déjà faite dans
      * requireTransactionEligibility juste avant AML.
      *
      * Ici on garde seulement un fallback de sécurité si AML est utilisé seul
@@ -895,47 +826,15 @@ module.exports = async function amlMiddleware(req, res, next) {
         });
       }
 
-      if (isBusinessUser(user)) {
-        const kybValid = await isKybValid(user);
-
-        if (!kybValid) {
-          logger.warn("[AML] KYB insuffisant", {
-            provider,
-            user: user.email,
-            kybStatus: user.kybStatus,
-            businessStatus: user.businessStatus,
-          });
-
-          await logTransaction({
-            userId,
-            type: "initiate",
-            provider,
-            amount,
-            currency: currencyCode,
-            toEmail,
-            details: maskSensitive(body),
-            flagged: true,
-            flagReason: "KYB insuffisant",
-            ip: req.ip,
-          });
-
-          await safeSendFraudAlert({
-            user,
-            type: "kyb_insuffisant",
-            provider,
-          });
-
-          return res.status(403).json({
-            success: false,
-            error:
-              "L’accès aux transactions est temporairement restreint. Merci de compléter la vérification d’entreprise.",
-            code: "KYB_REQUIRED",
-          });
-        }
-      } else if (!isKycValid(user)) {
+      /**
+       * V1 : un seul type de compte — le KYC vaut pour TOUS. L'ancienne branche
+       * « entreprise » validait le KYB par un stub qui rendait toujours
+       * « validé » (échec en OUVERTURE) : elle est retirée avec le KYB.
+       */
+      if (!isKycValid(user)) {
         logger.warn("[AML] KYC insuffisant", {
           provider,
-          user: user.email,
+          userId,
           kycStatus: user.kycStatus,
           kycLevel: user.kycLevel,
         });
@@ -975,7 +874,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     if (pepStatus && pepStatus.sanctioned) {
       logger.error("[AML] PEP/Sanction detected", {
-        user: user.email,
+        userId,
         reason: pepStatus.reason,
       });
 
@@ -1169,7 +1068,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     if (destinationCountryISO && RISKY_COUNTRIES_ISO.has(destinationCountryISO)) {
       logger.warn("[AML] Pays à risque détecté", {
         provider,
-        user: user.email,
+        userId,
         destinationCountryISO,
         destinationCountryRaw: body.destinationCountry || body.country || null,
       });
@@ -1209,7 +1108,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     if (amount > singleTxLimit) {
       logger.warn("[AML] Plafond single dépassé", {
         provider,
-        user: user.email,
+        userId,
         amount,
         max: singleTxLimit,
       });
@@ -1291,7 +1190,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     if (futureTotal > dailyLimit) {
       logger.warn("[AML] Plafond journalier dépassé", {
         provider,
-        user: user.email,
+        userId,
         dailyTotal,
         amount,
         dailyLimit,
@@ -1365,7 +1264,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
       if (!ok) {
         logger.warn("[AML] Réponse AML incorrecte", {
-          user: user.email,
+          userId,
         });
 
         await logTransaction({
@@ -1398,7 +1297,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     if (stats && Number(stats.lastHour || 0) > 10) {
       logger.warn("[AML] Volume suspect sur 1h", {
         provider,
-        user: user.email,
+        userId,
         lastHour: stats.lastHour,
       });
 
@@ -1435,7 +1334,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     if (stats && Number(stats.sameDestShortTime || 0) > 3) {
       logger.warn("[AML] Structuring suspect", {
         provider,
-        user: user.email,
+        userId,
         count: stats.sameDestShortTime,
       });
 
@@ -1483,7 +1382,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       !ALLOWED_STRIPE_CURRENCY_CODES.includes(currencyCode)
     ) {
       logger.warn("[AML] Devise Stripe non autorisée", {
-        user: user.email,
+        userId,
         currencyCode,
       });
 
@@ -1598,7 +1497,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     if (riskVerdict.band === "block") {
       logger.warn("[AML] risque BLOQUANT", {
-        user: user.email,
+        userId,
         score: riskVerdict.score,
         motifs: riskExplanation,
       });
@@ -1642,7 +1541,7 @@ module.exports = async function amlMiddleware(req, res, next) {
        * revue existe même si la création échoue plus loin.
        */
       logger.warn("[AML] risque -> REVUE MANUELLE", {
-        user: user.email,
+        userId,
         score: riskVerdict.score,
         motifs: riskExplanation,
       });
@@ -1701,11 +1600,10 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     logger.info("[AML] AML OK", {
       provider,
-      user: user.email,
+      userId,
       amount,
       currencyCode,
       destinationCountryISO,
-      toEmail,
       iban: iban ? "***" : "",
       phoneNumber: phoneNumber ? "***" : "",
       eligibilityAlreadyChecked: alreadyEligibilityChecked,
@@ -1753,7 +1651,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     logger.error("[AML] Exception", {
       err: e?.message || e,
-      user: user?.email,
+      userId,
     });
 
     try {

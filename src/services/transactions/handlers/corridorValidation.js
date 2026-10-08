@@ -14,9 +14,7 @@ const createError = require("http-errors");
  * Compatible avec le modèle User principal PayNoval :
  * - country
  * - currency
- * - registrationCountry
  * - userType
- * - isBusiness
  * - role
  * - accountStatus
  * - isBlocked
@@ -25,7 +23,6 @@ const createError = require("http-errors");
  * - isSystem
  * - systemType
  * - kycStatus
- * - kybStatus
  */
 
 /**
@@ -331,17 +328,9 @@ function isSystemAccount(user = {}) {
   );
 }
 
-function isBusinessUser(user = {}) {
-  const userType = String(user?.userType || "").trim().toLowerCase();
-  const role = String(user?.role || "").trim().toLowerCase();
-
-  return user?.isBusiness === true || userType === "entreprise" || role === "business";
-}
-
 function isUserBlocked(user = {}) {
   const status = String(user?.status || "").trim().toLowerCase();
   const accountStatus = String(user?.accountStatus || "").trim().toLowerCase();
-  const kybStatus = String(user?.kybStatus || "").trim().toLowerCase();
   const staffStatus = String(user?.staffStatus || "").trim().toLowerCase();
 
   return (
@@ -355,7 +344,6 @@ function isUserBlocked(user = {}) {
     status === "banned" ||
     accountStatus === "blocked" ||
     accountStatus === "frozen" ||
-    kybStatus === "suspended" ||
     staffStatus === "suspended" ||
     staffStatus === "disabled"
   );
@@ -406,12 +394,8 @@ function assertActiveUser(
 }
 
 function extractUserCountry(user = {}) {
-  const business = isBusinessUser(user);
-
   return pickFirst(
-    business ? user?.registrationCountry : "",
     user?.country,
-    user?.registrationCountry,
     user?.profile?.country,
     user?.address?.country,
     user?.residenceCountry,

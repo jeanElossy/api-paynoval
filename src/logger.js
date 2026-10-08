@@ -4,6 +4,14 @@
 const fs = require("fs");
 const path = require("path");
 const { createLogger, format, transports } = require("winston");
+const { redactWinstonInfo } = require("./utils/logRedaction");
+const { redactSensitive } = require("./utils/redactSensitive");
+
+/**
+ * Règle B.4 : aucune donnée personnelle ni aucun secret en clair — masquage par
+ * CLÉ puis par VALEUR (e-mail, téléphone E.164, JWT, carte), sur CHAQUE ligne.
+ */
+const redactPii = format((info) => redactWinstonInfo(info, redactSensitive));
 
 const isProd = process.env.NODE_ENV === "production";
 const isRender = !!process.env.RENDER; // Render set souvent cette variable
@@ -36,6 +44,7 @@ const jsonLine = format.combine(
   format.timestamp({ format: () => new Date().toISOString() }),
   format.errors({ stack: true }),
   format.splat(),
+  redactPii(),
   format((info) => {
     // Uniformiser la clé "message"
     if (info.message instanceof Error) info.message = info.message.message;
@@ -55,6 +64,7 @@ const devPretty = format.combine(
   format.colorize(),
   format.errors({ stack: true }),
   format.splat(),
+  redactPii(),
   format.printf(({ timestamp, level, message, service, ...meta }) => {
     const metaStr = Object.keys(meta || {}).length ? ` ${JSON.stringify(meta)}` : "";
     const svc = service ? `(${service}) ` : "";

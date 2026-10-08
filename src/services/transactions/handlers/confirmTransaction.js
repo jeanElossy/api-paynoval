@@ -73,7 +73,6 @@ const USER_CORRIDOR_SELECT = [
   "countryCode",
   "selectedCountry",
   "residenceCountry",
-  "registrationCountry",
   "nationality",
 
   "currency",
@@ -85,7 +84,6 @@ const USER_CORRIDOR_SELECT = [
   "type",
   "accountType",
   "role",
-  "isBusiness",
   "isSystem",
   "systemType",
 
@@ -103,21 +101,14 @@ const USER_CORRIDOR_SELECT = [
 
   "kycStatus",
   "kycLevel",
-  "kybStatus",
-  "businessStatus",
-  "businessKYBLevel",
 
   "kyc",
-  "kyb",
-  "business",
   "profile",
   "address",
   "wallet",
 
   "kycVerified",
   "isKycVerified",
-  "kybVerified",
-  "isKybVerified",
 
   "isDeleted",
   "deletedAt",

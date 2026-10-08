@@ -337,11 +337,6 @@ function buildScreeningQueries({
 }) {
   const queries = {};
 
-  const senderIsBusiness =
-    user.isBusiness === true ||
-    String(user.userType || "").toLowerCase() === "entreprise" ||
-    String(user.role || "").toLowerCase() === "business";
-
   const senderName =
     user.fullName ||
     [user.firstName, user.lastName].filter(Boolean).join(" ") ||
@@ -349,19 +344,17 @@ function buildScreeningQueries({
     user.email ||
     "";
 
-  const senderEntity = senderIsBusiness
-    ? buildCompanyEntity({
-        name: user.businessName || user.companyName || user.fullName || senderName,
-        country: user.registrationCountry || user.country || user.countryCode,
-        registrationNumber: user.registrationNumber,
-      })
-    : buildPersonEntity({
-        name: senderName,
-        email: user.email,
-        phone: user.phone || user.phoneNumber,
-        birthDate: user.dateOfBirth || user.birthDate,
-        country: user.country || user.countryCode,
-      });
+  /**
+   * V1 : l'expéditeur est toujours une PERSONNE (un seul type de compte). Le
+   * criblage « société » reste appliqué aux destinataires (plus bas).
+   */
+  const senderEntity = buildPersonEntity({
+    name: senderName,
+    email: user.email,
+    phone: user.phone || user.phoneNumber,
+    birthDate: user.dateOfBirth || user.birthDate,
+    country: user.country || user.countryCode,
+  });
 
   if (senderEntity) queries.sender = senderEntity;
 
@@ -696,7 +689,6 @@ function getSumsubApplicantIds(input = {}) {
     user.sumsubApplicantId ||
       user.sumsub?.applicantId ||
       user.kyc?.sumsubApplicantId ||
-      user.kyb?.sumsubApplicantId ||
       user.profile?.sumsubApplicantId
   );
 

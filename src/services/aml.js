@@ -584,16 +584,11 @@ async function getPEPOrSanctionedStatus(user, { toEmail }) {
  * d'un contrôle.
  */
 
-async function getBusinessKYBStatus() {
-  return "validé";
-}
-
 module.exports = {
   logTransaction,
   getUserTransactionsStats,
   resolveTransactionModel,
   getPEPOrSanctionedStatus,
-  getBusinessKYBStatus,
 
   normalizeIso,
   safeNumber,

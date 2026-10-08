@@ -10,7 +10,7 @@ const createError = require("http-errors");
  *
  * Rôle :
  * - dernière barrière côté tx-core avant création/confirmation transaction
- * - bloque si email/téléphone/KYC/KYB/compte ne sont pas conformes
+ * - bloque si email/téléphone/KYC/compte ne sont pas conformes
  * - génère un snapshot propre pour metadata/meta
  *
  * Important :
@@ -40,10 +40,7 @@ const TX_ELIGIBILITY_USER_SELECT = [
   "phoneVerification",
 
   "userType",
-  "type",
-  "accountType",
   "role",
-  "isBusiness",
 
   "accountStatus",
   "status",
@@ -60,14 +57,6 @@ const TX_ELIGIBILITY_USER_SELECT = [
   "profile",
   "kycVerified",
   "isKycVerified",
-
-  "kybStatus",
-  "businessStatus",
-  "businessKYBLevel",
-  "business",
-  "kyb",
-  "kybVerified",
-  "isKybVerified",
 
   "isSystem",
   "systemType",
@@ -168,23 +157,6 @@ function isPendingStatus(value) {
   return normalizeStatus(value) === "pending";
 }
 
-function isBusinessUser(user = {}) {
-  const userType = normalizeStatus(
-    user.userType || user.type || user.accountType || user.profile?.userType
-  );
-
-  const role = normalizeStatus(user.role);
-
-  return (
-    user.isBusiness === true ||
-    userType === "entreprise" ||
-    userType === "business" ||
-    userType === "company" ||
-    userType === "merchant" ||
-    role === "business"
-  );
-}
-
 function isEmailVerified(user = {}) {
   return (
     isPositiveFlag(user.emailVerified) ||
@@ -224,28 +196,6 @@ function isKycVerified(user = {}) {
     isApprovedStatus(user.verifications?.kyc?.status) ||
     isPositiveFlag(user.kycVerified) ||
     isPositiveFlag(user.isKycVerified)
-  );
-}
-
-function isKybVerified(user = {}) {
-  const businessLevel = Number(
-    user.businessKYBLevel ||
-      user.business?.businessKYBLevel ||
-      user.kybLevel ||
-      0
-  );
-
-  return (
-    businessLevel >= 2 ||
-    isApprovedStatus(user.kybStatus) ||
-    isApprovedStatus(user.businessStatus) ||
-    isApprovedStatus(user.kyb?.status) ||
-    isApprovedStatus(user.kyb?.verificationStatus) ||
-    isApprovedStatus(user.business?.kybStatus) ||
-    isApprovedStatus(user.business?.businessStatus) ||
-    isApprovedStatus(user.verifications?.kyb?.status) ||
-    isPositiveFlag(user.kybVerified) ||
-    isPositiveFlag(user.isKybVerified)
   );
 }
 
@@ -331,16 +281,13 @@ function buildEligibilityFailures(user = {}) {
     });
   }
 
-  if (isBusinessUser(user)) {
-    if (!isKybVerified(user)) {
-      failures.push({
-        code: "KYB_REQUIRED",
-        status: 428,
-        message:
-          "Votre vérification d’entreprise KYB doit être validée avant d’effectuer une transaction.",
-      });
-    }
-  } else if (!isKycVerified(user)) {
+  /**
+   * V1 : un seul type de compte — TOUT compte client exige le KYC. Il n'existe
+   * plus d'exemption « entreprise » par le KYB (retour en V2). Un profil hérité
+   * portant encore `isBusiness` / `kybVerified` est traité en particulier :
+   * c'est plus strict, donc l'échec se fait en fermeture.
+   */
+  if (!isKycVerified(user)) {
     failures.push({
       code: "KYC_REQUIRED",
       status: 428,
@@ -353,8 +300,6 @@ function buildEligibilityFailures(user = {}) {
 }
 
 function buildEligibilitySnapshot(user = {}) {
-  const isBusiness = isBusinessUser(user);
-
   return {
     checkedAt: new Date().toISOString(),
     source: "tx-core-db",
@@ -363,9 +308,7 @@ function buildEligibilitySnapshot(user = {}) {
     phone: safeString(user.phone || user.phoneNumber),
     emailVerified: isEmailVerified(user),
     phoneVerified: isPhoneVerified(user),
-    isBusiness,
-    kycVerified: isBusiness ? false : isKycVerified(user),
-    kybVerified: isBusiness ? isKybVerified(user) : false,
+    kycVerified: isKycVerified(user),
     accountStatus: safeString(user.accountStatus || user.status || "unknown"),
     blocked: isAccountBlocked(user),
   };
@@ -375,7 +318,7 @@ function buildEligibilitySnapshot(user = {}) {
  * Contrôle spécial réception interne :
  * à l’initiation d’un transfert PayNoval → PayNoval, le destinataire doit
  * exister et être recevable, mais on ne bloque pas l’expéditeur parce que
- * le destinataire n’a pas encore email/phone/KYC/KYB finalisé.
+ * le destinataire n’a pas encore email/phone/KYC finalisé.
  *
  * La vérification complète du destinataire reste faite au moment de confirmer
  * ou de créditer définitivement la transaction.
@@ -498,11 +441,9 @@ module.exports = {
   buildEligibilityFailures,
   buildEligibilitySnapshot,
   mergeEligibilityMetadata,
-  isBusinessUser,
   isEmailVerified,
   isPhoneVerified,
   isKycVerified,
-  isKybVerified,
   isAccountBlocked,
   buildReceiveTransferFailures,
   assertUserCanReceiveInternalTransfer,

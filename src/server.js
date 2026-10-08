@@ -1,5 +1,8 @@
 "use strict";
 
+/* Règle B.4 : les `console.*` contournent le logger — on les masque aussi. */
+require("./utils/logRedaction").installConsoleRedaction();
+
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  * VALIDATION DE LA CONFIGURATION — ICI, ET NULLE PART AILLEURS

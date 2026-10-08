@@ -394,9 +394,6 @@ function mapUserToReqUser(userDoc) {
     // AML fields
     kycLevel: userDoc.kycLevel,
     type: userDoc.type,
-    isBusiness: userDoc.isBusiness,
-    kybStatus: userDoc.kybStatus,
-    businessId: userDoc.businessId,
 
     securityQuestions: Array.isArray(userDoc.securityQuestions) ? userDoc.securityQuestions : [],
 

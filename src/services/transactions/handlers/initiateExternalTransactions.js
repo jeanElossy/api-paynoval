@@ -97,7 +97,6 @@ const USER_CORRIDOR_SELECT = [
   "countryCode",
   "selectedCountry",
   "residenceCountry",
-  "registrationCountry",
   "nationality",
 
   "currency",
@@ -109,7 +108,6 @@ const USER_CORRIDOR_SELECT = [
   "type",
   "accountType",
   "role",
-  "isBusiness",
   "isSystem",
   "systemType",
 
@@ -127,21 +125,14 @@ const USER_CORRIDOR_SELECT = [
 
   "kycStatus",
   "kycLevel",
-  "kybStatus",
-  "businessStatus",
-  "businessKYBLevel",
 
   "kyc",
-  "kyb",
-  "business",
   "profile",
   "address",
   "wallet",
 
   "kycVerified",
   "isKycVerified",
-  "kybVerified",
-  "isKybVerified",
 
   "isDeleted",
   "deletedAt",
@@ -1017,7 +1008,6 @@ async function initiateOutboundExternal(req, res, next) {
             emailVerified: eligibilitySnapshot.sender.emailVerified,
             phoneVerified: eligibilitySnapshot.sender.phoneVerified,
             kycVerified: eligibilitySnapshot.sender.kycVerified,
-            kybVerified: eligibilitySnapshot.sender.kybVerified,
             accountStatus: eligibilitySnapshot.sender.accountStatus,
           },
         },
@@ -1550,7 +1540,6 @@ async function initiateInboundExternal(req, res, next) {
             emailVerified: eligibilitySnapshot.receiver.emailVerified,
             phoneVerified: eligibilitySnapshot.receiver.phoneVerified,
             kycVerified: eligibilitySnapshot.receiver.kycVerified,
-            kybVerified: eligibilitySnapshot.receiver.kybVerified,
             accountStatus: eligibilitySnapshot.receiver.accountStatus,
           },
         },

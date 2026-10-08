@@ -1278,7 +1278,7 @@ router.get(
  * Barrière sécurité :
  * - protect : JWT requis
  * - requestValidator : payload propre
- * - requireTransactionEligibility : email/téléphone/KYC/KYB/statut compte
+ * - requireTransactionEligibility : email/téléphone/KYC/statut compte
  * - amlMiddleware : AML, blacklist, limites, sanctions internes
  * - initiateByFlow : interne/externe selon funds/destination/provider
  */
