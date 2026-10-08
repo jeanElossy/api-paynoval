@@ -244,6 +244,7 @@ exports.create = async (req, res) => {
       });
     }
 
+    const FxRule = modeleFxRule();
     const doc = new FxRule(payload);
     await doc.save();
     await purgerCache(doc);

@@ -409,7 +409,10 @@ async function buildPricingContext({
     toCurrency: currencyTargetISO,
     provider,
     method: normalizeMethodForPricing(effectiveBody, provider),
-    txType: normalizeTxTypeForPricing(effectiveBody),
+    // The DECLARED type (`resoudreTypeExterne` above). `normalizeTxTypeForPricing`
+    // was removed with the "no guessed type" change but this call stayed:
+    // every external initiation threw a ReferenceError (2026-10-08).
+    txType: typeExterne,
     fromCountry:
       effectiveBody.fromCountry || effectiveBody.sourceCountry || country,
     toCountry:

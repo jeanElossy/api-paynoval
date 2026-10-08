@@ -357,6 +357,7 @@ exports.createFee = async (req, res) => {
       fixedAmount: toNumber(req.body.fixedAmount, 0),
     };
 
+    const Fee = modeleFee();
     const fee = new Fee(payload);
     await fee.save();
 

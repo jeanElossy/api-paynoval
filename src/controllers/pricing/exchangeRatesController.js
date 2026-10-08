@@ -91,6 +91,7 @@ exports.create = async (req, res) => {
       { $set: { active: false, updatedAt: new Date() } }
     );
 
+    const ExchangeRate = modeleExchangeRate();
     const newRate = new ExchangeRate({
       from: fromCur,
       to: toCur,

@@ -36,6 +36,7 @@ const axios = require("axios");
 
 const config = require("../../config");
 const logger = require("../../logger");
+const { basePrincipal } = require("../../utils/principalEndpoint");
 
 /**
  * ⚠️ Résolution DÉLÉGUÉE à `utils/principalEndpoint` depuis le 2026-09-10.
