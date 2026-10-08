@@ -339,6 +339,33 @@ function resolveProvider(req) {
   return p || "paynoval";
 }
 
+/**
+ * Le RAIL sur lequel portent les plafonds — pas le prestataire (2026-10-08).
+ *
+ * `tools/amlLimits.js` définit les plafonds PAR RAIL (`mobilemoney`, `card`,
+ * `paynoval`) et sa table d'alias exclut volontairement les opérateurs. Or le
+ * plafond était cherché avec `resolveProvider`, qui rend `body.provider` —
+ * « wave », « orange »… — d'abord : `AML_UNKNOWN_RAIL`, donc TOUT dépôt et
+ * retrait mobile money était refusé (« Ce moyen de paiement n'est pas
+ * disponible pour cette devise »). Et le cumul journalier, filtré sur
+ * l'opérateur, aurait laissé 750 000 XOF PAR opérateur et par jour.
+ *
+ * Le rail est le côté externe du couple `funds` / `destination` ; un virement
+ * interne est `paynoval`. Sans eux, on retombe sur l'ancien calcul (route
+ * cagnotte, qui pose `routedProvider`). Un rail inconnu reste refusé.
+ */
+function resolveAmlRail(req) {
+  const b = req.body || {};
+  const funds = String(b.funds || "").trim().toLowerCase();
+  const destination = String(b.destination || "").trim().toLowerCase();
+
+  const externe = [funds, destination].find((v) => v && v !== "paynoval");
+  if (externe) return externe;
+  if (funds === "paynoval" && destination === "paynoval") return "paynoval";
+
+  return resolveProvider(req);
+}
+
 function normalizeCurrencyISO(v) {
   const s0 = String(v || "").trim().toUpperCase();
   if (!s0) return "";
@@ -726,6 +753,8 @@ async function runSanctionsScreening({
 
 module.exports = async function amlMiddleware(req, res, next) {
   const provider = resolveProvider(req);
+  // Plafonds et cumuls par RAIL ; `provider` ne sert plus qu'aux journaux.
+  const amlRail = resolveAmlRail(req);
   let user = buildEffectiveAmlUser(req);
   const body = req.body || {};
 
@@ -1103,7 +1132,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    const singleTxLimit = getSingleTxLimit(provider, currencyCode, amlOperation);
+    const singleTxLimit = getSingleTxLimit(amlRail, currencyCode, amlOperation);
 
     if (amount > singleTxLimit) {
       logger.warn("[AML] Plafond single dépassé", {
@@ -1139,7 +1168,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    const dailyLimit = getDailyLimit(provider, currencyCode, amlOperation);
+    const dailyLimit = getDailyLimit(amlRail, currencyCode, amlOperation);
 
     /**
      * ÉCHEC EN FERMETURE — décision du 2026-09-15.
@@ -1159,7 +1188,7 @@ module.exports = async function amlMiddleware(req, res, next) {
     let statsError = null;
 
     try {
-      stats = await getUserTransactionsStats(userId, provider, currencyCode);
+      stats = await getUserTransactionsStats(userId, amlRail, currencyCode);
     } catch (err) {
       statsError = err;
     }
@@ -1467,7 +1496,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     const riskVerdict = riskEngine.computeRiskScore({
       amount,
-      singleTxLimit: getSingleTxLimit(provider, currencyCode, amlOperation),
+      singleTxLimit: getSingleTxLimit(amlRail, currencyCode, amlOperation),
       velocity: velocityCounters,
       stats: stats || null,
       accountAgeDays: accountAgeInDays(user),
@@ -1679,3 +1708,5 @@ module.exports = async function amlMiddleware(req, res, next) {
     });
   }
 };
+
+module.exports.resolveAmlRail = resolveAmlRail;
