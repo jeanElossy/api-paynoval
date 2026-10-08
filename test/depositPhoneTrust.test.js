@@ -71,21 +71,37 @@ test("les six écritures du rail mobile money déclenchent le contrôle", () => 
   }
 });
 
-test("les flux qui ne désignent pas un numéro tiers ne sont pas concernés", () => {
+test("seuls le dépôt et le retrait mobile money sont concernés", () => {
   const horsPerimetre = [
     { action: "send", funds: "paynoval", destination: "paynoval" },
-    { action: "withdraw", funds: "paynoval", destination: "mobilemoney" },
+    // Un TRANSFERT vers un tiers : la question de sécurité le protège.
+    { action: "send", funds: "paynoval", destination: "mobilemoney" },
+    { txType: "TRANSFER", funds: "paynoval", destination: "mobilemoney" },
     { action: "deposit", funds: "card", destination: "paynoval" },
   ];
 
   for (const cas of horsPerimetre) {
-    assert.equal(
-      concerneCeControle(cas),
-      false,
-      `${cas.action} ${cas.funds}→${cas.destination} ne devrait pas être ` +
-        "contrôlé : un retrait ENVOIE vers un numéro sans en débiter le titulaire."
-    );
+    assert.equal(concerneCeControle(cas), false, JSON.stringify(cas));
   }
+});
+
+test("⚠️ 2026-10-08 : un RETRAIT mobile money part vers un numéro prouvé du titulaire", () => {
+  /**
+   * Un retrait n'exige plus de question de sécurité (`exigeQuestionDeSecurite`).
+   * Sans ce contrôle, déclarer « retrait » enverrait vers n'importe quel
+   * numéro, sans question et au barème du retrait.
+   */
+  for (const cas of [
+    { action: "withdraw", funds: "paynoval", destination: "mobilemoney" },
+    { txType: "WITHDRAW", funds: "paynoval", destination: "mobile_money" },
+    { action: "send", txType: "WITHDRAW", funds: "paynoval", destination: "wave" },
+  ]) {
+    assert.equal(concerneCeControle(cas), true, JSON.stringify(cas));
+  }
+});
+
+test("un dépôt déclaré par `txType` seul est contrôlé aussi", () => {
+  assert.equal(concerneCeControle({ txType: "DEPOSIT", funds: "mobilemoney", destination: "paynoval" }), true);
 });
 
 test("le rail se normalise, l'inconnu reste inconnu", () => {

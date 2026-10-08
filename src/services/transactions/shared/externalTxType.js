@@ -63,4 +63,23 @@ function resoudreTypeExterne(body = {}) {
   return null;
 }
 
-module.exports = { resoudreTypeExterne, TYPES_EXTERNES };
+/**
+ * La question de sécurité d'un envoi sortant — 2026-10-08.
+ *
+ * Elle protège un TRANSFERT vers le mobile money ou la carte d'un tiers. Un
+ * RETRAIT va vers le propre instrument du titulaire : lui demander une question
+ * dont il connaît lui-même la réponse n'ajoute rien, et ce n'est fait par aucun
+ * service comparable (Wave, Wise, Revolut, N26). L'autorisation d'un retrait est
+ * la ré-authentification sur l'appareil et sa signature (SCA), vérifiée avant.
+ *
+ * Fermé par défaut : tout type autre que WITHDRAW exige la question, y compris
+ * un type inconnu.
+ *
+ * @param {string|null} type sortie de `resoudreTypeExterne`.
+ * @returns {boolean}
+ */
+function exigeQuestionDeSecurite(type) {
+  return String(type || "").trim().toUpperCase() !== "WITHDRAW";
+}
+
+module.exports = { resoudreTypeExterne, exigeQuestionDeSecurite, TYPES_EXTERNES };

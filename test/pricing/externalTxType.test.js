@@ -98,3 +98,38 @@ test("le handler REFUSE en 400 au lieu de deviner", () => {
     "Le refus explicite en 400 a disparu."
   );
 });
+
+/* ── La question de sécurité d'un envoi sortant (2026-10-08) ──────────────── */
+
+const { exigeQuestionDeSecurite } = require("../../src/services/transactions/shared/externalTxType");
+
+test("un retrait vers soi ne demande pas de question ; tout le reste, si", () => {
+  assert.equal(exigeQuestionDeSecurite("WITHDRAW"), false);
+  assert.equal(exigeQuestionDeSecurite("withdraw"), false);
+  assert.equal(exigeQuestionDeSecurite("TRANSFER"), true);
+  assert.equal(exigeQuestionDeSecurite("DEPOSIT"), true);
+  // Fermé par défaut : un type absent ou inconnu exige la question.
+  assert.equal(exigeQuestionDeSecurite(null), true);
+  assert.equal(exigeQuestionDeSecurite("PAYOUT"), true);
+});
+
+test("le payout sortant n'exige la question que si le type le demande, et n'emprunte jamais l'empreinte d'une réponse vide", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const src = fs.readFileSync(
+    path.join(__dirname, "../../src/services/transactions/handlers/initiateExternalTransactions.js"),
+    "utf8"
+  );
+  const start = src.indexOf("async function initiateOutboundExternal(");
+  const block = src.slice(start, start + 30000);
+
+  assert.match(block, /exigeQuestionDeSecurite\(resoudreTypeExterne\(body\)\)/);
+  assert.match(block, /if \(questionExigee && !avecQuestion\)/);
+  assert.match(block, /avecQuestion \? hashSecurityAnswer\(aRaw\) : null/);
+
+  const confirm = fs.readFileSync(
+    path.join(__dirname, "../../src/services/transactions/handlers/confirmTransaction.js"),
+    "utf8"
+  );
+  assert.match(confirm, /SECURITY_CHALLENGE_ABSENT/);
+});

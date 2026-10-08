@@ -615,6 +615,18 @@ function securityAnswerMatches(tx, provided) {
     String(tx.securityAnswerHash || "") || String(tx.securityCode || "");
 
   if (!storedHash) {
+    /**
+     * Un retrait vers son propre instrument ne porte pas de question
+     * (`exigeQuestionDeSecurite`, 2026-10-08) : il n'y a rien à confirmer par
+     * réponse. Un refus métier explicite, pas une panne (500) — et aucune
+     * réponse, même vide, n'est jamais acceptée à la place d'une empreinte.
+     */
+    if (isOutboundExternalPayout(tx)) {
+      throw createError(409, "Cette opération ne se confirme pas par une réponse de sécurité.", {
+        code: "SECURITY_CHALLENGE_ABSENT",
+      });
+    }
+
     throw createError(500, "securityAnswerHash manquant sur la transaction");
   }
 

@@ -4,7 +4,7 @@
 const createError = require("http-errors");
 const { USER_MODE_FIELDS, resolveUserMode } = require("../../../utils/accountMode");
 const { getTxMetrics } = require("../../txMetrics");
-const { resoudreTypeExterne } = require("../shared/externalTxType");
+const { resoudreTypeExterne, exigeQuestionDeSecurite } = require("../shared/externalTxType");
 
 const runtime = require("../shared/runtime");
 const { openStepUpReview } = require("../../risk/stepUpReview");
@@ -587,8 +587,21 @@ async function initiateOutboundExternal(req, res, next) {
     const q = sanitize(securityQuestion || question || "");
     const aRaw = sanitize(securityAnswer || securityCode || "");
 
-    if (!q || !aRaw) {
+    /**
+     * Exigée pour un transfert vers un tiers, pas pour un retrait vers soi
+     * (`exigeQuestionDeSecurite`). Un retrait qui en porte une la garde ; un
+     * retrait sans question n'a ni question ni empreinte — jamais l'empreinte
+     * d'une chaîne vide, qu'une réponse vide suffirait à reproduire.
+     */
+    const questionExigee = exigeQuestionDeSecurite(resoudreTypeExterne(body));
+    const avecQuestion = Boolean(q && aRaw);
+
+    if (questionExigee && !avecQuestion) {
       throw createError(400, "securityQuestion + securityAnswer requis");
+    }
+
+    if (!questionExigee && (q || aRaw) && !avecQuestion) {
+      throw createError(400, "securityQuestion et securityAnswer vont ensemble");
     }
 
     const senderId = String(req.user?.id || req.user?._id || "").trim();
@@ -731,7 +744,7 @@ async function initiateOutboundExternal(req, res, next) {
     });
 
     const reference = sanitize(body.reference) || (await generateTransactionRef());
-    const securityAnswerHash = hashSecurityAnswer(aRaw);
+    const securityAnswerHash = avecQuestion ? hashSecurityAnswer(aRaw) : null;
     const amlSnapshot = req.aml || null;
     const treasurySeed = resolveFeesTreasurySeed();
     const autoCancelFields = buildAutoCancelFields("pending");

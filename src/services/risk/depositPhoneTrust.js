@@ -42,6 +42,7 @@
  */
 
 const { getTxConn } = require("../../config/db");
+const { resoudreTypeExterne } = require("../transactions/shared/externalTxType");
 const logger = require("../../utils/logger");
 const {
   toE164,
@@ -113,14 +114,35 @@ function railNormalise(v) {
   return s;
 }
 
-function concerneCeControle({ action, funds, destination }) {
-  const a = String(action || "send").toLowerCase().trim();
+/**
+ * Les opérations dont le numéro mobile money doit appartenir au TITULAIRE.
+ *
+ *   DÉPÔT    mobile money → PayNoval : on ENCAISSE sur ce numéro. Sans preuve,
+ *            on prélèverait le portefeuille de quelqu'un d'autre.
+ *   RETRAIT  PayNoval → mobile money (2026-10-08) : un retrait va vers SON
+ *            propre numéro — c'est ce qui le distingue d'un transfert (barème,
+ *            plafonds, et depuis ce jour aucune question de sécurité :
+ *            `exigeQuestionDeSecurite`). Sans cette preuve, déclarer
+ *            « retrait » suffirait à envoyer vers un tiers sans question et au
+ *            barème du retrait. Vers un tiers, c'est un TRANSFERT.
+ *
+ * Le type se lit sur `action` ET sur `txType` (`resoudreTypeExterne`) : l'un
+ * ou l'autre suffit à déclencher le contrôle. Ne regarder que `action`
+ * laissait passer un appelant qui ne déclarait que `txType: "DEPOSIT"`.
+ */
+function concerneCeControle(charge = {}) {
+  const action = String(charge.action || "").toLowerCase().trim();
+  const type = resoudreTypeExterne(charge);
+  const funds = railNormalise(charge.funds);
+  const destination = railNormalise(charge.destination);
 
-  return (
-    a === "deposit" &&
-    railNormalise(funds) === "mobilemoney" &&
-    railNormalise(destination) === "paynoval"
-  );
+  const depot = action === "deposit" || type === "DEPOSIT";
+  const retrait = action === "withdraw" || type === "WITHDRAW";
+
+  if (depot && funds === "mobilemoney" && destination === "paynoval") return true;
+  if (retrait && funds === "paynoval" && destination === "mobilemoney") return true;
+
+  return false;
 }
 
 /** Lit l'état de confiance. Lève en cas d'indisponibilité — jamais `false`. */
@@ -213,7 +235,7 @@ async function enforceDepositPhoneTrust({ userId, user, body }) {
       ? "Vérification de ce numéro temporairement bloquée. Réessaie plus tard."
       : enAttente
       ? "Vérification déjà en cours pour ce numéro. Saisis le code reçu par SMS."
-      : "Ce numéro n'est pas vérifié. Vérifie-le par SMS avant de déposer.",
+      : "Ce numéro n'est pas vérifié. Vérifie-le par SMS avant de l'utiliser.",
     bloque ? "PHONE_VERIFICATION_BLOCKED" : enAttente
       ? "PHONE_VERIFICATION_PENDING"
       : "PHONE_NOT_TRUSTED",
