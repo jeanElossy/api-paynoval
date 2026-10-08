@@ -75,25 +75,41 @@ function validateTransactionStatusChange(current, next) {
 }
 
 /**
- * Détection basique de fraude / doublon:
- * - Même expéditeur, même destinataire, même montant, même devise, dans une fenêtre courte.
+ * Détection basique de doublon / fraude : même INITIATEUR, même flow, même
+ * montant, même devise dans une fenêtre courte (2 min) — et, pour un virement
+ * interne, même destinataire.
  *
- * ✅ FIX IMPORTANT:
- * - receiver peut être un ObjectId OU un email.
- * - Si email => on filtre sur recipientEmail (string), PAS sur receiver (ObjectId).
+ * ⚠️ CORRIGÉ LE 2026-10-08. La version précédente exigeait un `sender`
+ * ObjectId et un `receiverEmail` au format e-mail :
+ *   - un DÉPÔT lui passait le numéro du payeur externe comme `sender` :
+ *     « Sender invalide pour anti-fraude » à CHAQUE dépôt ;
+ *   - un RETRAIT ou un transfert vers mobile money lui passait le numéro du
+ *     bénéficiaire comme `receiverEmail` : « receiverEmail invalide » à chaque
+ *     fois.
+ * Aucune opération externe ne pouvait aboutir. L'initiateur est désormais
+ * toujours le COMPTE PayNoval à l'origine (l'expéditeur d'un envoi, le
+ * titulaire d'un dépôt) ; la contrepartie externe (numéro, carte) n'est pas un
+ * champ interrogeable de la transaction, le flow la remplace. Le double appui
+ * reste couvert par la clé d'idempotence (`middleware/idempotency.js`).
+ *
+ * Échoue en FERMETURE sur une entrée illisible (règle B.2).
  */
 async function detectBasicFraud({
+  initiator,
   sender,
   receiver,
   receiverEmail,
+  flow,
   amount,
   currency,
   windowMinutes = 2,
+  Model = null,
 }) {
   const since = new Date(Date.now() - windowMinutes * 60 * 1000);
+  const initiatorId = String(initiator || sender || '').trim();
 
-  if (!sender || !mongoose.Types.ObjectId.isValid(String(sender))) {
-    throw createError(400, 'Sender invalide pour anti-fraude');
+  if (!initiatorId || !mongoose.Types.ObjectId.isValid(initiatorId)) {
+    throw createError(400, 'Initiateur invalide pour anti-fraude');
   }
 
   const amt = Number(amount);
@@ -102,34 +118,27 @@ async function detectBasicFraud({
   }
 
   const query = {
-    sender: String(sender),
+    $or: [{ userId: initiatorId }, { sender: initiatorId }],
     senderCurrencySymbol: String(currency || '').trim(),
     amount: dec2(amt), // match exact 2 décimales (cohérent avec Decimal128)
     createdAt: { $gte: since },
   };
 
-  // Priorité: receiverEmail
+  if (flow) query.flow = String(flow);
+
   const email = receiverEmail ? String(receiverEmail).trim().toLowerCase() : null;
 
-  if (email) {
-    if (!isEmailLike(email)) {
-      throw createError(400, 'receiverEmail invalide pour anti-fraude');
-    }
+  if (email && isEmailLike(email)) {
     query.recipientEmail = email;
-  } else if (receiver) {
-    const r = String(receiver).trim();
-    if (mongoose.Types.ObjectId.isValid(r)) {
-      query.receiver = r;
-    } else if (isEmailLike(r)) {
-      query.recipientEmail = r.toLowerCase();
-    } else {
-      throw createError(400, 'receiver invalide pour anti-fraude');
-    }
-  } else {
-    throw createError(400, 'receiver ou receiverEmail requis pour anti-fraude');
+  } else if (receiver && mongoose.Types.ObjectId.isValid(String(receiver).trim())) {
+    query.receiver = String(receiver).trim();
+  } else if (!flow) {
+    // Sans contrepartie NI flow, la requête comparerait tout et n'importe quoi.
+    throw createError(400, 'Contrepartie ou flow requis pour anti-fraude');
   }
 
-  const tx = await getTransactionModel().findOne(query).sort({ createdAt: -1 }).lean();
+  const TransactionModel = Model || getTransactionModel();
+  const tx = await TransactionModel.findOne(query).sort({ createdAt: -1 }).lean();
   if (tx) {
     throw createError(429, 'Transaction similaire détectée récemment (possible doublon/fraude)');
   }

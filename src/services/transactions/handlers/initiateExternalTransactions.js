@@ -695,13 +695,8 @@ async function initiateOutboundExternal(req, res, next) {
     }
 
     await validationService.detectBasicFraud({
-      sender: senderId,
-      receiverEmail:
-        pickExternalRecipientEmail(body) ||
-        externalRecipientMeta.phoneNumber ||
-        externalRecipientMeta.iban ||
-        externalRecipientMeta.maskedCardNumber ||
-        "",
+      initiator: senderId,
+      flow,
       amount: amt,
       currency: currencySourceISO,
     });
@@ -1271,15 +1266,10 @@ async function initiateInboundExternal(req, res, next) {
       throw createError(400, "Devise destination introuvable");
     }
 
+    // The initiator of a deposit is the account holder; the payer is external.
     await validationService.detectBasicFraud({
-      sender:
-        body.phoneNumber ||
-        body.fromPhone ||
-        body.iban ||
-        body.cardHolder ||
-        body.accountHolder ||
-        "external",
-      receiverEmail: receiverUser.email,
+      initiator: receiverId,
+      flow,
       amount: amt,
       currency: currencySourceISO,
     });

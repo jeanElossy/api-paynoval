@@ -416,8 +416,9 @@ async function initiateInternal(req, res, next) {
     await validationService.validateTransactionAmount({ amount: amt });
 
     await validationService.detectBasicFraud({
-      sender: senderId,
+      initiator: senderId,
       receiverEmail: cleanEmail,
+      flow: "PAYNOVAL_INTERNAL_TRANSFER",
       amount: amt,
       currency:
         body.senderCurrencyCode ||
