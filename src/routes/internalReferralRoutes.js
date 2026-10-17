@@ -14,6 +14,7 @@
  */
 
 const express = require("express");
+const { serviceControlGuard, describeFixed } = require("../middleware/serviceControl");
 const router = express.Router();
 
 const requireInternalAuth = require("../middleware/internalAuth");
@@ -32,7 +33,12 @@ const {
 router.post("/activity", requireInternalAuth("principal"), getActivity);
 
 // POST /api/v1/internal/referral/transfer-bonus
-router.post("/transfer-bonus", requireInternalAuth("principal"), transferBonus);
+router.post(
+  "/transfer-bonus",
+  requireInternalAuth("principal"),
+  serviceControlGuard({ phase: "initiate", describe: describeFixed(["referral.payout"], { userField: null }), label: "referral.transfer_bonus" }),
+  transferBonus
+);
 
 // POST /api/v1/internal/referral/clawback — reprise d'un bonus, montants relus au registre
 router.post("/clawback", requireInternalAuth("principal"), clawbackBonus);

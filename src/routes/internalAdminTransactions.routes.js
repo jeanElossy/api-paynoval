@@ -3,6 +3,7 @@
 "use strict";
 
 const express = require("express");
+const { getInflight } = require("../controllers/internalServiceControl.controller");
 const createError = require("http-errors");
 
 const {
@@ -100,6 +101,12 @@ router.get(
   requireInternalToken,
   getInternalDashboardStats
 );
+
+/**
+ * Service-control drain measure (docs/architecture/service-control.md §8):
+ * in-flight counts by flow and provider — numbers only.
+ */
+router.get("/internal/service-control/inflight", requireInternalToken, getInflight);
 
 /**
  * Grand livre et analytiques de trésorerie (frais, marge de change, parrainage).

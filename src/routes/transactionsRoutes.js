@@ -25,6 +25,7 @@
 // const asyncHandler = require("express-async-handler");
 const { transactionInsights } = require("../services/transactions/handlers/insights");
 const { requireTransactionSignature } = require("../middleware/requireTransactionSignature");
+const { serviceControlGuard, describeInitiate, describeConfirm } = require("../middleware/serviceControl");
 
 // const {
 //   listInternal,
@@ -1290,6 +1291,9 @@ router.post(
   idempotency(),
   normalizeProviderRails,
   normalizeInitiateBody,
+  // Service control (docs/architecture/service-control.md): a 503 here is
+  // never frozen by the idempotency registry — the same key replays once.
+  serviceControlGuard({ phase: "initiate", describe: describeInitiate, label: "transactions.initiate" }),
   [
     amountValidator,
     railFundsValidator,
@@ -1433,6 +1437,9 @@ router.post(
   idempotency({ required: false }),
   normalizeProviderRails,
   normalizeConfirmBody,
+  // Confirm = finish an engaged operation: open in READ_ONLY (drain), closed
+  // in MAINTENANCE / LOCKDOWN. Judged on the STORED transaction.
+  serviceControlGuard({ phase: "confirm", describe: describeConfirm, label: "transactions.confirm" }),
   [
     txIdValidator,
 

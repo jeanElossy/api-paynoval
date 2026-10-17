@@ -1,6 +1,7 @@
 "use strict";
 
 const express = require("express");
+const { serviceControlGuard, describeFixed } = require("../middleware/serviceControl");
 const {
   extractInternalToken,
   matchesAnyToken,
@@ -78,6 +79,7 @@ router.post(
   body("cagnotteName").optional().isString().trim().isLength({ max: 120 }),
 
   checkValidation,
+  serviceControlGuard({ phase: "initiate", describe: describeFixed(["cagnotte.close"], { userField: "initiatedByUserId" }), label: "cagnotte.closure_fees.settle" }),
   settleCagnotteClosureFees
 );
 
