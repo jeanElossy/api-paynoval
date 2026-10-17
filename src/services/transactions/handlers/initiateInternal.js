@@ -745,6 +745,8 @@ async function initiateInternal(req, res, next) {
 
       flow: "PAYNOVAL_INTERNAL_TRANSFER",
       operationKind: "transfer",
+      // PayNoval → PayNoval is always a transfer to another account.
+      operationType: "TRANSFER",
       initiatedBy: "user",
       context: "paynoval_internal_transfer",
       contextId: null,

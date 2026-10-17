@@ -126,8 +126,12 @@ for (const rel of FICHIERS_AML) {
 test("le plafond par transaction survit au retrait du faux score", () => {
   const src = sansCommentaires(lire("src/middleware/aml.js"));
 
+  // Depuis le 2026-10-17 : `limitService.checkLimit` → `evaluateLimit`, qui
+  // refuse au-delà du plafond par opération (test/limits/limitPolicy.test.js).
+  assert.match(src, /getLimitService\(\)\.checkLimit\(/);
+  assert.match(src, /if \(!limitCheck\.allowed\)/);
   assert.match(src, /AML_SINGLE_LIMIT/);
-  assert.match(src, /amount\s*>\s*singleTxLimit/);
+  assert.match(lire("src/services/limits/limitPolicy.js"), /value\s*>\s*limit\.perTransaction/);
 });
 
 /**

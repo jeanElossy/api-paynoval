@@ -180,6 +180,21 @@ const transactionSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * Opération DÉCLARÉE à l'initiation (2026-10-17) : dépôt, retrait vers soi
+     * ou transfert à un tiers. Un envoi vers mobile money ou carte peut être
+     * l'un OU l'autre et le flow ne le dit pas ; les plafonds par opération
+     * (`services/limits/`) en dépendent. Posé une fois, immuable. `null` sur
+     * l'historique antérieur — `limitUsage.operationsOfTransaction` le traite
+     * sans rien supposer.
+     */
+    operationType: {
+      type: String,
+      enum: ["DEPOSIT", "WITHDRAW", "TRANSFER", null],
+      default: null,
+      immutable: true,
+    },
+
     initiatedBy: {
       type: String,
       enum: ["user", "system", "admin", "job", null],

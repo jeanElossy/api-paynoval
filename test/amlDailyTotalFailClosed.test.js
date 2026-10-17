@@ -27,44 +27,53 @@ const withoutComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^
 
 const CODE = withoutComments(ACTIVE);
 
-function dailyLimitSection() {
+/**
+ * Depuis le 2026-10-17, le plafond se lit par `services/limits/limitService`
+ * (par opération, 24 h et 30 jours). Les garanties de ce fichier valent pour
+ * le nouveau bloc : un cumul illisible REFUSE (503), avant toute décision.
+ */
+function limitSection() {
+  const start = CODE.indexOf("getLimitService().checkLimit(");
+  const end = CODE.indexOf("if (!limitCheck.allowed)", start);
+  assert.ok(start > 0 && end > start, "le contrôle des plafonds est introuvable dans le bloc actif");
+  return CODE.slice(start, end);
+}
+
+function velocitySection() {
   const start = CODE.indexOf("getUserTransactionsStats(");
-  const end = CODE.indexOf("AML_DAILY_LIMIT", start);
-  assert.ok(start > 0 && end > start, "le calcul du cumul journalier est introuvable dans le bloc actif");
+  const end = CODE.indexOf("const userQuestions", start);
+  assert.ok(start > 0 && end > start, "la lecture des statistiques de vélocité est introuvable");
   return CODE.slice(start, end);
 }
 
 test("un cumul illisible ne retombe jamais à zéro", () => {
-  const section = dailyLimitSection();
-
-  assert.doesNotMatch(
-    section,
-    /dailyTotal\)\)\s*\?[\s\S]{0,80}:\s*0\s*;/,
-    "le repli `dailyTotal … : 0` est revenu : un cumul illisible passerait tous les plafonds"
-  );
-  // Le cumul lui-même : `amount` est déjà validé en fermeture par `resolveAmlAmount`.
-  assert.doesNotMatch(
-    section,
-    /dailyTotal\s*=[^;]*(?:\?\?|\|\|)\s*0\b/,
-    "un repli à zéro sur le cumul journalier est revenu"
-  );
+  for (const section of [limitSection(), velocitySection()]) {
+    assert.doesNotMatch(section, /(?:\?\?|\|\|)\s*0\b/, "un repli à zéro est revenu : un cumul illisible passerait les plafonds");
+  }
+  // Et le calcul lui-même lève sur un montant illisible (voir test/limits/limitUsage.test.js).
+  const usage = fs.readFileSync(path.join(__dirname, "..", "src", "services", "limits", "limitUsage.js"), "utf8");
+  assert.match(usage, /LIMIT_USAGE_UNREADABLE/);
 });
 
 test("stats indisponibles ⇒ 503 AML_STATS_UNAVAILABLE, AVANT le contrôle du plafond", () => {
-  const section = dailyLimitSection();
+  const section = limitSection();
+  const catchAt = section.indexOf("catch (limitErr)");
+  assert.ok(catchAt > 0, "l'échec de lecture du cumul n'est pas intercepté");
+  const refusal = section.indexOf("AML_STATS_UNAVAILABLE", catchAt);
+  assert.ok(refusal > 0, "aucun refus nommé quand le cumul est illisible");
+  assert.match(section.slice(catchAt), /res\.status\(503\)/, "le refus doit être un 503 réessayable");
 
-  const refusal = section.indexOf("AML_STATS_UNAVAILABLE");
-  assert.ok(refusal > 0, "aucun refus nommé quand les statistiques sont illisibles");
-  assert.match(section, /res\.status\(503\)/, "le refus doit être un 503 réessayable, pas un 200 ni un 403");
-  assert.match(section, /statsError\s*\|\|\s*!Number\.isFinite\(dailyTotal\)/, "l'erreur ET le cumul non numérique doivent refuser");
-
-  // Le refus doit précéder la comparaison au plafond : sinon un cumul NaN ne
-  // déclencherait jamais `futureTotal > dailyLimit` (NaN > x est faux).
-  const comparison = section.indexOf("futureTotal > dailyLimit");
-  assert.ok(comparison < 0 || refusal < comparison, "le refus arrive après la comparaison au plafond");
+  const velocity = velocitySection();
+  assert.match(velocity, /statsError\s*\|\|\s*!stats/, "les statistiques de vélocité illisibles doivent refuser");
+  assert.match(velocity, /AML_STATS_UNAVAILABLE/);
 });
 
 test("le catch des statistiques ne laisse plus le contrôle continuer", () => {
-  const section = dailyLimitSection();
-  assert.doesNotMatch(section, /SAUTÉS/, "le journal « contrôles SAUTÉS » signale le retour du repli ouvert");
+  for (const section of [limitSection(), velocitySection()]) {
+    assert.doesNotMatch(section, /SAUTÉS/, "le journal « contrôles SAUTÉS » signale le retour du repli ouvert");
+  }
+  // Dans le catch du cumul, chaque branche se termine par un `return res.status(...)`.
+  const section = limitSection();
+  const body = section.slice(section.indexOf("catch (limitErr)"));
+  assert.equal((body.match(/return res\.status\(/g) || []).length, 2, "une branche du catch laisse passer l'opération");
 });

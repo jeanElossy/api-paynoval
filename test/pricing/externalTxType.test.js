@@ -123,7 +123,9 @@ test("le payout sortant n'exige la question que si le type le demande, et n'empr
   const start = src.indexOf("async function initiateOutboundExternal(");
   const block = src.slice(start, start + 30000);
 
-  assert.match(block, /exigeQuestionDeSecurite\(resoudreTypeExterne\(body\)\)/);
+  // The declared type is checked against the direction first, then decides the question.
+  assert.match(block, /const operationType = typeOperationPourSens\(resoudreTypeExterne\(body\), "outbound"\)/);
+  assert.match(block, /exigeQuestionDeSecurite\(operationType\)/);
   assert.match(block, /if \(questionExigee && !avecQuestion\)/);
   assert.match(block, /avecQuestion \? hashSecurityAnswer\(aRaw\) : null/);
 

@@ -4,7 +4,7 @@
 const createError = require("http-errors");
 const { USER_MODE_FIELDS, resolveUserMode } = require("../../../utils/accountMode");
 const { getTxMetrics } = require("../../txMetrics");
-const { resoudreTypeExterne, exigeQuestionDeSecurite } = require("../shared/externalTxType");
+const { resoudreTypeExterne, exigeQuestionDeSecurite, typeOperationPourSens } = require("../shared/externalTxType");
 
 const runtime = require("../shared/runtime");
 const { openStepUpReview } = require("../../risk/stepUpReview");
@@ -587,7 +587,9 @@ async function initiateOutboundExternal(req, res, next) {
      * retrait sans question n'a ni question ni empreinte — jamais l'empreinte
      * d'une chaîne vide, qu'une réponse vide suffirait à reproduire.
      */
-    const questionExigee = exigeQuestionDeSecurite(resoudreTypeExterne(body));
+    // Withdrawal to self or transfer to a third party — anything else is refused.
+    const operationType = typeOperationPourSens(resoudreTypeExterne(body), "outbound");
+    const questionExigee = exigeQuestionDeSecurite(operationType);
     const avecQuestion = Boolean(q && aRaw);
 
     if (questionExigee && !avecQuestion) {
@@ -817,6 +819,8 @@ async function initiateOutboundExternal(req, res, next) {
 
             flow,
             operationKind: "transfer",
+            // Retrait vers soi ou transfert à un tiers : déclaré, contrôlé plus haut.
+            operationType,
             initiatedBy: "user",
             context: "external_payout",
             contextId: null,
@@ -1164,6 +1168,9 @@ async function initiateInboundExternal(req, res, next) {
       throw createError(400, "Flow collection externe invalide");
     }
 
+    // A collection is a deposit; any other declared type is refused.
+    const operationType = typeOperationPourSens(resoudreTypeExterne(body), "inbound");
+
     const { amount, description = "", country, metadata = {}, meta = {} } = body;
 
     if (description && description.length > MAX_DESC_LENGTH) {
@@ -1388,6 +1395,7 @@ async function initiateInboundExternal(req, res, next) {
 
             flow,
             operationKind: "transfer",
+            operationType,
             initiatedBy: "user",
             context: "external_collection",
             contextId: null,

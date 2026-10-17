@@ -193,6 +193,12 @@ function registerTransactionModels(conn) {
   require("../models/CollectionIntent")(conn);
 
   /**
+   * Politique de plafonds versionnée (2026-10-17) : lue à chaque opération par
+   * l'AML ; son index unique partiel garantit UNE version active.
+   */
+  require("../models/LimitPolicyVersion")(conn);
+
+  /**
    * ⚠️ Ces deux modèles étaient chargés dans des `try {} catch {}` VIDES.
    * Corrigé le 2026-09-02.
    *

@@ -17,11 +17,13 @@ const {
 } = require("../tools/currency");
 
 const {
-  getDailyLimit,
-  getSingleTxLimit,
   normalizeAmlOperation,
   AmlLimitUnavailableError,
 } = require("../tools/amlLimits");
+
+/** Plafonds par opération, 24 h et 30 jours — `services/limits/`. */
+const { getLimitService } = require("../services/limits/limitService");
+const { LimitError, describeLimitRefusal } = require("../services/limits/limitPolicy");
 
 /**
  * Moteur de risque : liste noire dynamique, vélocité Redis, score déterministe.
@@ -1132,76 +1134,55 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    const singleTxLimit = getSingleTxLimit(amlRail, currencyCode, amlOperation);
-
-    if (amount > singleTxLimit) {
-      logger.warn("[AML] Plafond single dépassé", {
-        provider,
-        userId,
-        amount,
-        max: singleTxLimit,
-      });
-
-      await logTransaction({
-        userId,
-        type: "initiate",
-        provider,
-        amount,
-        currency: currencyCode,
-        toEmail,
-        details: maskSensitive(body),
-        flagged: true,
-        flagReason: `Plafond single dépassé (${amount} > ${singleTxLimit} ${currencyCode})`,
-        ip: req.ip,
-      });
-
-      return res.status(403).json({
-        success: false,
-        error: `Plafond par transaction: ${singleTxLimit} ${currencySymbol}.`,
-        code: "AML_SINGLE_LIMIT",
-        details: {
-          max: singleTxLimit,
-          currencyCode,
-          currencySymbol,
-          provider,
-        },
-      });
-    }
-
-    const dailyLimit = getDailyLimit(amlRail, currencyCode, amlOperation);
-
     /**
-     * ÉCHEC EN FERMETURE — décision du 2026-09-15.
+     * PLAFONDS — PAR OPÉRATION, 24 H ET 30 JOURS GLISSANTS (2026-10-17).
      *
-     * Avant : si l'agrégation échouait, `stats` restait `null`, `dailyTotal`
-     * valait 0, et le plafond JOURNALIER — avec les contrôles de volume et de
-     * fractionnement — était sauté en silence. Une panne Mongo levait une
-     * frontière de conformité ; c'était un repli ouvert jamais tranché.
+     * Ce que font Wise, Revolut et PayPal : un plafond par opération (dépôt,
+     * retrait, transfert), par rail et par devise, et deux cumuls glissants —
+     * calculés sur les opérations LANCÉES par le compte, hors opérations
+     * échouées, annulées ou remboursées (`services/limits/`). Le refus dit
+     * QUEL plafond, ce qui RESTE et QUAND il se libère : exactement ce que
+     * l'écran « Mes plafonds » affiche (`GET /api/v1/limits`).
      *
-     * Tranché comme le font les établissements de paiement régulés : un
-     * plafond qu'on ne sait pas vérifier n'autorise rien (règle B.2). Le
-     * client reçoit un 503 réessayable, aucune opération n'a lieu. Le coût en
-     * disponibilité est faible : la base qui ne sait pas agréger ne saurait
-     * pas davantage régler l'opération.
+     * Remplace les deux contrôles précédents, qui comptaient l'argent REÇU et
+     * les opérations échouées dans le cumul « envoyé aujourd'hui », et
+     * mélangeaient dépôts, retraits et transferts d'un même rail.
+     *
+     * ÉCHEC EN FERMETURE (décision du 2026-09-15, conservée) : un cumul qu'on
+     * ne sait pas lire n'autorise rien — 503 réessayable, aucune opération.
      */
-    let stats = null;
-    let statsError = null;
+    let limitCheck = null;
 
     try {
-      stats = await getUserTransactionsStats(userId, amlRail, currencyCode);
-    } catch (err) {
-      statsError = err;
-    }
+      limitCheck = await getLimitService().checkLimit({
+        userId,
+        operation: amlOperation,
+        rail: amlRail,
+        currency: currencyCode,
+        amount,
+      });
+    } catch (limitErr) {
+      if (limitErr instanceof LimitError) {
+        logger.warn("[AML] Aucun plafond défini — opération REFUSÉE", {
+          provider,
+          userId,
+          code: limitErr.code,
+          details: limitErr.details,
+        });
 
-    const dailyTotal = Number(stats?.dailyTotal);
+        return res.status(403).json({
+          success: false,
+          error: "Opération non autorisée : aucun plafond n'est défini pour cette opération.",
+          code: limitErr.code,
+          details: limitErr.details,
+        });
+      }
 
-    if (statsError || !Number.isFinite(dailyTotal) || dailyTotal < 0) {
-      logger.error("[AML] Cumul journalier ILLISIBLE — opération REFUSÉE (échec en fermeture)", {
-        error: statsError ? statsError?.message || String(statsError) : "dailyTotal illisible",
+      logger.error("[AML] Cumul des plafonds ILLISIBLE — opération REFUSÉE (échec en fermeture)", {
+        error: limitErr?.message || String(limitErr),
         provider,
         userId,
-        dailyLimit,
-        consequence: "aucun paiement ne passe tant que le cumul du jour ne se lit pas",
+        consequence: "aucun paiement ne passe tant que le cumul ne se lit pas",
       });
 
       return res.status(503).json({
@@ -1214,15 +1195,20 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    const futureTotal = dailyTotal + (amount || 0);
+    const singleTxLimit = limitCheck.view.perTransaction;
+    const dailyLimit = limitCheck.view.daily.limit;
 
-    if (futureTotal > dailyLimit) {
-      logger.warn("[AML] Plafond journalier dépassé", {
+    if (!limitCheck.allowed) {
+      const refusal = describeLimitRefusal(limitCheck, currencySymbol);
+
+      logger.warn("[AML] Plafond atteint", {
         provider,
         userId,
-        dailyTotal,
         amount,
-        dailyLimit,
+        code: limitCheck.code,
+        limit: limitCheck.limit,
+        remaining: limitCheck.remaining,
+        policyVersion: limitCheck.policyVersion,
       });
 
       await logTransaction({
@@ -1234,21 +1220,58 @@ module.exports = async function amlMiddleware(req, res, next) {
         toEmail,
         details: maskSensitive(body),
         flagged: true,
-        flagReason: `Plafond journalier dépassé (${dailyTotal} + ${amount} > ${dailyLimit} ${currencyCode})`,
+        flagReason: `${limitCheck.code} (${amount} ; plafond ${limitCheck.limit}, reste ${limitCheck.remaining} ${currencyCode})`,
         ip: req.ip,
       });
 
       return res.status(403).json({
         success: false,
-        error: `Plafond journalier atteint (${dailyLimit} ${currencySymbol}). Réessayez demain.`,
-        code: "AML_DAILY_LIMIT",
+        error: refusal,
+        code: limitCheck.code,
+        // Codes historiques, lus par les applications déjà installées.
+        legacyCode: limitCheck.code === "LIMIT_PER_TRANSACTION" ? "AML_SINGLE_LIMIT" : "AML_DAILY_LIMIT",
         details: {
-          max: dailyLimit,
+          operation: limitCheck.view.operation,
+          rail: limitCheck.view.rail,
           currencyCode,
           currencySymbol,
+          limit: limitCheck.limit,
+          remaining: limitCheck.remaining,
+          availableNow: limitCheck.view.availableNow,
+          releasesAt: limitCheck.releasesAt,
+          max: limitCheck.limit,
           provider,
-          dailyTotal,
         },
+      });
+    }
+
+    /**
+     * Signaux de vélocité (opérations sur la dernière heure, même destinataire
+     * en rafale). Même règle : illisibles ⇒ refus, jamais « zéro ».
+     */
+    let stats = null;
+    let statsError = null;
+
+    try {
+      stats = await getUserTransactionsStats(userId, amlRail, currencyCode);
+    } catch (err) {
+      statsError = err;
+    }
+
+    if (statsError || !stats) {
+      logger.error("[AML] Statistiques de vélocité ILLISIBLES — opération REFUSÉE (échec en fermeture)", {
+        error: statsError ? statsError?.message || String(statsError) : "stats absentes",
+        provider,
+        userId,
+      });
+
+      return res.status(503).json({
+        success: false,
+        error:
+          "Contrôle des plafonds momentanément indisponible : aucune opération n'a été effectuée. " +
+          "Réessayez dans quelques instants.",
+        code: "AML_STATS_UNAVAILABLE",
+        details: { retryable: true },
       });
     }
 
@@ -1496,7 +1519,7 @@ module.exports = async function amlMiddleware(req, res, next) {
 
     const riskVerdict = riskEngine.computeRiskScore({
       amount,
-      singleTxLimit: getSingleTxLimit(amlRail, currencyCode, amlOperation),
+      singleTxLimit,
       velocity: velocityCounters,
       stats: stats || null,
       accountAgeDays: accountAgeInDays(user),

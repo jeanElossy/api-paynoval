@@ -82,4 +82,36 @@ function exigeQuestionDeSecurite(type) {
   return String(type || "").trim().toUpperCase() !== "WITHDRAW";
 }
 
-module.exports = { resoudreTypeExterne, exigeQuestionDeSecurite, TYPES_EXTERNES };
+/**
+ * Le type déclaré doit être COHÉRENT avec le sens de l'argent — 2026-10-17.
+ *
+ * Un envoi sortant (vers mobile money ou carte) est un RETRAIT vers soi ou un
+ * TRANSFERT à un tiers ; un encaissement entrant est un DÉPÔT. Un « dépôt »
+ * qui fait sortir de l'argent était jusqu'ici tarifé comme un dépôt et aurait
+ * été plafonné comme tel : il est REFUSÉ, jamais réinterprété (règle B.2).
+ *
+ * @param {string|null} type      sortie de `resoudreTypeExterne`
+ * @param {"outbound"|"inbound"} sens
+ * @returns {"WITHDRAW"|"TRANSFER"|"DEPOSIT"} le type à enregistrer
+ * @throws {Error} 400 `TX_TYPE_FLOW_MISMATCH`
+ */
+function typeOperationPourSens(type, sens) {
+  const t = String(type || "").trim().toUpperCase();
+  const permis = sens === "inbound" ? ["DEPOSIT"] : ["WITHDRAW", "TRANSFER"];
+
+  if (!permis.includes(t)) {
+    const err = new Error(
+      sens === "inbound"
+        ? "Un encaissement se déclare `txType: DEPOSIT`."
+        : "Un envoi sortant se déclare `txType: WITHDRAW` (vers soi) ou `TRANSFER` (vers un tiers)."
+    );
+    err.status = 400;
+    err.statusCode = 400;
+    err.code = "TX_TYPE_FLOW_MISMATCH";
+    throw err;
+  }
+
+  return t;
+}
+
+module.exports = { resoudreTypeExterne, exigeQuestionDeSecurite, typeOperationPourSens, TYPES_EXTERNES };

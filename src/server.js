@@ -1617,6 +1617,8 @@ async function bootstrap() {
     const pricingRoutes = require("./routes/pricingRoutes");
     const pricingRulesRoutes = require("./routes/pricingRulesRoutes");
     const pricingChangeRequestsRoutes = require("./routes/pricingChangeRequestsRoutes");
+    const limitsRoutes = require("./routes/limitsRoutes");
+    const limitPoliciesRoutes = require("./routes/limitPoliciesRoutes");
     const feesRoutes = require("./routes/feesRoutes");
     const fxRulesRoutes = require("./routes/fxRulesRoutes");
     const exchangeRatesRoutes = require("./routes/exchangeRatesRoutes");
@@ -1727,6 +1729,16 @@ async function bootstrap() {
     app.use("/api/v1/pricing", pricingRoutes);
     app.use("/api/v1/pricing-rules", pricingRulesRoutes);
     app.use("/api/v1/pricing-change-requests", pricingChangeRequestsRoutes);
+
+    /**
+     * ── PLAFONDS (2026-10-17) ─────────────────────────────────────────────
+     *
+     * Par opération, 24 h et 30 jours glissants (`services/limits/`).
+     * `/limits` : le client lit ses plafonds — les mêmes chiffres que ceux que
+     * l'AML applique. `/limit-policies` : interne, quatre yeux.
+     */
+    app.use("/api/v1/limits", limitsRoutes);
+    app.use("/api/v1/limit-policies", limitPoliciesRoutes);
     app.use("/api/v1/fees", feesRoutes);
     app.use("/api/v1/fx-rules", fxRulesRoutes);
     app.use("/api/v1/exchange-rates", exchangeRatesRoutes);

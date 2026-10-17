@@ -237,6 +237,16 @@ Contrat complet : [`../docs/architecture/sandbox.md`](../docs/architecture/sandb
 - **Migration** : `npm run migrate:account-mode -- --target=test` (simulation) puis `--apply --confirm=<baseTx>,<baseUsers>`. Indispensable AVANT de servir ce code : une transaction sans `mode` ne s'enregistre plus.
 - Garde : `test/sandboxMode.test.js`.
 
+## Plafonds par opération — depuis le 2026-10-17
+
+`services/limits/` — ce que font Wise, Revolut et PayPal. Trois plafonds par **opération** (`DEPOSIT`, `WITHDRAW`, `TRANSFER`) × **rail** (`paynoval`, `mobilemoney`, `card`) × **devise** : par opération, sur **24 h glissantes**, sur **30 jours glissants**.
+
+- **Un seul point d'entrée** : `limitService.checkLimit` (appelé par `middleware/aml.js`, il REFUSE) et `describeLimits` (`GET /api/v1/limits?currency=XOF`, écran « Mes plafonds »). Même politique, même cumul : l'écran annonce exactement ce que le serveur appliquera. Refus `403` `LIMIT_PER_TRANSACTION` / `LIMIT_ROLLING_24H` / `LIMIT_ROLLING_30D` avec `{ limit, remaining, availableNow, releasesAt }` (+ `legacyCode` `AML_SINGLE_LIMIT` / `AML_DAILY_LIMIT` pour les apps installées). Cumul illisible ⇒ `503 AML_STATS_UNAVAILABLE`.
+- **Cumul** (`limitUsage.js`) : opérations LANCÉES par le compte (`Transaction.userId`, une requête sur l'index `{ userId, createdAt }`) + participations de cagnotte ; hors `failed` / `cancelled` / `refunded` / `reversed` / `rejected` / `expired`. L'ancien cumul (`services/aml.js:getUserTransactionsStats`) comptait l'argent REÇU et les opérations échouées : il ne sert plus qu'aux signaux de vélocité.
+- **`Transaction.operationType`** (immuable) : posé à l'initiation ; un type contraire au sens de l'argent est refusé (`TX_TYPE_FLOW_MISMATCH`, `externalTxType.typeOperationPourSens`). Historique sans type : un envoi externe compte comme retrait ET transfert (jamais sous-compté).
+- **Gouvernance** (`limitPolicyService.js`, `models/LimitPolicyVersion.js`, `/api/v1/limit-policies`, interne) : proposer → approuver par une AUTRE personne (`FOUR_EYES_REQUIRED`), rôle `admin` / `superadmin` / `compliance` relu en base ; versions immuables, jamais effacées, une seule active (index unique partiel — à poser par `npm run indexes:apply`). Sans version active : `DEFAULT_LIMITS` du code (table AML historique ; **30 jours = 5 × 24 h, PROVISOIRE**), annoncé `source: "default"`. Cache 30 s par instance.
+- Gardes : `test/limits/*.test.js`.
+
 ## Worker auto-cancel
 
 [src/services/transactionAutoCancelService.js](src/services/transactionAutoCancelService.js) démarre dans `bootstrap()` après la connexion DB. Il annule les transactions non confirmées passé `TX_AUTO_CANCEL_AFTER_DAYS`, avec verrou distribué (`autoCancelLockAt` + `autoCancelWorkerId` + TTL) pour supporter plusieurs instances. Désactivable via `TX_AUTO_CANCEL_WORKER=false` ; par défaut un échec de démarrage du worker fait échouer le boot (`TX_AUTO_CANCEL_REQUIRED`). Il est arrêté proprement dans le handler `SIGTERM`/`SIGINT`.
