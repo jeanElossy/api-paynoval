@@ -19,6 +19,7 @@ const rows = [
 
 const service = createLimitService({
   now: () => NOW,
+  loadAccount: async () => null, // no per-account override in these cases
   policyService: { getActivePolicy: async () => ({ limits: DEFAULT_LIMITS, version: 0, source: "default" }) },
   models: {
     Transaction: { find: () => ({ select: () => ({ lean: async () => rows }) }) },
