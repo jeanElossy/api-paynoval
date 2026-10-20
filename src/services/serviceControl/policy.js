@@ -418,7 +418,7 @@ const DEFAULT_MESSAGES = Object.freeze({
     READ_ONLY_MODE:
       "Les nouvelles opérations sont momentanément suspendues. Votre solde et votre historique restent consultables.",
     SERVICE_LOCKDOWN:
-      "Par mesure de sécurité, les opérations sont temporairement suspendues. Vos fonds sont protégés.",
+      "Par mesure de sécurité, les opérations sont temporairement suspendues. Nous vous tiendrons informés.",
     SERVICE_STATUS_UNAVAILABLE:
       "Ce service est momentanément indisponible. Vos fonds sont en sécurité. Réessayez dans quelques minutes.",
     UPDATE_REQUIRED:
@@ -433,7 +433,7 @@ const DEFAULT_MESSAGES = Object.freeze({
     READ_ONLY_MODE:
       "New operations are temporarily paused. Your balance and history remain available.",
     SERVICE_LOCKDOWN:
-      "As a security measure, operations are temporarily paused. Your funds are protected.",
+      "As a security measure, operations are temporarily paused. We will keep you informed.",
     SERVICE_STATUS_UNAVAILABLE:
       "This service is temporarily unavailable. Your funds are safe. Please try again in a few minutes.",
     UPDATE_REQUIRED: "An update of PayNoval is required to continue.",

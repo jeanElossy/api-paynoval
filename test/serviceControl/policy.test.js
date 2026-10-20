@@ -17,7 +17,7 @@ const path = require("node:path");
 const policy = require("../../src/services/serviceControl/policy");
 const { NOW, VECTORS, FEATURE_MAPPING, VERSION_VECTORS } = require("../fixtures/serviceControlVectors");
 
-const POLICY_SHA256 = "5877642b55362b5a9e869b3f74c52ae81a91308b80dc2ca10a5ff4e7ff493189";
+const POLICY_SHA256 = "168a2999db6eaf3c73a4c200e9ebd6403c552e708961245921a4b11149eff53b";
 const VECTORS_SHA256 = "a862ec9ba9939b7cd1741bc74c591d609d6761a9b6aff5e81a9be3aba2da4afe";
 
 const sha = (f) => crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex");
