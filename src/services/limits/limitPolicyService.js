@@ -31,6 +31,8 @@ const { DEFAULT_LIMITS, DEFAULT_POLICY_PROVENANCE } = require("./limitCatalog");
 const { LIMIT_CODES, LimitError, validatePolicy } = require("./limitPolicy");
 
 const CACHE_TTL_MS = 30 * 1000;
+const { staffTwoFactorVerdict, REFUSAL: STAFF_2FA_REFUSAL } = require("../staffTwoFactor");
+
 const LIMIT_STAFF_ROLES = Object.freeze(["admin", "superadmin", "compliance"]);
 
 function httpError(status, message, code, details) {
@@ -68,6 +70,11 @@ function assertLimitStaff(user) {
   const role = String(user?.role || "").trim().toLowerCase();
   if (!LIMIT_STAFF_ROLES.includes(role)) {
     throw httpError(403, "Rôle insuffisant pour la gouvernance des plafonds.", "FORBIDDEN");
+  }
+  // Staff 2FA is mandatory (services/staffTwoFactor.js, 2026-10-18): a limit
+  // policy governs every account — never on a password alone.
+  if (staffTwoFactorVerdict({ role, twoFaEnabled: user?.twoFaEnabled }) === "blocked") {
+    throw httpError(403, STAFF_2FA_REFUSAL.message, STAFF_2FA_REFUSAL.code);
   }
 }
 

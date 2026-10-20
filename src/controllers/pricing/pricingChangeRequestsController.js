@@ -60,8 +60,8 @@ const { getExchangeRate } = require("../../services/pricing/exchangeRateService"
 const MIN_REASON_LENGTH = 10;
 const MIN_REJECTION_REASON_LENGTH = 5;
 
-function fail(res, status, message) {
-  return res.status(status).json({ success: false, error: message, message });
+function fail(res, status, message, code = null) {
+  return res.status(status).json({ success: false, error: message, message, ...(code ? { code } : {}) });
 }
 
 function sendError(res, err, fallback) {
@@ -71,7 +71,9 @@ function sendError(res, err, fallback) {
     console.error("[pricingChangeRequests]", err);
   }
 
-  return fail(res, status, status >= 500 ? fallback : err?.message || fallback);
+  // The machine code (e.g. STAFF_2FA_REQUIRED) reaches the console, which acts
+  // on it; never for a 5xx, whose detail stays in the logs.
+  return fail(res, status, status >= 500 ? fallback : err?.message || fallback, status >= 500 ? null : err?.code || null);
 }
 
 const upper = (v) => String(v ?? "").trim().toUpperCase();
