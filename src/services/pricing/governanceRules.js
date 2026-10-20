@@ -21,9 +21,12 @@
 
 const BREAK_GLASS_ROLE = "superadmin";
 
-function httpError(status, message) {
+const { staffTwoFactorVerdict, REFUSAL: STAFF_2FA_REFUSAL } = require("../staffTwoFactor");
+
+function httpError(status, message, code = null) {
   const err = new Error(message);
   err.status = status;
+  if (code) err.code = code;
   return err;
 }
 
@@ -133,6 +136,12 @@ function assertStaffRole(actor, roles = STAFF_PRICING_ROLES) {
 
   if (!roles.includes(normalizeRole(actor))) {
     throw httpError(403, "Rôle insuffisant pour la gouvernance tarifaire.");
+  }
+
+  // Staff 2FA is mandatory (services/staffTwoFactor.js, 2026-10-18): a price
+  // applies to every transaction of a corridor — never on a password alone.
+  if (staffTwoFactorVerdict({ role: actor.role, twoFaEnabled: actor.twoFaEnabled }) === "blocked") {
+    throw httpError(403, STAFF_2FA_REFUSAL.message, STAFF_2FA_REFUSAL.code);
   }
 }
 

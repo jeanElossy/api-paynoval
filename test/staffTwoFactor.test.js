@@ -45,3 +45,42 @@ test("req.user carries the 2FA flag", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "src", "middleware", "authMiddleware.js"), "utf8");
   assert.match(src, /twoFaEnabled: userDoc\.twoFaEnabled === true/);
 });
+
+/* ------------------------------------------------- governance (2026-10-20) */
+
+function withEnforcement(iso, fn) {
+  const old = process.env.STAFF_2FA_ENFORCE_FROM;
+  process.env.STAFF_2FA_ENFORCE_FROM = iso;
+  try {
+    return fn();
+  } finally {
+    if (old === undefined) delete process.env.STAFF_2FA_ENFORCE_FROM;
+    else process.env.STAFF_2FA_ENFORCE_FROM = old;
+  }
+}
+
+test("limit policy governance refuses a staff account without 2FA past the date", () => {
+  const { assertLimitStaff } = require("../src/services/limits/limitPolicyService");
+  withEnforcement("2000-01-01T00:00:00Z", () => {
+    assert.throws(() => assertLimitStaff({ _id: "a", role: "compliance", twoFaEnabled: false }), (e) => e.code === "STAFF_2FA_REQUIRED" && e.status === 403);
+    assert.doesNotThrow(() => assertLimitStaff({ _id: "a", role: "compliance", twoFaEnabled: true }));
+  });
+  withEnforcement("2999-01-01T00:00:00Z", () => {
+    assert.doesNotThrow(() => assertLimitStaff({ _id: "a", role: "admin", twoFaEnabled: false }), "grace period: allowed");
+  });
+});
+
+test("pricing governance refuses a staff account without 2FA past the date", () => {
+  const { assertStaffRole } = require("../src/services/pricing/governanceRules");
+  withEnforcement("2000-01-01T00:00:00Z", () => {
+    assert.throws(() => assertStaffRole({ _id: "a", role: "admin", twoFaEnabled: false }), (e) => e.code === "STAFF_2FA_REQUIRED" && e.status === 403);
+    assert.doesNotThrow(() => assertStaffRole({ _id: "a", role: "superadmin", twoFaEnabled: true }));
+    // A role refusal stays a role refusal.
+    assert.throws(() => assertStaffRole({ _id: "a", role: "support", twoFaEnabled: false }), (e) => e.code !== "STAFF_2FA_REQUIRED");
+  });
+});
+
+test("the pricing controller relays the machine code of a 4xx", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "controllers", "pricing", "pricingChangeRequestsController.js"), "utf8");
+  assert.match(src, /err\?\.code \|\| null/);
+});
