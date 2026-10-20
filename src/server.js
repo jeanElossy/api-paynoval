@@ -1751,6 +1751,30 @@ async function bootstrap() {
     );
 
     // Démarrage des workers après la connexion DB et le montage des routes.
+    /**
+     * Service control (docs/architecture/service-control.md §7): first read of
+     * the state on the Users connection, announced with its consequence.
+     */
+    try {
+      const scView = await require("./services/serviceControl/runtime").getStore().ready(3000);
+      if (scView.status === "unavailable") {
+        logger.error(
+          "🛑 Contrôle de service : état ILLISIBLE au démarrage — opérations d'argent REFUSÉES " +
+            "(SERVICE_STATUS_UNAVAILABLE) jusqu'à la première lecture réussie ; lecture et annulations ouvertes"
+        );
+      } else {
+        const actifs = (scView.snapshot?.states || []).length;
+        logger.info(
+          `🧭 Contrôle de service actif (révision ${scView.revision}) — ${actifs} périmètre(s) hors OPERATIONAL ; ` +
+            "état relu toutes les 5 s sur la base Users, appliqué à chaque opération d'argent"
+        );
+      }
+    } catch (scErr) {
+      logger.error("🛑 Contrôle de service : initialisation en échec — opérations d'argent refusées par le garde", {
+        message: scErr?.message,
+      });
+    }
+
     autoCancelWorker = startAutoCancelWorker();
 
     // Rappels prestataire simulés : démarré seulement si la simulation est

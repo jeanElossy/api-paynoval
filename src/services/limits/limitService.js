@@ -22,6 +22,22 @@ const { RAILS_BY_OPERATION, OPERATIONS, catalogOperation, catalogRail } = requir
 const { LIMIT_CODES, LimitError, describeUsage, evaluateLimit, resolveLimit } = require("./limitPolicy");
 const { computeUsage, loadUsageRows } = require("./limitUsage");
 const { getLimitPolicyService } = require("./limitPolicyService");
+const { readAccountLimits, applyAccountLimits } = require("./accountLimits");
+
+/**
+ * The account override, read in the Users database (written by the backend).
+ * Native read with a projection: only `limits` and `currency` leave the
+ * database. Unreadable ⇒ throws: the caller refuses (fail closed, B.2).
+ */
+async function defaultLoadAccount(userId) {
+  const { getUsersConn } = require("../../config/db");
+  const mongoose = require("mongoose");
+  if (!mongoose.isValidObjectId(String(userId))) return null;
+  const doc = await getUsersConn()
+    .collection("users")
+    .findOne({ _id: new mongoose.Types.ObjectId(String(userId)) }, { projection: { limits: 1, currency: 1 } });
+  return doc ? readAccountLimits(doc.limits, doc.currency) : null;
+}
 
 function defaultModels() {
   const { getTxConn } = require("../../config/db");
@@ -32,7 +48,7 @@ function defaultModels() {
   };
 }
 
-function createLimitService({ policyService = null, models = null, now = () => Date.now() } = {}) {
+function createLimitService({ policyService = null, models = null, now = () => Date.now(), loadAccount = defaultLoadAccount } = {}) {
   const policy = () => policyService || getLimitPolicyService();
   const resolveModels = () => models || defaultModels();
 
@@ -51,7 +67,8 @@ function createLimitService({ policyService = null, models = null, now = () => D
   async function checkLimit({ userId, operation, rail, currency, amount }) {
     const active = await policy().getActivePolicy();
     const op = resolveOperation(operation, rail);
-    const limit = resolveLimit(active.limits, { operation: op, rail, currency });
+    const policyLimit = resolveLimit(active.limits, { operation: op, rail, currency });
+    const limit = applyAccountLimits(policyLimit, await loadAccount(userId));
 
     const { Transaction, CagnotteSettlement } = resolveModels();
     const at = now();
@@ -62,6 +79,7 @@ function createLimitService({ policyService = null, models = null, now = () => D
       ...evaluateLimit(limit, usage, amount),
       policyVersion: active.version,
       policySource: active.source,
+      limitSources: limit.sources,
     };
   }
 
@@ -80,14 +98,16 @@ function createLimitService({ policyService = null, models = null, now = () => D
     const { Transaction, CagnotteSettlement } = resolveModels();
     const at = now();
     const rows = await loadUsageRows({ userId, now: at, Transaction, CagnotteSettlement });
+    const account = await loadAccount(userId);
 
     const limits = [];
     for (const operation of OPERATIONS) {
       for (const rail of RAILS_BY_OPERATION[operation]) {
         if (!active.limits?.[operation]?.[rail]?.[iso]) continue;
-        const limit = resolveLimit(active.limits, { operation, rail, currency: iso });
+        const limit = applyAccountLimits(resolveLimit(active.limits, { operation, rail, currency: iso }), account);
         const usage = computeUsage(rows, { operation, rail, currency: iso, now: at });
-        limits.push(describeUsage(limit, usage));
+        // The screen says WHERE each ceiling comes from ("set for your account").
+        limits.push({ ...describeUsage(limit, usage), sources: limit.sources });
       }
     }
 

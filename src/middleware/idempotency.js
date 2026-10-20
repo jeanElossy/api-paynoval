@@ -269,8 +269,16 @@ function idempotency({ required } = {}) {
 
       const statusCode = res.statusCode || 200;
 
+      /**
+       * A DELIBERATE service-control refusal (maintenance 503, update required
+       * 426 — docs/architecture/service-control.md) says nothing about THIS
+       * request: it was refused before running. Freezing the 426 would answer
+       * "update required" for 24 h to the same key replayed after the update.
+       */
+      const deliberateRefusal = Boolean(res.getHeader && res.getHeader("X-PayNoval-Service-Control"));
+
       const persist =
-        statusCode >= 500
+        statusCode >= 500 || deliberateRefusal
           ? IdempotencyRecord.deleteOne({ scope, key: rawKey })
           : IdempotencyRecord.updateOne(
               { scope, key: rawKey },

@@ -9,6 +9,7 @@
  */
 
 const express = require("express");
+const { serviceControlGuard, describeFixed } = require("../middleware/serviceControl");
 const { body, validationResult } = require("express-validator");
 const {
   extractInternalToken,
@@ -83,6 +84,12 @@ router.post(
    * ne protège que ce qui passe par le bord — verrouillé par
    * `test/security/amlLivesInTxCore.test.js`.
    */
+  // Guest contribution from the public web page (service control, contract §5).
+  serviceControlGuard({
+    phase: "initiate",
+    describe: describeFixed(["cagnotte.participate"], { userField: null, providerField: "provider", currencyField: "currency", platform: "web" }),
+    label: "collections.initiate",
+  }),
   publicCollectionAml,
 
   initiate

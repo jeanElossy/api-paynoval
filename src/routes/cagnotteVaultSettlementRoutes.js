@@ -1,6 +1,7 @@
 "use strict";
 
 const express = require("express");
+const { serviceControlGuard, describeFixed } = require("../middleware/serviceControl");
 const {
   extractInternalToken,
   matchesAnyToken,
@@ -158,6 +159,7 @@ router.post(
     .isObject(),
 
   checkValidation,
+  serviceControlGuard({ phase: "initiate", describe: describeFixed(["cagnotte.vault_withdraw"]), label: "cagnotte.vault_withdrawals.settle" }),
   settleCagnotteVaultWithdrawal
 );
 

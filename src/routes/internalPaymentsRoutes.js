@@ -2,6 +2,7 @@
 'use strict';
 
 const express = require('express');
+const { serviceControlGuard, describeInternalPayment } = require("../middleware/serviceControl");
 const rateLimit = require('express-rate-limit');
 const { body } = require('express-validator');
 const asyncHandler = require('express-async-handler');
@@ -154,6 +155,9 @@ router.post(
       .withMessage('metadata doit être un objet JSON.'),
   ],
   requestValidator,
+  // By kind: bonus / cashback / purchase / cagnotte are controlled; admin
+  // adjustments (the remediation tool) never are.
+  serviceControlGuard({ phase: "initiate", describe: describeInternalPayment, label: "internal_payments.create" }),
   asyncHandler(createInternalPayment)
 );
 

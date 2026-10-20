@@ -247,6 +247,14 @@ Contrat complet : [`../docs/architecture/sandbox.md`](../docs/architecture/sandb
 - **Gouvernance** (`limitPolicyService.js`, `models/LimitPolicyVersion.js`, `/api/v1/limit-policies`, interne) : proposer → approuver par une AUTRE personne (`FOUR_EYES_REQUIRED`), rôle `admin` / `superadmin` / `compliance` relu en base ; versions immuables, jamais effacées, une seule active (index unique partiel — à poser par `npm run indexes:apply`). Sans version active : `DEFAULT_LIMITS` du code (table AML historique ; **30 jours = 5 × 24 h, PROVISOIRE**), annoncé `source: "default"`. Cache 30 s par instance.
 - Gardes : `test/limits/*.test.js`.
 
+## Contrôle de service — depuis le 2026-10-17
+
+Contrat : [`../docs/architecture/service-control.md`](../docs/architecture/service-control.md). Tx-Core est l'**autorité sur l'argent** : il lit l'état écrit par le backend, en lecture seule, sur sa connexion Users (`services/serviceControl/readModels.js` refuse toute écriture), cache 5 s.
+
+- `services/serviceControl/policy.js`, `store.js` et `test/fixtures/serviceControlVectors.js` sont des **copies à l'octet près** du backend (empreintes dans `test/serviceControl/policy.test.js`).
+- `middleware/serviceControl.js` : `serviceControlGuard({ phase, describe })` monté route par route (`/initiate` avant l'AML, `/confirm` jugé sur la transaction STOCKÉE, collectes invité, règlements de cagnotte, paiements internes par `kind`, bonus de parrainage). **Jamais** sur les webhooks, le règlement invité, `/cancel`, `/refund`, la reprise, le rejeu — verrouillé par `test/serviceControl/guard.test.js`. Une erreur du garde REFUSE l'argent (503 réessayable, jamais figée par l'idempotence).
+- Mesure du drain : `GET /api/v1/internal/service-control/inflight` (nombres seulement).
+
 ## Worker auto-cancel
 
 [src/services/transactionAutoCancelService.js](src/services/transactionAutoCancelService.js) démarre dans `bootstrap()` après la connexion DB. Il annule les transactions non confirmées passé `TX_AUTO_CANCEL_AFTER_DAYS`, avec verrou distribué (`autoCancelLockAt` + `autoCancelWorkerId` + TTL) pour supporter plusieurs instances. Désactivable via `TX_AUTO_CANCEL_WORKER=false` ; par défaut un échec de démarrage du worker fait échouer le boot (`TX_AUTO_CANCEL_REQUIRED`). Il est arrêté proprement dans le handler `SIGTERM`/`SIGINT`.

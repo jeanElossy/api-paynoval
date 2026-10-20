@@ -389,6 +389,8 @@ function mapUserToReqUser(userDoc) {
 
     email: userDoc.email,
     role: userDoc.role,
+    // Staff 2FA is mandatory on admin actions (services/staffTwoFactor.js).
+    twoFaEnabled: userDoc.twoFaEnabled === true,
     fullName: userDoc.fullName,
 
     // AML fields

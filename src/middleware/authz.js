@@ -1,5 +1,7 @@
 // middleware/authz.js
 
+const { applyStaffTwoFactor } = require("../services/staffTwoFactor");
+
 function requireRole(allowedRoles = []) {
   return (req, res, next) => {
     const user = req.user;
@@ -9,6 +11,7 @@ function requireRole(allowedRoles = []) {
     if (!allowedRoles.includes(user.role)) {
       return res.status(403).json({ message: "Accès refusé" });
     }
+    if (applyStaffTwoFactor(req, res)) return undefined;
     next();
   };
 }

@@ -12,6 +12,7 @@
  */
 
 const express = require("express");
+const { serviceControlGuard, describeFixed } = require("../middleware/serviceControl");
 const {
   extractInternalToken,
   matchesAnyToken,
@@ -86,6 +87,7 @@ router.post(
   currencyField("cagnotteCurrency"),
   body("amount").exists().isFloat({ gt: 0 }).toFloat(),
   checkValidation,
+  serviceControlGuard({ phase: "read", describe: describeFixed(["cagnotte.participate"], { currencyField: "cagnotteCurrency" }), label: "cagnotte.participation.quote" }),
   attachCagnotteParticipant,
   amlMiddleware,
   quoteCagnotteParticipation
@@ -104,6 +106,12 @@ router.post(
   body("goalCap").optional({ nullable: true }).isFloat({ gt: 0 }).toFloat(),
   body("replayOnly").optional().isBoolean().toBoolean(),
   checkValidation,
+  // A replay only completes an operation already accepted: never controlled.
+  serviceControlGuard({
+    phase: "initiate",
+    describe: describeFixed(["cagnotte.participate"], { currencyField: "cagnotteCurrency", skipIf: (b) => b.replayOnly === true }),
+    label: "cagnotte.participation.settle",
+  }),
   settleCagnotteParticipation
 );
 
@@ -127,6 +135,7 @@ router.post(
   idField("cagnotteId"),
   currencyField("currency"),
   checkValidation,
+  serviceControlGuard({ phase: "initiate", describe: describeFixed(["cagnotte.create"], { userField: null, currencyField: "currency" }), label: "cagnotte.vaults.open" }),
   openCagnotteVaultPosition
 );
 

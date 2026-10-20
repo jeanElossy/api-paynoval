@@ -11,6 +11,7 @@
  */
 
 const express = require("express");
+const { serviceControlGuard, describeFixed } = require("../middleware/serviceControl");
 const { body, param, validationResult } = require("express-validator");
 const {
   extractInternalToken,
@@ -133,6 +134,13 @@ router.post(
   body("rail").exists().isString().trim().notEmpty(),
   body("provider").exists().isString().trim().notEmpty(),
   checkValidation,
+  // Quote only (read). The SETTLE route above is a provider callback: an
+  // amount the guest already paid is never refused — no guard there.
+  serviceControlGuard({
+    phase: "read",
+    describe: describeFixed(["cagnotte.participate"], { userField: null, providerField: "provider", currencyField: "currency", platform: "web" }),
+    label: "cagnotte.external_participation.quote",
+  }),
   quoteExternalParticipation
 );
 
