@@ -30,6 +30,13 @@ test("un jeton du personnel sans session est refusé", async () => {
   assert.equal(refusal.status, 401);
 });
 
+test("les rôles finance et lecture seule sont bien du personnel", async () => {
+  for (const role of ["finance", "readonly"]) {
+    const refusal = await readSessionRefusal({ user: { role }, decoded: {}, database: null });
+    assert.equal(refusal.status, 401);
+  }
+});
+
 test("une session révoquée ou expirée est refusée", async () => {
   for (const session of [
     null,

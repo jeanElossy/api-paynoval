@@ -9,6 +9,8 @@ const STAFF_ROLES = new Set([
   "compliance",
   "security",
   "fraud-analyst",
+  "finance",
+  "readonly",
 ]);
 
 const isStaffRole = (role) => STAFF_ROLES.has(String(role || "").trim().toLowerCase());
