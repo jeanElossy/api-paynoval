@@ -153,9 +153,10 @@ test("la gouvernance tarifaire exige un rôle admin dans Tx-Core aussi", () => {
   assert.throws(() => assertStaffRole(null), (e) => e.status === 401);
   assert.throws(() => assertStaffRole({ _id: "u1", role: "user" }), (e) => e.status === 403);
   assert.throws(() => assertStaffRole({ _id: null, role: "internal" }), (e) => e.status === 401);
-  assert.doesNotThrow(() => assertStaffRole({ _id: "u1", role: "admin" }));
-  assert.doesNotThrow(() => assertStaffRole({ _id: "u1", role: "SuperAdmin" }));
-  assert.throws(() => assertStaffRole({ _id: "u1", role: "admin" }, ["superadmin"]), (e) => e.status === 403);
+  // Staff 2FA is mandatory since 2026-10-25: these fixtures must carry it.
+  assert.doesNotThrow(() => assertStaffRole({ _id: "u1", role: "admin", twoFaEnabled: true }));
+  assert.doesNotThrow(() => assertStaffRole({ _id: "u1", role: "SuperAdmin", twoFaEnabled: true }));
+  assert.throws(() => assertStaffRole({ _id: "u1", role: "admin", twoFaEnabled: true }, ["superadmin"]), (e) => e.status === 403);
 });
 
 /* -------------------------------------------------------------------------- */
