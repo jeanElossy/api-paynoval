@@ -51,8 +51,9 @@ function memoryModel() {
   };
 }
 
-const alice = { _id: "staff-alice", role: "compliance", email: "a@x" };
-const bob = { _id: "staff-bob", role: "admin", email: "b@x" };
+// Staff 2FA is mandatory since 2026-10-25: these fixtures must carry it.
+const alice = { _id: "staff-alice", role: "compliance", email: "a@x", twoFaEnabled: true };
+const bob = { _id: "staff-bob", role: "admin", email: "b@x", twoFaEnabled: true };
 const eve = { _id: "user-eve", role: "user" };
 const policy = () => JSON.parse(JSON.stringify(DEFAULT_LIMITS));
 
