@@ -65,6 +65,19 @@ const {
   console[rapport.level === "warn" ? "warn" : "log"](rapport.message);
 }
 
+/**
+ * ═══ FRONTIÈRE DES MONDES — AVANT TOUT LE RESTE ═══════════════════════════
+ *
+ * La production refuse tout ce qui ouvrirait la simulation ; la simulation
+ * refuse toute clé d'un service réel. Voir `services/sandboxEnvironment.js`.
+ */
+try {
+  require("./services/sandboxEnvironment").assertEnvironmentBoundary();
+} catch (err) {
+  console.error(`❌ Démarrage refusé — ${err?.message}`);
+  process.exit(1);
+}
+
 initErrorTracking();
 
 const path = require("path");
@@ -1628,7 +1641,19 @@ async function bootstrap() {
     const internalAdminTransactionsRoutes = require("./routes/internalAdminTransactions.routes");
 
     // Webhooks AVANT sanitizers.
-    app.use("/webhooks/providers", providerWebhookRoutes);
+    /**
+     * Aucun prestataire réel ne parle à l'environnement de simulation : ses
+     * rappels y sont livrés en interne (`sandboxSettlementWorker`). L'adresse
+     * n'y existe pas.
+     */
+    app.use(
+      "/webhooks/providers",
+      (req, res, next) =>
+        APP_ENV === "sandbox"
+          ? res.status(404).json({ success: false, message: "Ressource introuvable." })
+          : next(),
+      providerWebhookRoutes
+    );
 
     // Sanitizers APRÈS webhooks.
     mountSanitizers();

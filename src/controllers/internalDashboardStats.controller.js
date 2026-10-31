@@ -439,6 +439,7 @@ async function getInternalPeriodReport(req, res, next) {
       aggregateMoney(from, run, to),
       aggregateCorridors(from, run, to),
       require("../models/AMLLog").countDocuments({
+        ...modeMatch,
         flagged: true,
         createdAt: { $gte: from, $lt: to },
       }),

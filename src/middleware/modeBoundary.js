@@ -13,11 +13,15 @@
  *     revendication `mode` est jugé sur l'ancien drapeau `isSandbox` ;
  *  2. un compte sandbox n'est servi que si la simulation est OUVERTE ;
  *  3. un compte sandbox désactivé (`sandboxDisabledAt`) n'est plus servi —
- *     il ne redevient JAMAIS un compte réel.
+ *     il ne redevient JAMAIS un compte réel ;
+ *  4. un jeton n'est accepté que dans son monde (`appEnv`) ;
+ *  5. l'environnement de simulation ne sert aucun compte client réel.
  *
  * Fonction pure : `authMiddleware` l'applique à chaque identité qu'il résout.
  * Même découpage que `deviceBinding.js` (cœur fonctionnel, coquille Express).
  */
+
+const { evaluateTokenEnvironment } = require("../services/sandboxEnvironment");
 
 function claimedModeOf(decoded) {
   if (!decoded) return undefined;
@@ -26,7 +30,21 @@ function claimedModeOf(decoded) {
   return undefined;
 }
 
-function evaluateModeBoundary({ user, decoded = null, sandboxEnabled }) {
+function evaluateModeBoundary({ user, decoded = null, sandboxEnabled, appEnv = undefined }) {
+  if (decoded && appEnv !== undefined) {
+    const world = evaluateTokenEnvironment({ appEnv, claimedEnv: decoded.env });
+    if (!world.ok) return world;
+  }
+
+  if (appEnv === "sandbox" && user?.role === "user" && user?.mode !== "sandbox") {
+    return {
+      ok: false,
+      status: 403,
+      code: "LIVE_ACCOUNT_IN_SANDBOX_ENV",
+      message: "Ce compte n'existe pas dans l'environnement de simulation.",
+    };
+  }
+
   const claimed = claimedModeOf(decoded);
 
   if (claimed !== undefined && claimed !== user?.mode) {

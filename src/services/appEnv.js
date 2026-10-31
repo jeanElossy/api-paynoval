@@ -51,15 +51,20 @@
  */
 
 /**
- * Les quatre environnements reconnus.
+ * Les cinq environnements reconnus.
  *
  * `test` est celui des suites automatisées, distinct de `development` : il ne
  * doit produire ni alerte, ni envoi vers un suivi d'erreurs externe.
+ *
+ * `sandbox` est l'environnement de SIMULATION dédié (2026-10-31) : ses propres
+ * services, bases et clés, comme la sandbox de Wise ou de PayPal. Voir
+ * `services/sandboxEnvironment.js`.
  */
 const ENVIRONMENTS = Object.freeze({
   DEVELOPMENT: "development",
   TEST: "test",
   STAGING: "staging",
+  SANDBOX: "sandbox",
   PRODUCTION: "production",
 });
 
@@ -83,6 +88,9 @@ const ALIASES = Object.freeze({
   staging: ENVIRONMENTS.STAGING,
   preprod: ENVIRONMENTS.STAGING,
   preproduction: ENVIRONMENTS.STAGING,
+  sandbox: ENVIRONMENTS.SANDBOX,
+  simulation: ENVIRONMENTS.SANDBOX,
+  demo: ENVIRONMENTS.SANDBOX,
   prod: ENVIRONMENTS.PRODUCTION,
   production: ENVIRONMENTS.PRODUCTION,
   live: ENVIRONMENTS.PRODUCTION,
@@ -171,6 +179,7 @@ const isProduction = () => APP_ENV === ENVIRONMENTS.PRODUCTION;
 const isStaging = () => APP_ENV === ENVIRONMENTS.STAGING;
 const isDevelopment = () => APP_ENV === ENVIRONMENTS.DEVELOPMENT;
 const isTest = () => APP_ENV === ENVIRONMENTS.TEST;
+const isSandboxEnvironment = () => APP_ENV === ENVIRONMENTS.SANDBOX;
 
 /**
  * Vrai quand on sert du trafic pour de vrai — production ou pré-production.
@@ -225,6 +234,7 @@ module.exports = {
   isStaging,
   isDevelopment,
   isTest,
+  isSandboxEnvironment,
   isLiveTraffic,
   startupReport,
   // Exportées pour les tests : pures, sans lecture de `process`.

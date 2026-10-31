@@ -282,6 +282,7 @@ const {
   isSandboxEnabled,
 } = require("../utils/accountMode");
 const { evaluateModeBoundary } = require("./modeBoundary");
+const { APP_ENV } = require("../services/appEnv");
 
 function timingSafeEqualStr(a, b) {
   // Un token vide n'authentifie personne : garde conservée de l'implémentation
@@ -435,6 +436,7 @@ function assertModeBoundary(reqUser, decoded = null) {
     user: reqUser,
     decoded,
     sandboxEnabled: isSandboxEnabled(),
+    appEnv: APP_ENV,
   });
 
   if (!verdict.ok) {

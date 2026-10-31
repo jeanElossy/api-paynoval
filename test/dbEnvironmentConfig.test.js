@@ -61,3 +61,43 @@ test("les marqueurs de production sont bien reconnus comme tels", () => {
   assert.equal(garde.classifyDatabaseName("paynoval-test"), "test");
   assert.equal(garde.classifyDatabaseName("paynoval"), "inconnu");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Environnement de simulation dédié (2026-10-31)                             */
+/* -------------------------------------------------------------------------- */
+
+function avecEnv(vars, fn) {
+  const avant = { ...process.env };
+  Object.assign(process.env, vars);
+  try {
+    return fn();
+  } finally {
+    for (const k of Object.keys(vars)) {
+      if (avant[k] === undefined) delete process.env[k];
+      else process.env[k] = avant[k];
+    }
+  }
+}
+
+test("simulation : NODE_ENV=production sur une base -sandbox est accepté", () => {
+  const r = avecEnv({ APP_ENV: "sandbox", NODE_ENV: "production" }, () =>
+    garde.checkDatabaseEnvironment("mongodb+srv://u:p@h/paynoval-sandbox")
+  );
+  assert.equal(r.ok, true);
+});
+
+test("simulation : une base sans le marqueur sandbox est refusée, même -test", () => {
+  for (const base of ["paynoval", "paynoval-test", "paynoval-prod"]) {
+    const r = avecEnv({ APP_ENV: "sandbox", NODE_ENV: "production" }, () =>
+      garde.checkDatabaseEnvironment(`mongodb+srv://u:p@h/${base}`)
+    );
+    assert.equal(r.ok, false, base);
+  }
+});
+
+test("production : une base -sandbox reste refusée", () => {
+  const r = avecEnv({ APP_ENV: "production", NODE_ENV: "production" }, () =>
+    garde.checkDatabaseEnvironment("mongodb+srv://u:p@h/paynoval-sandbox")
+  );
+  assert.equal(r.ok, false);
+});

@@ -62,6 +62,8 @@ const MARQUEURS_NON_PROD = [
 ];
 const MARQUEURS_PROD = ["prod", "production"];
 
+const { ENVIRONMENTS, resolveEnvironment } = require("../services/appEnv");
+
 /**
  * Extrait le nom de la base et l'hôte d'une URI, SANS jamais toucher au secret.
  * Une URI illisible rend `null` — l'appelant décide quoi en faire ; deviner
@@ -98,8 +100,17 @@ function classifyDatabaseName(nomBase) {
   return "inconnu";
 }
 
+/**
+ * L'environnement de simulation dédié tourne en `NODE_ENV=production` (mêmes
+ * réglages d'exécution qu'un service réel) sur des bases `…-sandbox`. C'est le
+ * seul cas où cette combinaison est juste : il se déclare par `APP_ENV`.
+ */
+function estSimulation() {
+  return resolveEnvironment(process.env).env === ENVIRONMENTS.SANDBOX;
+}
+
 function estProduction() {
-  return String(process.env.NODE_ENV || "").trim() === "production";
+  return String(process.env.NODE_ENV || "").trim() === "production" && !estSimulation();
 }
 
 /**
@@ -129,6 +140,20 @@ function checkDatabaseEnvironment(uri, { label = "base" } = {}) {
   const attendu = String(process.env.DB_ENV || "").trim().toLowerCase();
   const strict = String(process.env.DB_ENV_STRICT || "").toLowerCase() === "true";
   const ou = `${label} « ${base} » sur ${hote}`;
+
+  // 0. La simulation ne sert QUE des bases qui le disent dans leur nom.
+  if (estSimulation() && !String(base).toLowerCase().includes("sandbox")) {
+    return {
+      ok: false,
+      niveau: "error",
+      base,
+      hote,
+      message:
+        `❌ APP_ENV=sandbox mais ${ou} ne porte pas le marqueur « sandbox ». ` +
+        "CONSÉQUENCE : la simulation écrirait dans des données qui ne sont pas les " +
+        "siennes. Démarrage refusé.",
+    };
+  }
 
   // 1. Production servie depuis une base de test — le pire des deux sens.
   if (prod && classe === "test") {
