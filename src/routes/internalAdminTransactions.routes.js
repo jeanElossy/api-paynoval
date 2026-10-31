@@ -21,6 +21,7 @@ const {
 
 const {
   getInternalDashboardStats,
+  getInternalPeriodReport,
 } = require("../controllers/internalDashboardStats.controller");
 
 const {
@@ -197,6 +198,7 @@ router.get("/internal/admin/aml/logs", requireInternalToken, listAmlLogs);
 router.get("/internal/admin/reconciliation/latest", requireInternalToken, riskAdmin.latestReconciliation);
 router.get("/internal/admin/review-cases", requireInternalToken, riskAdmin.listReviewCases);
 router.post("/internal/admin/review-cases/:transactionId/decide", requireInternalToken, riskAdmin.decideReviewCase);
+router.get("/internal/admin/reports/period", requireInternalToken, getInternalPeriodReport);
 router.get("/internal/admin/risk-policy", requireInternalToken, riskAdmin.listRiskPolicies);
 router.post("/internal/admin/risk-policy", requireInternalToken, riskAdmin.proposeRiskPolicy);
 router.post("/internal/admin/risk-policy/:version/:decision", requireInternalToken, riskAdmin.decideRiskPolicy);
