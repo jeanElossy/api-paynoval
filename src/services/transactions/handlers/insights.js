@@ -47,7 +47,7 @@ function createInsightsHandler({
   Transaction,
   now = () => Date.now(),
   maxDocs = MAX_DOCS,
-  resolveHistoryStart = async () => null,
+  resolveHistoryWindow: readHistoryWindow = async () => null,
 } = {}) {
   if (!Transaction) throw new Error("insights : dépendance `Transaction` manquante");
 
@@ -68,7 +68,7 @@ function createInsightsHandler({
           status: "confirmed",
           createdAt: { $gte: from },
         },
-        await resolveHistoryWindow(req)
+        await readHistoryWindow(req)
       );
 
       const docs = [];
@@ -103,7 +103,7 @@ function transactionInsights(req, res, next) {
   if (!_composed) {
     _composed = createInsightsHandler({
       Transaction: runtime.Transaction,
-      resolveHistoryStart,
+      resolveHistoryWindow,
     });
   }
   return _composed(req, res, next);

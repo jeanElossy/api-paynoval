@@ -355,4 +355,58 @@ test("la réinitialisation rejoue le jeu, et aucune écriture du grand livre n'e
   const seed = tools.slice(tools.indexOf("async function seedDataset"), tools.indexOf("async function applyDataset"));
   assert.match(tools, /const seeded = await seedDataset\(userId, \{ now: at \}\)/);
   assert.doesNotMatch(seed, /applySandboxFunding|postFunding|LedgerEntry/);
+  // Mesuré sur une vraie base : sans cette option PAR OPÉRATION, Mongo rejette
+  // l'écriture (`updatedAt` en conflit) et plus aucun accès ne se crée.
+  assert.match(seed, /upsert: true,[\s\S]*?timestamps: false,\s*\},\s*\}\)\),/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Composition réelle des handlers d'historique                               */
+/* -------------------------------------------------------------------------- */
+
+test("l'historique et les graphiques se composent réellement, compte réel compris", async () => {
+  // Mesuré de bout en bout le 2026-10-31 : un renommage oublié à la composition
+  // rendait 500 sur TOUTE lecture d'historique, sans qu'aucun test ne le voie,
+  // car ils injectent leurs dépendances. Celui-ci passe par la vraie composition.
+  const runtime = require("../src/services/transactions/shared/runtime");
+  const list = require("../src/services/transactions/handlers/listInternal");
+  const insights = require("../src/services/transactions/handlers/insights");
+
+  const chain = () => {
+    const q = {
+      sort: () => q,
+      skip: () => q,
+      limit: () => q,
+      select: () => q,
+      lean: () => q,
+      cursor: () => ({ [Symbol.asyncIterator]: async function* () {} }),
+      then: (ok) => ok([]),
+    };
+    return q;
+  };
+
+  runtime.overrideModels({ Transaction: { find: chain, countDocuments: async () => 0, schema: { path: () => true } } });
+
+  try {
+    for (const [name, handler] of [
+      ["listInternal", list.listInternal],
+      ["transactionInsights", insights.transactionInsights],
+    ]) {
+      list.resetComposition?.();
+      insights.resetComposition?.();
+
+      const outcome = await new Promise((resolve) => {
+        const res = { status: () => res, json: (body) => resolve({ body }), set: () => res };
+        const req = { user: { _id: "64b000000000000000000001", id: "64b000000000000000000001", mode: "live" }, query: {}, get: () => undefined, headers: {} };
+        Promise.resolve(handler(req, res, (err) => resolve({ err }))).catch((err) => resolve({ err }));
+      });
+
+      assert.ok(!(outcome.err instanceof ReferenceError), `${name} : ${outcome.err?.message}`);
+      assert.ok(!outcome.err, `${name} : ${outcome.err?.message}`);
+    }
+  } finally {
+    runtime.restoreModels();
+    list.resetComposition?.();
+    insights.resetComposition?.();
+  }
 });

@@ -125,7 +125,7 @@ function createListInternal({
   secretFields = require("../../../models/transactionSerializer").SECRET_FIELDS,
   projection = LIST_PROJECTION,
   maxLimit = DEFAULT_MAX_LIMIT,
-  resolveHistoryStart = async () => null,
+  resolveHistoryWindow: readHistoryWindow = async () => null,
 } = {}) {
   if (!Transaction) {
     throw new Error("listInternal : dépendance `Transaction` manquante");
@@ -155,7 +155,7 @@ function createListInternal({
       // de réinitialisation (`services/sandbox/historyWindow.js`).
       const query = applyHistoryWindow(
         buildOwnershipQuery(Transaction, userId),
-        await resolveHistoryWindow(req)
+        await readHistoryWindow(req)
       );
 
       /**
@@ -218,7 +218,7 @@ function getHandler() {
   if (!_composed) {
     _composed = createListInternal({
       Transaction: runtime.Transaction,
-      resolveHistoryStart,
+      resolveHistoryWindow,
     });
   }
 

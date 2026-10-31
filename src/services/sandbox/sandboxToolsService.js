@@ -449,9 +449,12 @@ async function seedDataset(userId, { now = new Date() } = {}) {
           filter: { reference: line.reference, mode: SANDBOX },
           update: { $setOnInsert: line },
           upsert: true,
+          // Par opération : à ce niveau, l'option globale est ignorée, et Mongoose
+          // poserait `updatedAt` en conflit avec celui de la ligne.
+          timestamps: false,
         },
       })),
-      { ordered: false, timestamps: false }
+      { ordered: false }
     );
   }
 
