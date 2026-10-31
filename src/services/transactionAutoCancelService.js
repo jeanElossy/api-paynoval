@@ -3,6 +3,7 @@
 
 const os = require("os");
 const crypto = require("crypto");
+const { restorePromotion } = require("./promotions/promotionRedemption");
 
 let logger = console;
 try {
@@ -472,6 +473,8 @@ async function cancelLockedTransaction(lockedTx, workerId) {
      * libération du verrou est une écriture HORS transaction, elle doit rester
      * après.
      */
+    let promotionToRestore = null;
+
     const result = await runtime.runInTransaction(session, async () => {
       const tx = await Transaction.findOne({
         _id: lockedTx._id,
@@ -495,6 +498,7 @@ async function cancelLockedTransaction(lockedTx, workerId) {
 
       tx.status = "cancelled";
       tx.providerStatus = "AUTO_CANCELLED_EXPIRED";
+      promotionToRestore = tx.promotion || null;
 
       tx.cancelledAt = tx.cancelledAt || now;
       tx.cancelReason = tx.cancelReason || reason;
@@ -591,6 +595,8 @@ async function cancelLockedTransaction(lockedTx, workerId) {
         auditEntry,
       };
     });
+
+    await restorePromotion(promotionToRestore);
 
     if (result?.auditEntry && typeof runtime.logTransaction === "function") {
       runtime.logTransaction(result.auditEntry).catch(() => {});

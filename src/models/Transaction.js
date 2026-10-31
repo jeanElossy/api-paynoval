@@ -618,6 +618,13 @@ const transactionSchema = new mongoose.Schema(
       default: null,
     },
 
+    /** Fee discount applied at creation: code, percent, amount, fee before. */
+    promotion: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+      immutable: true,
+    },
+
     /** Request that created this movement (invariant 11). Set once, by the hook below. */
     requestId: {
       type: String,

@@ -724,6 +724,12 @@ async function initiateOutboundExternal(req, res, next) {
     req.body.securityQuestion = q;
     req.body.securityAnswer = aRaw;
 
+    // Fee discounts exist on PayNoval transfers only for now. A code is refused
+    // out loud: dropping it would charge full price to a client expecting less.
+    if (body.promoCode) {
+      throw createError(400, "Ce code ne s'applique pas à ce type d'opération.");
+    }
+
     const pricingCtx = await buildPricingContext({
       req,
       body,

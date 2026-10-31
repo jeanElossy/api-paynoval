@@ -5,6 +5,7 @@ const createError = require("http-errors");
 const { getTxMetrics } = require("../../txMetrics");
 
 const runtime = require("../shared/runtime");
+const { restorePromotion } = require("../../promotions/promotionRedemption");
 const { logTransaction, releaseSenderReserve, chargeCancellationFee, convertAmount, resolveTreasuryFromSystemType, normalizeTreasurySystemType, startTxSession, maybeSessionOpts, assertTransition, runInTransaction, safeAbort, safeEndSession } = runtime;
 
 /** Le taux réellement appliqué se déduit des montants — il ne s'invente pas. */
@@ -413,6 +414,8 @@ async function cancelController(req, res, next) {
      * ici ne sort de la base : pas de réseau, pas de réponse HTTP, pas d'effet
      * de bord non annulable.
      */
+    let promotionToRestore = null;
+
     const body = await runInTransaction(session, async (sess) => {
       const sessOpts = maybeSessionOpts(sess);
 
@@ -518,6 +521,7 @@ async function cancelController(req, res, next) {
 
       tx.status = "cancelled";
       tx.cancelledAt = new Date();
+      promotionToRestore = tx.promotion || null;
 
       if (isInternalTransfer(tx) && userId === receiverId) {
         tx.cancelReason = `Annulé par le destinataire : ${sanitize(reason)}`;
@@ -627,6 +631,8 @@ async function cancelController(req, res, next) {
      * PHASE 3 — la réponse, une seule fois, après le commit. Tant qu'on n'est
      * pas ici, rien n'a été promis au client.
      */
+    await restorePromotion(promotionToRestore);
+
     return res.json(body);
   } catch (err) {
     await safeAbort(session);
