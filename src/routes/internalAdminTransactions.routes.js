@@ -196,6 +196,7 @@ router.get("/internal/admin/aml/logs", requireInternalToken, listAmlLogs);
 
 /* Read models and decisions for the console; the backend applies the roles. */
 router.get("/internal/admin/reconciliation/latest", requireInternalToken, riskAdmin.latestReconciliation);
+router.get("/internal/admin/accounts/:userId/closure-check", requireInternalToken, riskAdmin.accountClosureCheck);
 router.get("/internal/admin/review-cases", requireInternalToken, riskAdmin.listReviewCases);
 router.post("/internal/admin/review-cases/:transactionId/decide", requireInternalToken, riskAdmin.decideReviewCase);
 router.get("/internal/admin/reports/period", requireInternalToken, getInternalPeriodReport);

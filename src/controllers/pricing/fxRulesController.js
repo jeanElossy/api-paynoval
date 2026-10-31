@@ -28,6 +28,7 @@ const { getPricingModel } = require("../../config/db");
 const modeleFxRule = () => getPricingModel("FxRule");
 
 const { invalidateFxRulesCache } = require("../../services/pricing/fxRulesService");
+const { escapeRegex } = require("../../utils/escapeRegex");
 
 /**
  * Purge le cache des règles de change APRÈS une écriture.
@@ -150,7 +151,7 @@ exports.list = async (req, res) => {
     const q = {};
 
     if (req.query.q && String(req.query.q).trim()) {
-      const regex = new RegExp(String(req.query.q).trim(), "i");
+      const regex = new RegExp(escapeRegex(String(req.query.q).trim()), "i");
       q.$or = [
         { name: regex },
         { provider: regex },

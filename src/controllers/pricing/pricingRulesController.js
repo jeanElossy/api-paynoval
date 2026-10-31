@@ -32,6 +32,7 @@ const modeleCoverageGap = () => getPricingModel("PricingCoverageGap");
 
 const mongoose = require("mongoose");
 const { getExchangeRate } = require("../../services/pricing/exchangeRateService");
+const { escapeRegex } = require("../../utils/escapeRegex");
 
 function toBool(v, defaultValue = undefined) {
   if (v === undefined || v === null || v === "") return defaultValue;
@@ -150,7 +151,7 @@ exports.listPricingRules = async (req, res) => {
     }
 
     if (q && String(q).trim()) {
-      const regex = new RegExp(String(q).trim(), "i");
+      const regex = new RegExp(escapeRegex(String(q).trim()), "i");
       filter.$or = [
         { name: regex },
         { code: regex },

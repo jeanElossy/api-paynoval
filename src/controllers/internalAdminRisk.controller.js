@@ -9,6 +9,8 @@ const { TYPES, normalizeFor } = require("../services/risk/normalizeIdentifiers")
 const runs = () => require("../models/ReconciliationRun")(getTxConn());
 const reviewCases = () => require("../models/TransactionReviewCase")(getTxConn());
 const blacklist = () => require("../models/AmlBlacklistEntry")(getTxConn());
+const wallets = () => require("../models/TxWalletBalance")(getTxConn());
+const transactions = () => require("../models/Transaction")(getTxConn());
 
 const JOBS_LIMIT = 20;
 
@@ -22,6 +24,21 @@ const limit = (req) => Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1)
  * Latest result of each reconciliation job. Failing closed: an unreadable store
  * answers 503, because an empty list would read as "no discrepancy".
  */
+exports.accountClosureCheck = async (req, res, next) => {
+  if (!mongoose.isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ success: false, error: "Identifiant invalide." });
+  }
+
+  try {
+    const { readClosureBlockers } = require("../services/accounts/closureCheck");
+    const userId = new mongoose.Types.ObjectId(req.params.userId);
+    const blockers = await readClosureBlockers({ userId, Wallet: wallets(), Transaction: transactions() });
+    return res.json({ success: true, data: { blockers } });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 exports.latestReconciliation = async (_req, res) => {
   try {
     const items = await runs()

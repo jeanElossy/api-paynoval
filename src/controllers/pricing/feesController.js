@@ -35,6 +35,7 @@ const { normalizeCurrency } = require("../../utils/currency");
 const { computeQuote } = require("../../services/pricing/pricingEngine");
 const { getActiveRules } = require("../../services/pricing/ruleCache");
 const { recordCoverageGap } = require("../../services/pricing/coverage");
+const { escapeRegex } = require("../../utils/escapeRegex");
 
 let logger = null;
 try {
@@ -279,7 +280,7 @@ exports.getFees = async (req, res) => {
     const query = {};
 
     if (req.query.q && String(req.query.q).trim()) {
-      const regex = new RegExp(String(req.query.q).trim(), "i");
+      const regex = new RegExp(escapeRegex(String(req.query.q).trim()), "i");
       query.$or = [
         { name: regex },
         { description: regex },
