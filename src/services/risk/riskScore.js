@@ -168,6 +168,10 @@ function clamp01(n) {
  * @returns {{score: number, band: "allow"|"review"|"block", reasons: Array, hardBlock: boolean}}
  */
 function computeRiskScore(input = {}) {
+  // Tunable part, validated by `riskPolicy.js`. Hard signals are never tunable.
+  const W = { ...WEIGHTS, ...(input.policy?.weights || {}) };
+  const reviewBand = input.policy?.review ?? BANDS.REVIEW;
+
   const {
     amount = 0,
     singleTxLimit = 0,
@@ -212,24 +216,24 @@ function computeRiskScore(input = {}) {
 
   if (limit > 0) {
     if (amt > limit) {
-      score += WEIGHTS.AMOUNT_OVER_SINGLE_LIMIT;
-      add("AMOUNT_OVER_SINGLE_LIMIT", WEIGHTS.AMOUNT_OVER_SINGLE_LIMIT, `${amt} > ${limit}`);
+      score += W.AMOUNT_OVER_SINGLE_LIMIT;
+      add("AMOUNT_OVER_SINGLE_LIMIT", W.AMOUNT_OVER_SINGLE_LIMIT, `${amt} > ${limit}`);
     } else if (amt >= limit * THRESHOLDS.NEAR_LIMIT_RATIO) {
       /**
        * Juste sous la limite, de façon répétée, c'est la signature du
        * fractionnement (« structuring ») : découper un gros montant en
        * plusieurs virements qui passent chacun sous le seuil.
        */
-      score += WEIGHTS.AMOUNT_NEAR_SINGLE_LIMIT;
-      add("AMOUNT_NEAR_SINGLE_LIMIT", WEIGHTS.AMOUNT_NEAR_SINGLE_LIMIT, `${amt} ≈ ${limit}`);
+      score += W.AMOUNT_NEAR_SINGLE_LIMIT;
+      add("AMOUNT_NEAR_SINGLE_LIMIT", W.AMOUNT_NEAR_SINGLE_LIMIT, `${amt} ≈ ${limit}`);
     }
   }
 
   /* ------------------------------------------------------------ vélocité */
   if (velocity === null && stats === null) {
     // Ni le cache ni la base n'ont répondu : on ne sait rien du rythme.
-    score += WEIGHTS.SIGNAL_UNAVAILABLE;
-    add("SIGNAL_UNAVAILABLE", WEIGHTS.SIGNAL_UNAVAILABLE, "vélocité illisible");
+    score += W.SIGNAL_UNAVAILABLE;
+    add("SIGNAL_UNAVAILABLE", W.SIGNAL_UNAVAILABLE, "vélocité illisible");
   } else {
     // Le cache est plus frais ; la base sert de repli. On prend le plus élevé
     // des deux : sous-estimer une rafale est le sens dangereux de l'erreur.
@@ -244,33 +248,33 @@ function computeRiskScore(input = {}) {
     );
 
     if (countLastHour > THRESHOLDS.COUNT_LAST_HOUR) {
-      score += WEIGHTS.VELOCITY_COUNT_BURST;
-      add("VELOCITY_COUNT_BURST", WEIGHTS.VELOCITY_COUNT_BURST, `${countLastHour} virements en 1 h`);
+      score += W.VELOCITY_COUNT_BURST;
+      add("VELOCITY_COUNT_BURST", W.VELOCITY_COUNT_BURST, `${countLastHour} virements en 1 h`);
     }
 
     if (limit > 0 && dailyTotal > limit * THRESHOLDS.DAILY_TOTAL_MULTIPLE) {
-      score += WEIGHTS.VELOCITY_AMOUNT_DAILY;
-      add("VELOCITY_AMOUNT_DAILY", WEIGHTS.VELOCITY_AMOUNT_DAILY, `${dailyTotal} cumulés sur 24 h`);
+      score += W.VELOCITY_AMOUNT_DAILY;
+      add("VELOCITY_AMOUNT_DAILY", W.VELOCITY_AMOUNT_DAILY, `${dailyTotal} cumulés sur 24 h`);
     }
 
     if (sameDest >= THRESHOLDS.SAME_DESTINATION_10MIN) {
-      score += WEIGHTS.VELOCITY_SAME_DESTINATION;
-      add("VELOCITY_SAME_DESTINATION", WEIGHTS.VELOCITY_SAME_DESTINATION, `${sameDest} vers le même bénéficiaire en 10 min`);
+      score += W.VELOCITY_SAME_DESTINATION;
+      add("VELOCITY_SAME_DESTINATION", W.VELOCITY_SAME_DESTINATION, `${sameDest} vers le même bénéficiaire en 10 min`);
     }
   }
 
   /* --------------------------------------------------------------- profil */
   if (accountAgeDays === null) {
-    score += WEIGHTS.SIGNAL_UNAVAILABLE;
-    add("SIGNAL_UNAVAILABLE", WEIGHTS.SIGNAL_UNAVAILABLE, "âge du compte inconnu");
+    score += W.SIGNAL_UNAVAILABLE;
+    add("SIGNAL_UNAVAILABLE", W.SIGNAL_UNAVAILABLE, "âge du compte inconnu");
   } else if (num(accountAgeDays) < THRESHOLDS.NEW_ACCOUNT_DAYS) {
-    score += WEIGHTS.NEW_ACCOUNT;
-    add("NEW_ACCOUNT", WEIGHTS.NEW_ACCOUNT, `compte créé il y a ${num(accountAgeDays)} j`);
+    score += W.NEW_ACCOUNT;
+    add("NEW_ACCOUNT", W.NEW_ACCOUNT, `compte créé il y a ${num(accountAgeDays)} j`);
   }
 
   if (isNewBeneficiary) {
-    score += WEIGHTS.NEW_BENEFICIARY;
-    add("NEW_BENEFICIARY", WEIGHTS.NEW_BENEFICIARY, "bénéficiaire jamais utilisé");
+    score += W.NEW_BENEFICIARY;
+    add("NEW_BENEFICIARY", W.NEW_BENEFICIARY, "bénéficiaire jamais utilisé");
   }
 
   /* ----------------------------------------- écart à l'habitude du client */
@@ -284,10 +288,10 @@ function computeRiskScore(input = {}) {
      * récompenser l'absence d'historique — précisément ce qu'un compte
      * jetable offre à un fraudeur.
      */
-    score += WEIGHTS.SIGNAL_UNAVAILABLE;
+    score += W.SIGNAL_UNAVAILABLE;
     add(
       "SIGNAL_UNAVAILABLE",
-      WEIGHTS.SIGNAL_UNAVAILABLE,
+      W.SIGNAL_UNAVAILABLE,
       verdictBaseline.reason || "habitude du titulaire inconnue"
     );
   } else {
@@ -300,10 +304,10 @@ function computeRiskScore(input = {}) {
        * On le nomme au lieu de l'ignorer.
        */
       if (!Number.isFinite(poids)) {
-        score += WEIGHTS.SIGNAL_UNAVAILABLE;
+        score += W.SIGNAL_UNAVAILABLE;
         add(
           "SIGNAL_UNAVAILABLE",
-          WEIGHTS.SIGNAL_UNAVAILABLE,
+          W.SIGNAL_UNAVAILABLE,
           `poids manquant pour ${signal.code}`
         );
         continue;
@@ -323,8 +327,8 @@ function computeRiskScore(input = {}) {
   const kycInsufficient = !kyc || kyc === "none" || kyc === "0" || kyc === "basic";
 
   if (kycInsufficient && limit > 0 && amt >= limit * THRESHOLDS.NEAR_LIMIT_RATIO) {
-    score += WEIGHTS.KYC_INSUFFICIENT;
-    add("KYC_INSUFFICIENT", WEIGHTS.KYC_INSUFFICIENT, `kycLevel=${kyc || "(vide)"} pour un montant élevé`);
+    score += W.KYC_INSUFFICIENT;
+    add("KYC_INSUFFICIENT", W.KYC_INSUFFICIENT, `kycLevel=${kyc || "(vide)"} pour un montant élevé`);
   }
 
   /**
@@ -373,15 +377,17 @@ function computeRiskScore(input = {}) {
     rawScore,
     /** Somme brute des poids — ce que totalisent les motifs affichés. */
     signalSum,
-    band: bandFor(finalScore),
+    band: bandFor(finalScore, reviewBand),
+    // Keeps a past decision explainable: which rules produced it.
+    policyVersion: input.policy?.version ?? 0,
     reasons,
     hardBlock: false,
   };
 }
 
-function bandFor(score) {
+function bandFor(score, review = BANDS.REVIEW) {
   if (score >= BANDS.BLOCK) return "block";
-  if (score >= BANDS.REVIEW) return "review";
+  if (score >= review) return "review";
   return "allow";
 }
 

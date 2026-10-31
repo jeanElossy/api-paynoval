@@ -10,7 +10,7 @@ const src = (file) => fs.readFileSync(path.join(__dirname, "..", "src", file), "
 test("chaque route de risque exige le jeton interne", () => {
   const routes = src("routes/internalAdminTransactions.routes.js");
   const lines = routes.split("\n").filter((l) => l.includes("riskAdmin."));
-  assert.equal(lines.length, 6);
+  assert.equal(lines.length, 9);
   for (const line of lines) assert.match(line, /requireInternalToken, riskAdmin\./);
 });
 

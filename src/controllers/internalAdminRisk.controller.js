@@ -69,6 +69,39 @@ exports.decideReviewCase = async (req, res) => {
   res.json({ success: true });
 };
 
+const riskPolicies = () => require("../services/risk/riskPolicy").getRiskPolicyService();
+
+const replyPolicyError = (res, err) =>
+  res.status(err.status || 500).json({ success: false, code: err.code, error: err.message, details: err.details });
+
+exports.listRiskPolicies = async (_req, res) => {
+  try {
+    res.json({ success: true, data: await riskPolicies().overview() });
+  } catch (err) {
+    replyPolicyError(res, err);
+  }
+};
+
+exports.proposeRiskPolicy = async (req, res) => {
+  try {
+    const { review, weights, reason, actor } = req.body || {};
+    res.status(201).json({ success: true, data: await riskPolicies().propose({ review, weights, reason, actor }) });
+  } catch (err) {
+    replyPolicyError(res, err);
+  }
+};
+
+exports.decideRiskPolicy = async (req, res) => {
+  try {
+    const { version, decision } = req.params;
+    const { actor, reason } = req.body || {};
+    const data = await riskPolicies().decide({ version: Number(version), decision, actor, reason });
+    res.json({ success: true, data });
+  } catch (err) {
+    replyPolicyError(res, err);
+  }
+};
+
 exports.listBlacklist = async (req, res) => {
   const filter = req.query.active === "false" ? {} : { active: true };
   const skip = (page(req) - 1) * limit(req);
