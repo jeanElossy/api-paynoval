@@ -71,6 +71,7 @@ function buildLine(entry, index, ctx) {
   const base = {
     mode: "sandbox",
     internalImported: true,
+    excludedFromUsage: true,
     initiatedBy: "system",
     context: SEED_CONTEXT,
     contextId: `${userId}:${generation}`,

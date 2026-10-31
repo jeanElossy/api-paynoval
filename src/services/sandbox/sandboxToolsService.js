@@ -377,6 +377,14 @@ async function reset(user) {
 
   const at = new Date();
   await scenarios.markReset(userId, at);
+
+  // Les prises d'avant ne comptent plus : ni plafonds, ni anti-doublon.
+  const owner = new mongoose.Types.ObjectId(String(userId));
+  await models().Transaction.updateMany(
+    { mode: SANDBOX, $or: [{ userId: owner }, { sender: owner }], excludedFromUsage: { $ne: true } },
+    { $set: { excludedFromUsage: true } }
+  );
+
   const seeded = await seedDataset(userId, { now: at });
 
   return {
@@ -411,6 +419,81 @@ async function loadSandboxOwner(userId) {
 
   assertSandboxUser(owner);
   return { ...owner, _id: id };
+}
+
+/**
+ * ── LE DESTINATAIRE, QUAND ON N'A QU'UN TÉLÉPHONE ─────────────────────────────
+ *
+ * Un transfert PayNoval ne se termine que lorsque le destinataire répond à la
+ * question de sécurité : jusque-là, les fonds restent réservés. Un partenaire
+ * seul devant son téléphone resterait bloqué. C'est l'usage des simulations de
+ * Wise : provoquer l'événement de l'autre partie.
+ *
+ * Rien n'est contourné : la réponse passe par le VRAI contrôleur de confirmation,
+ * avec l'identité du destinataire, donc même comparaison, même compteur
+ * d'essais et même verrouillage. Seul l'expéditeur d'un transfert en attente,
+ * vers un compte de SON groupe, peut agir ainsi.
+ */
+function transferIdOf(raw) {
+  const id = String(raw || "").trim();
+  if (!mongoose.isValidObjectId(id)) throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+  return id;
+}
+
+async function listPendingTransfers(user) {
+  const userId = assertSandboxUser(user);
+  const { Transaction } = models();
+
+  const rows = await Transaction.find({
+    mode: SANDBOX,
+    sender: new mongoose.Types.ObjectId(userId),
+    flow: "PAYNOVAL_INTERNAL_TRANSFER",
+    status: "pending",
+  })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .select("reference amount currency senderCurrencySymbol nameDestinataire securityQuestion createdAt")
+    .lean();
+
+  return rows.map((tx) => ({
+    id: String(tx._id),
+    reference: tx.reference,
+    amount: decToNumber(tx.amount),
+    currency: tx.senderCurrencySymbol || tx.currency || null,
+    recipientName: tx.nameDestinataire || null,
+    securityQuestion: tx.securityQuestion || null,
+    createdAt: tx.createdAt,
+  }));
+}
+
+/** Le compte destinataire, relu en base, s'il est bien dans le groupe de l'appelant. */
+async function loadRecipientOf(user, transactionId) {
+  const userId = assertSandboxUser(user);
+  const { Transaction } = models();
+
+  const tx = await Transaction.findOne({
+    _id: transferIdOf(transactionId),
+    mode: SANDBOX,
+    sender: new mongoose.Types.ObjectId(userId),
+    flow: "PAYNOVAL_INTERNAL_TRANSFER",
+  })
+    .select("receiver")
+    .lean();
+
+  if (!tx?.receiver) throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+
+  const recipient = await runtime.usersConn.db.collection("users").findOne({ _id: tx.receiver });
+
+  if (
+    !recipient ||
+    resolveUserMode(recipient) !== SANDBOX ||
+    !user.sandboxGroupId ||
+    String(recipient.sandboxGroupId) !== String(user.sandboxGroupId)
+  ) {
+    throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+  }
+
+  return recipient;
 }
 
 /**
@@ -601,6 +684,8 @@ module.exports = {
   faucet,
   drain,
   reset,
+  listPendingTransfers,
+  loadRecipientOf,
   adminGetState,
   adminUpdateScenario,
   adminReset,

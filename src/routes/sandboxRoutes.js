@@ -15,8 +15,18 @@ const express = require("express");
 const { protect } = require("../middleware/authMiddleware");
 const requireInternalAuth = require("../middleware/internalAuth");
 const controller = require("../controllers/sandboxController");
+const rateLimit = require("express-rate-limit");
 
 const router = express.Router();
+
+// Même seuil que `/confirm` : cette route vérifie une réponse de sécurité.
+const confirmLimiter = rateLimit({
+  name: "sandbox-confirm",
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 router.get("/3ds/:token", requireInternalAuth("gateway"), controller.getThreeDSChallenge);
 router.post(
@@ -32,5 +42,7 @@ router.put("/scenario", controller.updateScenario);
 router.post("/faucet", controller.faucet);
 router.post("/drain", controller.drain);
 router.post("/reset", controller.reset);
+router.get("/transfers/pending", controller.listPendingTransfers);
+router.post("/transfers/:id/confirm", confirmLimiter, controller.confirmAsRecipient);
 
 module.exports = router;

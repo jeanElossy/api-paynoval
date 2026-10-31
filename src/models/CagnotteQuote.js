@@ -34,13 +34,6 @@ module.exports = function buildCagnotteQuoteModel(conn) {
 
   const money = new mongoose.Schema(
     {
-      /**
-       * Mode de la cagnotte (2026-10-06) — `utils/accountMode.js`. Les règlements
-       * de simulation sont écartés des rapports et des files du back-office.
-       * Absent sur un document antérieur : production.
-       */
-      mode: { type: String, enum: ["live", "sandbox"], immutable: true },
-
       amount: { type: Number, required: true, min: 0 },
       currency: { type: String, required: true, uppercase: true, trim: true },
     },
@@ -49,6 +42,14 @@ module.exports = function buildCagnotteQuoteModel(conn) {
 
   const schema = new mongoose.Schema(
     {
+      /**
+       * Mode de la cagnotte (2026-10-06, sorti du sous-schéma `money` le 2026-10-31 :
+       * il y était perdu, et toute participation de simulation était refusée) — `utils/accountMode.js`. Les règlements
+       * de simulation sont écartés des rapports et des files du back-office.
+       * Absent sur un document antérieur : production.
+       */
+      mode: { type: String, enum: ["live", "sandbox"], immutable: true },
+
       quoteId: { type: String, required: true, trim: true },
       userId: { type: String, required: true, trim: true },
       cagnotteId: { type: String, required: true, trim: true },

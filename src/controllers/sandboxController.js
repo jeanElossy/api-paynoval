@@ -10,6 +10,8 @@ const asyncHandler = require("express-async-handler");
 const tools = require("../services/sandbox/sandboxToolsService");
 const threeDS = require("../services/sandbox/sandboxThreeDSService");
 const { ACCOUNT_MODES } = require("../utils/accountMode");
+const { mapUserToReqUser } = require("../middleware/authMiddleware");
+const { confirmController } = require("../services/transactions/handlers/confirmTransaction");
 
 function idempotencyKeyOf(req) {
   const raw = req.get("Idempotency-Key") || req.body?.idempotencyKey || "";
@@ -56,6 +58,24 @@ const drain = asyncHandler(async (req, res) => {
 
 const reset = asyncHandler(async (req, res) => {
   res.json({ success: true, data: await tools.reset(req.user) });
+});
+
+const listPendingTransfers = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await tools.listPendingTransfers(req.user) });
+});
+
+/**
+ * Répondre à la place du destinataire : le VRAI contrôleur de confirmation,
+ * appelé avec son identité. Il répond lui-même, succès ou refus.
+ */
+const confirmAsRecipient = asyncHandler(async (req, res, next) => {
+  const recipient = await tools.loadRecipientOf(req.user, req.params.id);
+
+  const asRecipient = Object.create(req);
+  asRecipient.user = mapUserToReqUser(recipient);
+  asRecipient.body = { transactionId: req.params.id, securityAnswer: req.body?.securityAnswer };
+
+  return confirmController(asRecipient, res, next);
 });
 
 const getThreeDSChallenge = asyncHandler(async (req, res) => {
@@ -119,6 +139,8 @@ module.exports = {
   faucet,
   drain,
   reset,
+  listPendingTransfers,
+  confirmAsRecipient,
   getThreeDSChallenge,
   submitThreeDSDecision,
   adminGetState,

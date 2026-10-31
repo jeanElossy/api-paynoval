@@ -347,7 +347,10 @@ test("un compte réel n'a jamais de fenêtre", async () => {
 
 test("l'historique de départ sort des plafonds", () => {
   const src = fs.readFileSync(path.join(__dirname, "../src/services/limits/limitUsage.js"), "utf8");
-  assert.match(src, /context: \{ \$ne: "sandbox_seed" \}/);
+  assert.match(src, /excludedFromUsage: \{ \$ne: true \}/);
+  const anti = fs.readFileSync(path.join(__dirname, "../src/services/validationService.js"), "utf8");
+  assert.match(anti, /excludedFromUsage: \{ \$ne: true \}/);
+  assert.equal(buildSeedTransactions(SEED_INPUT)[0].excludedFromUsage, true);
 });
 
 test("la réinitialisation rejoue le jeu, et aucune écriture du grand livre n'en dépend", () => {
@@ -410,3 +413,53 @@ test("l'historique et les graphiques se composent réellement, compte réel comp
     insights.resetComposition?.();
   }
 });
+
+test("répondre à la place du destinataire passe par le vrai contrôleur, pour son seul groupe", () => {
+  const ctrl = fs.readFileSync(path.join(__dirname, "../src/controllers/sandboxController.js"), "utf8");
+  const tools = fs.readFileSync(path.join(__dirname, "../src/services/sandbox/sandboxToolsService.js"), "utf8");
+  const routes = fs.readFileSync(path.join(__dirname, "../src/routes/sandboxRoutes.js"), "utf8");
+
+  assert.match(ctrl, /return confirmController\(asRecipient, res, next\)/);
+  assert.match(tools, /String\(recipient\.sandboxGroupId\) !== String\(user\.sandboxGroupId\)/);
+  assert.match(tools, /sender: new mongoose\.Types\.ObjectId\(userId\)/);
+  assert.match(routes, /router\.use\(protect, controller\.requireSandboxAccount\)/);
+  assert.ok(routes.indexOf("requireSandboxAccount") < routes.indexOf("/transfers/:id/confirm"));
+  assert.match(routes, /confirmLimiter, controller\.confirmAsRecipient/);
+});
+
+test("une opération de simulation n'a jamais besoin d'une trésorerie réelle", () => {
+  // Mesuré de bout en bout : sans cela, aucun transfert ne se confirme dans
+  // l'environnement de simulation, qui n'a aucune trésorerie réelle.
+  for (const rel of [
+    "../src/services/transactions/handlers/confirmTransaction.js",
+    "../src/services/transactions/handlers/cancelTransaction.js",
+    "../src/services/cancellation.service.js",
+    "../src/controllers/externalSettlementController.js",
+  ]) {
+    const src = fs.readFileSync(path.join(__dirname, rel), "utf8");
+    const fn = src.slice(src.lastIndexOf("resolveTreasuryFromSystemType(treasurySystemType)") - 700);
+    assert.match(fn, /treasurySystemTypeForMode\(/, rel);
+    assert.match(fn, /\(sandbox \? null : tx\?\.treasuryUserId\)/, rel);
+  }
+});
+
+test("le devis de cagnotte conserve son mode", () => {
+  // Posé dans un sous-schéma, `mode` était perdu en silence : toute participation
+  // à une cagnotte de simulation répondait QUOTE_MISMATCH (mesuré de bout en bout).
+  const Quote = require("../src/models/CagnotteQuote")(mongoose.createConnection());
+  assert.equal(new Quote({ mode: "sandbox" }).mode, "sandbox");
+  assert.ok(Quote.schema.path("mode"));
+});
+
+test("chaque modèle financier porte `mode` à la racine, jamais dans un sous-schéma", () => {
+  const models = fs.readdirSync(path.join(__dirname, "../src/models")).filter((f) => f.endsWith(".js"));
+  for (const file of models) {
+    const src = fs.readFileSync(path.join(__dirname, "../src/models", file), "utf8");
+    if (!/^\s*mode: \{ type: String, enum: \["live", "sandbox"/m.test(src)) continue;
+    const factory = require(path.join(__dirname, "../src/models", file));
+    if (typeof factory !== "function") continue;
+    const Model = factory(mongoose.createConnection());
+    assert.ok(Model.schema?.path("mode"), `${file} : mode absent de la racine`);
+  }
+});
+

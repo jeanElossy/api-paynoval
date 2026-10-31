@@ -538,6 +538,8 @@ exports.internalProtect = asyncHandler(async (req, _res, next) => {
  * qu'à ce qu'un utilisateur ordinaire peut faire sur son propre compte. Le
  * privilège d'exploitation exige un JWT valide et un rôle en base.
  */
+exports.mapUserToReqUser = mapUserToReqUser;
+
 exports.protect = asyncHandler(async (req, _res, next) => {
   const gotInternal = String(getInternalHeaderToken(req) || "").trim();
   const isInternalCaller = Boolean(gotInternal && isValidInternalToken(gotInternal));

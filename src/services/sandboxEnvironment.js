@@ -162,7 +162,8 @@ function assertEnvironmentBoundary({ env = process.env, logger = console } = {})
     logger.warn?.(
       `[env] ⚠️ Simulation ouverte sur l'environnement ${report.appEnv.toUpperCase()}. ` +
         "CONSÉQUENCE : comptes fictifs et comptes ordinaires partagent les mêmes bases et " +
-        "les mêmes clés. Acceptable pour tester, jamais pour un partenaire."
+        "les mêmes clés. Acceptable tant qu'aucune donnée réelle n'existe ici : voir " +
+        "docs/ops/sandbox-environment.md §8 avant le premier client réel."
     );
   }
 
