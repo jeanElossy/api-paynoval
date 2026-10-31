@@ -377,6 +377,24 @@ async function getInternalAdminUserStats(req, res, next) {
   }
 }
 
+/** The postings of a transaction, oldest first. `null` means unreadable, not "none". */
+async function readLedgerEntries(transactionId) {
+  try {
+    const rows = await runtime
+      .getLedgerEntryModel()
+      .find({ transactionId })
+      .select("entryType direction amount currency accountType createdAt")
+      .sort({ createdAt: 1 })
+      .limit(50)
+      .lean();
+
+    return rows.map((row) => ({ ...row, amount: String(row.amount) }));
+  } catch (error) {
+    console.error("[TX-CORE][INTERNAL ADMIN TX][LEDGER] Lecture impossible", error?.message);
+    return null;
+  }
+}
+
 async function getInternalAdminTransactionById(req, res, next) {
   try {
     const { id } = req.params;
@@ -426,6 +444,8 @@ async function getInternalAdminTransactionById(req, res, next) {
     if (!tx) {
       throw createError(404, "Transaction introuvable");
     }
+
+    tx.ledgerEntries = await readLedgerEntries(tx._id);
 
     return res.status(200).json({
       success: true,

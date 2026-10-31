@@ -21,3 +21,9 @@ test("une réconciliation illisible répond 503, jamais une liste vide", () => {
 test("une entrée de blocage ne se supprime pas", () => {
   assert.doesNotMatch(src("controllers/internalAdminRisk.controller.js"), /deleteOne|findByIdAndDelete/);
 });
+
+test("la fiche transaction porte ses écritures, sans masquer une panne", () => {
+  const controller = src("controllers/internalAdminTransactions.controller.js");
+  assert.match(controller, /tx\.ledgerEntries = await readLedgerEntries\(tx\._id\)/);
+  assert.match(controller, /`null` means unreadable/);
+});
