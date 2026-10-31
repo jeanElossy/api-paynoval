@@ -42,6 +42,7 @@
  */
 
 const createError = require("http-errors");
+const { getTxConn } = require("../config/db");
 const { liveOnlyFilter } = require("../utils/accountMode");
 
 // ⚠️ On garde l'objet `runtime` et on résout les modèles au moment de l'appel,
@@ -1224,6 +1225,7 @@ module.exports = { getInternalTreasuryAnalytics };
 /* -------------------------------------------------------------------------- */
 
 const IS_TREASURY = { accountType: "TREASURY" };
+const MAX_VAULT_ROWS = 200;
 
 async function treasuryNetByAccount(match) {
   const rows = await aggLedger([
@@ -1296,3 +1298,43 @@ async function getInternalTreasuryPosition(req, res, next) {
 }
 
 module.exports.getInternalTreasuryPosition = getInternalTreasuryPosition;
+
+/** GET /internal/admin/treasury/vault-positions. Live vaults, totals by currency. */
+async function getInternalVaultPositions(_req, res, next) {
+  try {
+    const Position = require("../models/CagnotteVaultPosition")(getTxConn());
+    const live = liveOnlyFilter();
+
+    const [rows, totals] = await Promise.all([
+      Position.find(live)
+        .sort({ lastMovementAt: -1 })
+        .limit(MAX_VAULT_ROWS)
+        .select("vaultId cagnotteId currency balance closedAt lastMovementAt")
+        .lean()
+        .maxTimeMS(AGG_TIMEOUT_MS),
+      Position.aggregate([
+        { $match: live },
+        { $group: { _id: "$currency", balance: { $sum: num0("$balance") }, count: { $sum: 1 } } },
+      ]).option({ maxTimeMS: AGG_TIMEOUT_MS }),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        rows: rows.map((row) => ({
+          vaultId: row.vaultId,
+          cagnotteId: row.cagnotteId,
+          currency: row.currency,
+          balance: Number(String(row.balance)),
+          closedAt: row.closedAt,
+          lastMovementAt: row.lastMovementAt,
+        })),
+        totals: totals.map((row) => ({ currency: row._id, balance: round2(row.balance), count: row.count })),
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports.getInternalVaultPositions = getInternalVaultPositions;
