@@ -200,6 +200,7 @@ async function getState(user) {
     scenario: {
       outcome: profile.outcome,
       confirmationDelaySeconds: profile.confirmationDelaySeconds,
+      applyTo: profile.applyTo || "all",
     },
     defaults: { ...DEFAULT_SCENARIO },
     outcomes: [...OUTCOME_VALUES],
@@ -385,6 +386,43 @@ async function reset(user) {
 }
 
 /**
+ * Compte de simulation désigné par le back-office, relu dans la base Users : le
+ * mode vient de la base, jamais de l'appelant. Un compte réel est introuvable.
+ */
+async function loadSandboxOwner(userId) {
+  const id = String(userId || "").trim();
+
+  if (!mongoose.isValidObjectId(id)) {
+    throw httpError(400, "INVALID_USER_ID", "Identifiant utilisateur invalide.");
+  }
+
+  const owner = await runtime.usersConn.db
+    .collection("users")
+    .findOne(
+      { _id: new mongoose.Types.ObjectId(id) },
+      { projection: { mode: 1, isSandbox: 1, isReviewerAccount: 1 } }
+    );
+
+  if (!owner) throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+
+  assertSandboxUser(owner);
+  return { ...owner, _id: id };
+}
+
+/** Actions du back-office : les mêmes fonctions que celles du monteur. */
+async function adminGetState(userId) {
+  return getState(await loadSandboxOwner(userId));
+}
+
+async function adminUpdateScenario(userId, input) {
+  return updateScenario(await loadSandboxOwner(userId), input);
+}
+
+async function adminReset(userId) {
+  return reset(await loadSandboxOwner(userId));
+}
+
+/**
  * Provisionnement — appelé par le backend principal (route interne) à la
  * création du compte. Idempotent : rappelé, il ne recrédite pas.
  */
@@ -499,6 +537,9 @@ module.exports = {
   faucet,
   drain,
   reset,
+  adminGetState,
+  adminUpdateScenario,
+  adminReset,
   provisionAccount,
   provisionTreasuries,
   // exportés pour les tests

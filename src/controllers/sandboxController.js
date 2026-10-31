@@ -36,6 +36,7 @@ const updateScenario = asyncHandler(async (req, res) => {
   const scenario = await tools.updateScenario(req.user, {
     outcome: req.body?.outcome,
     confirmationDelaySeconds: req.body?.confirmationDelaySeconds,
+    applyTo: req.body?.applyTo,
   });
   res.json({ success: true, data: { scenario } });
 });
@@ -77,6 +78,23 @@ const provisionAccount = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: out });
 });
 
+const adminGetState = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await tools.adminGetState(req.params.userId) });
+});
+
+const adminUpdateScenario = asyncHandler(async (req, res) => {
+  const scenario = await tools.adminUpdateScenario(req.params.userId, {
+    outcome: req.body?.outcome,
+    confirmationDelaySeconds: req.body?.confirmationDelaySeconds,
+    applyTo: req.body?.applyTo,
+  });
+  res.json({ success: true, data: { scenario } });
+});
+
+const adminReset = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await tools.adminReset(req.params.userId) });
+});
+
 const provisionTreasuries = asyncHandler(async (req, res) => {
   const out = await tools.provisionTreasuries(
     Array.isArray(req.body?.treasuries) ? req.body.treasuries : []
@@ -93,6 +111,9 @@ module.exports = {
   reset,
   getThreeDSChallenge,
   submitThreeDSDecision,
+  adminGetState,
+  adminUpdateScenario,
+  adminReset,
   provisionAccount,
   provisionTreasuries,
 };

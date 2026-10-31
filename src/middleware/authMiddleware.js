@@ -388,6 +388,7 @@ function mapUserToReqUser(userDoc) {
     isSandbox: mode === ACCOUNT_MODES.SANDBOX,
     sandboxGroupId: userDoc.sandboxGroupId ? String(userDoc.sandboxGroupId) : null,
     sandboxDisabledAt: userDoc.sandboxDisabledAt || null,
+    sandboxExpiresAt: userDoc.sandboxExpiresAt || null,
 
     email: userDoc.email,
     role: userDoc.role,

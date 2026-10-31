@@ -42,6 +42,7 @@ const SANDBOX_SELECT_FIELDS = [
   "sandboxReason",
   "sandboxCreatedAt",
   "sandboxDisabledAt",
+  "sandboxExpiresAt",
   "currency",
   "currencyCode",
   "defaultCurrency",

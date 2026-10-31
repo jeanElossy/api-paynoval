@@ -14,7 +14,11 @@
  */
 
 const mongoose = require("mongoose");
-const { OUTCOME_VALUES, DELAY_BOUNDS } = require("../providers/sandbox/sandboxScenario");
+const {
+  OUTCOME_VALUES,
+  SCOPE_VALUES,
+  DELAY_BOUNDS,
+} = require("../providers/sandbox/sandboxScenario");
 
 const schema = new mongoose.Schema(
   {
@@ -22,6 +26,13 @@ const schema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       required: true,
       immutable: true,
+    },
+
+    /** `next` : consommé par le prochain ordre, puis retour au défaut. */
+    applyTo: {
+      type: String,
+      enum: SCOPE_VALUES,
+      default: "all",
     },
 
     outcome: {

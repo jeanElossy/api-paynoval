@@ -19,4 +19,9 @@ router.use(internalProtect);
 router.post("/accounts/:userId/provision", controller.provisionAccount);
 router.post("/treasuries/provision", controller.provisionTreasuries);
 
+// Back-office : les mêmes outils que le monteur, sur le compte désigné.
+router.get("/accounts/:userId/state", controller.adminGetState);
+router.put("/accounts/:userId/scenario", controller.adminUpdateScenario);
+router.post("/accounts/:userId/reset", controller.adminReset);
+
 module.exports = router;

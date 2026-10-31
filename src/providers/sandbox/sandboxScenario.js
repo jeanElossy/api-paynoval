@@ -26,7 +26,17 @@ const SANDBOX_OUTCOMES = Object.freeze({
   FAILURE: "failure",
   PENDING: "pending",
   INSUFFICIENT_FUNDS: "insufficient_funds",
+  TIMEOUT: "timeout",
+  INVALID_DESTINATION: "invalid_destination",
 });
+
+/**
+ * Portée d'un scénario : toutes les opérations, ou la PROCHAINE seulement — le
+ * monteur prépare un refus, le filme, et le compte redevient normal sans autre
+ * geste. C'est l'usage des simulations de Wise : on provoque UN événement.
+ */
+const SCENARIO_SCOPES = Object.freeze({ ALL: "all", NEXT: "next" });
+const SCOPE_VALUES = Object.freeze(Object.values(SCENARIO_SCOPES));
 
 const OUTCOME_VALUES = Object.freeze(Object.values(SANDBOX_OUTCOMES));
 
@@ -36,6 +46,7 @@ const DELAY_BOUNDS = Object.freeze({ min: 0, max: 120 });
 const DEFAULT_SCENARIO = Object.freeze({
   outcome: SANDBOX_OUTCOMES.SUCCESS,
   confirmationDelaySeconds: 3,
+  applyTo: SCENARIO_SCOPES.ALL,
 });
 
 function scenarioError(message) {
@@ -71,7 +82,13 @@ function normalizeScenario(input = {}) {
     );
   }
 
-  return { outcome, confirmationDelaySeconds: delay };
+  const applyTo = String(input?.applyTo ?? SCENARIO_SCOPES.ALL).trim().toLowerCase();
+
+  if (!SCOPE_VALUES.includes(applyTo)) {
+    throw scenarioError(`Portée de scénario inconnue : ${JSON.stringify(input?.applyTo)}.`);
+  }
+
+  return { outcome, confirmationDelaySeconds: delay, applyTo };
 }
 
 /**
@@ -84,6 +101,8 @@ const FAILURE_CODES = Object.freeze({
   CARD_INSUFFICIENT_FUNDS: "CARD_DECLINED_INSUFFICIENT_FUNDS",
   PROVIDER_INSUFFICIENT_FUNDS: "PROVIDER_INSUFFICIENT_FUNDS",
   THREE_DS_FAILED: "THREE_DS_AUTHENTICATION_FAILED",
+  TIMEOUT: "PROVIDER_TIMEOUT",
+  INVALID_DESTINATION: "INVALID_DESTINATION",
 });
 
 const FAILURE_MESSAGES = Object.freeze({
@@ -95,6 +114,8 @@ const FAILURE_MESSAGES = Object.freeze({
   [FAILURE_CODES.PROVIDER_INSUFFICIENT_FUNDS]:
     "Le prestataire n'a pas pu exécuter le versement.",
   [FAILURE_CODES.THREE_DS_FAILED]: "Authentification 3-D Secure refusée.",
+  [FAILURE_CODES.TIMEOUT]: "Le prestataire n'a pas répondu dans le délai imparti.",
+  [FAILURE_CODES.INVALID_DESTINATION]: "Numéro ou compte de destination invalide.",
 });
 
 function insufficientFundsCode({ kind, rail }) {
@@ -160,10 +181,11 @@ function planProviderOutcome({ scenario, kind, rail }) {
     };
   }
 
-  const failureCode =
-    outcome === SANDBOX_OUTCOMES.INSUFFICIENT_FUNDS
-      ? insufficientFundsCode({ kind, rail })
-      : FAILURE_CODES.DECLINED;
+  const failureCode = {
+    [SANDBOX_OUTCOMES.INSUFFICIENT_FUNDS]: insufficientFundsCode({ kind, rail }),
+    [SANDBOX_OUTCOMES.TIMEOUT]: FAILURE_CODES.TIMEOUT,
+    [SANDBOX_OUTCOMES.INVALID_DESTINATION]: FAILURE_CODES.INVALID_DESTINATION,
+  }[outcome] || FAILURE_CODES.DECLINED;
 
   return {
     settle: "failure",
@@ -188,6 +210,8 @@ function planThreeDSDecline() {
 module.exports = {
   SANDBOX_OUTCOMES,
   OUTCOME_VALUES,
+  SCENARIO_SCOPES,
+  SCOPE_VALUES,
   DELAY_BOUNDS,
   DEFAULT_SCENARIO,
   FAILURE_CODES,

@@ -178,6 +178,12 @@ const userSchema = new mongoose.Schema(
       default: null,
     },
 
+    /** Fin de l'accès démo : passé cette date, plus aucune requête n'est servie. */
+    sandboxExpiresAt: {
+      type: Date,
+      default: null,
+    },
+
     kycStatus: {
       type: String,
       enum: ["none", "pending", "verified", "rejected", ""],

@@ -11,6 +11,7 @@ const mongoose = require("mongoose");
 const runtime = require("../transactions/shared/runtime");
 const {
   DEFAULT_SCENARIO,
+  SCENARIO_SCOPES,
   normalizeScenario,
 } = require("../../providers/sandbox/sandboxScenario");
 
@@ -51,7 +52,31 @@ async function loadScenario(userId) {
   return normalizeScenario({
     outcome: doc.outcome,
     confirmationDelaySeconds: doc.confirmationDelaySeconds,
+    applyTo: doc.applyTo,
   });
+}
+
+/**
+ * Scénario de l'ordre en cours. Un scénario « prochaine opération » est
+ * CONSOMMÉ par une mise à jour conditionnelle : deux ordres simultanés ne le
+ * jouent pas deux fois, et le compte revient au défaut.
+ */
+async function takeScenario(userId) {
+  const taken = await model().findOneAndUpdate(
+    { userId: toObjectId(userId), applyTo: SCENARIO_SCOPES.NEXT },
+    { $set: { ...DEFAULT_SCENARIO } },
+    { new: false }
+  );
+
+  if (taken) {
+    return normalizeScenario({
+      outcome: taken.outcome,
+      confirmationDelaySeconds: taken.confirmationDelaySeconds,
+      applyTo: SCENARIO_SCOPES.NEXT,
+    });
+  }
+
+  return loadScenario(userId);
 }
 
 async function saveScenario(userId, input) {
@@ -110,6 +135,7 @@ async function markReset(userId, at = new Date()) {
 module.exports = {
   getProfile,
   loadScenario,
+  takeScenario,
   saveScenario,
   ensureProfile,
   markReset,

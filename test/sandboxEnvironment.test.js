@@ -196,3 +196,60 @@ test("le module est identique dans les trois services", () => {
     assert.equal(hash(copy), reference, `${copy} a divergé`);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* Scénarios de démonstration (2026-10-31)                                    */
+/* -------------------------------------------------------------------------- */
+
+const {
+  normalizeScenario,
+  planProviderOutcome,
+  FAILURE_CODES,
+} = require("../src/providers/sandbox/sandboxScenario");
+
+test("délai dépassé : échec après le délai, code explicite", () => {
+  const plan = planProviderOutcome({
+    scenario: { outcome: "timeout", confirmationDelaySeconds: 30 },
+    kind: "payout",
+    rail: "mobilemoney",
+  });
+  assert.equal(plan.settle, "failure");
+  assert.equal(plan.failureCode, FAILURE_CODES.TIMEOUT);
+  assert.equal(plan.delaySeconds, 30);
+});
+
+test("numéro invalide : refus du prestataire, code explicite", () => {
+  const plan = planProviderOutcome({
+    scenario: { outcome: "invalid_destination", confirmationDelaySeconds: 2 },
+    kind: "payout",
+    rail: "mobilemoney",
+  });
+  assert.equal(plan.failureCode, FAILURE_CODES.INVALID_DESTINATION);
+});
+
+test("portée : toutes les opérations par défaut, la prochaine sur demande", () => {
+  assert.equal(normalizeScenario({ outcome: "failure", confirmationDelaySeconds: 1 }).applyTo, "all");
+  assert.equal(
+    normalizeScenario({ outcome: "failure", confirmationDelaySeconds: 1, applyTo: "next" }).applyTo,
+    "next"
+  );
+  assert.throws(
+    () => normalizeScenario({ outcome: "failure", confirmationDelaySeconds: 1, applyTo: "souvent" }),
+    { code: "INVALID_SANDBOX_SCENARIO" }
+  );
+});
+
+test("les ordres simulés consomment le scénario, atomiquement", () => {
+  const adapters = fs.readFileSync(path.join(__dirname, "../src/providers/sandbox/sandboxAdapters.js"), "utf8");
+  const store = fs.readFileSync(path.join(__dirname, "../src/services/sandbox/sandboxScenarioStore.js"), "utf8");
+  assert.match(adapters, /loadScenario: scenarios\.takeScenario/);
+  assert.match(store, /findOneAndUpdate\(\s*\{ userId: toObjectId\(userId\), applyTo: SCENARIO_SCOPES\.NEXT \}/);
+});
+
+test("le back-office agit sur un compte relu en base, jamais sur sa parole", () => {
+  const tools = fs.readFileSync(path.join(__dirname, "../src/services/sandbox/sandboxToolsService.js"), "utf8");
+  const routes = fs.readFileSync(path.join(__dirname, "../src/routes/internalSandboxRoutes.js"), "utf8");
+  assert.match(tools, /async function loadSandboxOwner/);
+  assert.match(tools, /assertSandboxUser\(owner\)/);
+  assert.match(routes, /router\.use\(internalProtect\)/);
+});
