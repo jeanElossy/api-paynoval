@@ -29,3 +29,12 @@ test("la période courante reste ouverte", async () => {
 
   assert.deepEqual(pipeline[0].$match.createdAt, { $gte: since });
 });
+
+test("un rapport de période refuse des dates invalides ou trop larges", async () => {
+  const { getInternalPeriodReport } = require("../src/controllers/internalDashboardStats.controller");
+  for (const query of [{}, { from: "2026-02-01", to: "2026-01-01" }, { from: "2024-01-01", to: "2026-01-01" }]) {
+    let error;
+    await getInternalPeriodReport({ query }, { set() {} }, (err) => { error = err; });
+    assert.equal(error.status, 400);
+  }
+});

@@ -9,6 +9,8 @@ const { TYPES, normalizeFor } = require("../services/risk/normalizeIdentifiers")
 const runs = () => require("../models/ReconciliationRun")(getTxConn());
 const reviewCases = () => require("../models/TransactionReviewCase")(getTxConn());
 const blacklist = () => require("../models/AmlBlacklistEntry")(getTxConn());
+const wallets = () => require("../models/TxWalletBalance")(getTxConn());
+const transactions = () => require("../models/Transaction")(getTxConn());
 
 const JOBS_LIMIT = 20;
 
@@ -22,6 +24,21 @@ const limit = (req) => Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1)
  * Latest result of each reconciliation job. Failing closed: an unreadable store
  * answers 503, because an empty list would read as "no discrepancy".
  */
+exports.accountClosureCheck = async (req, res, next) => {
+  if (!mongoose.isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ success: false, error: "Identifiant invalide." });
+  }
+
+  try {
+    const { readClosureBlockers } = require("../services/accounts/closureCheck");
+    const userId = new mongoose.Types.ObjectId(req.params.userId);
+    const blockers = await readClosureBlockers({ userId, Wallet: wallets(), Transaction: transactions() });
+    return res.json({ success: true, data: { blockers } });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 exports.latestReconciliation = async (_req, res) => {
   try {
     const items = await runs()
@@ -67,6 +84,39 @@ exports.decideReviewCase = async (req, res) => {
     return res.status(409).json({ success: false, error: "Ce dossier est déjà tranché." });
   }
   res.json({ success: true });
+};
+
+const riskPolicies = () => require("../services/risk/riskPolicy").getRiskPolicyService();
+
+const replyPolicyError = (res, err) =>
+  res.status(err.status || 500).json({ success: false, code: err.code, error: err.message, details: err.details });
+
+exports.listRiskPolicies = async (_req, res) => {
+  try {
+    res.json({ success: true, data: await riskPolicies().overview() });
+  } catch (err) {
+    replyPolicyError(res, err);
+  }
+};
+
+exports.proposeRiskPolicy = async (req, res) => {
+  try {
+    const { review, weights, reason, actor } = req.body || {};
+    res.status(201).json({ success: true, data: await riskPolicies().propose({ review, weights, reason, actor }) });
+  } catch (err) {
+    replyPolicyError(res, err);
+  }
+};
+
+exports.decideRiskPolicy = async (req, res) => {
+  try {
+    const { version, decision } = req.params;
+    const { actor, reason } = req.body || {};
+    const data = await riskPolicies().decide({ version: Number(version), decision, actor, reason });
+    res.json({ success: true, data });
+  } catch (err) {
+    replyPolicyError(res, err);
+  }
 };
 
 exports.listBlacklist = async (req, res) => {

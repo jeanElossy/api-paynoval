@@ -202,4 +202,5 @@ module.exports = {
   computeRiskScore,
   explainRisk,
   loadBlacklistEntries,
+  riskPolicy: () => require("./riskPolicy").getRiskPolicyService(),
 };

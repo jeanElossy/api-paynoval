@@ -197,6 +197,7 @@ function registerTransactionModels(conn) {
    * l'AML ; son index unique partiel garantit UNE version active.
    */
   require("../models/LimitPolicyVersion")(conn);
+  require("../models/RiskPolicyVersion")(conn);
 
   /**
    * ⚠️ Ces deux modèles étaient chargés dans des `try {} catch {}` VIDES.

@@ -9,6 +9,7 @@ const {
 } = require("../../../utils/accountMode");
 const { getTxMetrics } = require("../../txMetrics");
 const runtime = require("../shared/runtime");
+const { reservePromotion } = require("../../promotions/promotionRedemption");
 const { openStepUpReview } = require("../../risk/stepUpReview");
 const { publishDomainEvent } = require("../../events/publisher");
 
@@ -319,6 +320,7 @@ function resolveFeesTreasurySeed() {
 }
 
 async function initiateInternal(req, res, next) {
+  let promotion = null;
   const session = await runtime.startTxSession();
 
   try {
@@ -642,6 +644,17 @@ async function initiateInternal(req, res, next) {
       throw createError(502, "Service pricing indisponible");
     }
 
+    /**
+     * A promotion code lowers the fee, and so what the sender pays. The amount
+     * received stays the one the quote promised.
+     */
+    promotion = await reservePromotion({
+      code: body.promoCode,
+      userId: senderId,
+      bundle: extractPricingBundle(pricingPayload, pricingInput),
+      currency: currencySourceISO,
+    });
+
     const {
       pricingSnapshot,
       grossFrom,
@@ -649,7 +662,7 @@ async function initiateInternal(req, res, next) {
       netFrom,
       netTo,
       treasuryRevenue,
-    } = extractPricingBundle(pricingPayload, pricingInput);
+    } = promotion.bundle;
 
     if (!Number.isFinite(grossFrom) || grossFrom <= 0) {
       throw createError(500, "grossFrom pricing invalide");
@@ -793,6 +806,7 @@ async function initiateInternal(req, res, next) {
         fxRateSourceToTarget: rateUsed,
       },
 
+      promotion: promotion.record,
       pricingSnapshot: normalizePricingSnapshot(pricingSnapshot),
       pricingRuleApplied: pricingSnapshot?.ruleApplied || null,
       pricingFxRuleApplied: pricingSnapshot?.fxRuleApplied || null,
@@ -1102,6 +1116,9 @@ async function initiateInternal(req, res, next) {
       corridorLock: corridorLock.snapshot,
     });
   } catch (err) {
+    // The transfer did not happen: the client keeps their code.
+    await promotion?.release();
+
     safeLog("error", "[TX INTERNAL] failed", {
       message: err?.message,
       code: err?.code || null,

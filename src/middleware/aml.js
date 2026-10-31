@@ -1518,6 +1518,7 @@ module.exports = async function amlMiddleware(req, res, next) {
       baselineResult.status === "fulfilled" ? baselineResult.value : null;
 
     const riskVerdict = riskEngine.computeRiskScore({
+      policy: await riskEngine.riskPolicy().getActive(),
       amount,
       singleTxLimit,
       velocity: velocityCounters,

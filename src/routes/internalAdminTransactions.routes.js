@@ -21,10 +21,13 @@ const {
 
 const {
   getInternalDashboardStats,
+  getInternalPeriodReport,
 } = require("../controllers/internalDashboardStats.controller");
 
 const {
   getInternalTreasuryAnalytics,
+  getInternalTreasuryPosition,
+  getInternalVaultPositions,
 } = require("../controllers/internalTreasuryAnalytics.controller");
 
 const {
@@ -125,6 +128,18 @@ router.get(
 );
 
 router.get(
+  "/internal/admin/treasury/position",
+  requireInternalToken,
+  getInternalTreasuryPosition
+);
+
+router.get(
+  "/internal/admin/treasury/vault-positions",
+  requireInternalToken,
+  getInternalVaultPositions
+);
+
+router.get(
   "/internal/admin/transactions",
   requireInternalToken,
   listInternalAdminTransactions
@@ -195,8 +210,13 @@ router.get("/internal/admin/aml/logs", requireInternalToken, listAmlLogs);
 
 /* Read models and decisions for the console; the backend applies the roles. */
 router.get("/internal/admin/reconciliation/latest", requireInternalToken, riskAdmin.latestReconciliation);
+router.get("/internal/admin/accounts/:userId/closure-check", requireInternalToken, riskAdmin.accountClosureCheck);
 router.get("/internal/admin/review-cases", requireInternalToken, riskAdmin.listReviewCases);
 router.post("/internal/admin/review-cases/:transactionId/decide", requireInternalToken, riskAdmin.decideReviewCase);
+router.get("/internal/admin/reports/period", requireInternalToken, getInternalPeriodReport);
+router.get("/internal/admin/risk-policy", requireInternalToken, riskAdmin.listRiskPolicies);
+router.post("/internal/admin/risk-policy", requireInternalToken, riskAdmin.proposeRiskPolicy);
+router.post("/internal/admin/risk-policy/:version/:decision", requireInternalToken, riskAdmin.decideRiskPolicy);
 router.get("/internal/admin/blacklist", requireInternalToken, riskAdmin.listBlacklist);
 router.post("/internal/admin/blacklist", requireInternalToken, riskAdmin.addBlacklistEntry);
 router.post("/internal/admin/blacklist/:id/deactivate", requireInternalToken, riskAdmin.deactivateBlacklistEntry);

@@ -271,9 +271,9 @@ async function aggregateSeries(sinceSeries, run = runAgg) {
  * et c'est de toute façon l'axe sur lequel se lisent les incidents (un rail
  * mobile money qui se dégrade sur XOF, par exemple).
  */
-async function aggregateCorridors(since, run = runAgg) {
+async function aggregateCorridors(since, run = runAgg, until = null) {
   const rows = await run([
-    { $match: { createdAt: { $gte: since } } },
+    { $match: { createdAt: { $gte: since, ...(until ? { $lt: until } : {}) } } },
     {
       $group: {
         _id: {
@@ -416,4 +416,43 @@ async function getInternalDashboardStats(req, res, next) {
   }
 }
 
-module.exports = { aggregateMoney, getInternalDashboardStats };
+const MAX_REPORT_DAYS = 366;
+
+/**
+ * Figures of a closed period for the finance and regulatory reports. Fails
+ * closed: a report with a missing block is a 503, never a partial total.
+ */
+async function getInternalPeriodReport(req, res, next) {
+  try {
+    const from = new Date(req.query?.from);
+    const to = new Date(req.query?.to);
+    const days = (to - from) / 86400000;
+
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || days <= 0 || days > MAX_REPORT_DAYS) {
+      return next(createError(400, "Période invalide."));
+    }
+
+    const modeMatch = modeScopeFilter("live");
+    const run = (pipeline) => runAgg([{ $match: modeMatch }, ...pipeline]);
+
+    const [money, corridors, amlFlagged] = await Promise.all([
+      aggregateMoney(from, run, to),
+      aggregateCorridors(from, run, to),
+      require("../models/AMLLog").countDocuments({
+        flagged: true,
+        createdAt: { $gte: from, $lt: to },
+      }),
+    ]);
+
+    res.set("Cache-Control", "no-store");
+    return res.status(200).json({
+      success: true,
+      data: { from, to, money, corridors, amlFlagged },
+    });
+  } catch (err) {
+    console.error("[TX-CORE][PERIOD REPORT] lecture impossible :", err?.message);
+    return next(createError(503, "Rapport indisponible."));
+  }
+}
+
+module.exports = { aggregateMoney, getInternalDashboardStats, getInternalPeriodReport };

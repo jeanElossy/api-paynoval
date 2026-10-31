@@ -50,6 +50,33 @@ test("a 500 never exposes a system error code", () => {
   assert.equal(body.code, undefined);
 });
 
+test("a business 503 carries its code, so the app can tell it from an unknown outcome", () => {
+  const err = new Error("Vérification du code indisponible, réessayez.");
+  err.status = 503;
+  err.code = "PROMO_UNAVAILABLE";
+  const { statusCode, body } = run(err);
+  assert.equal(statusCode, 503);
+  assert.equal(body.code, "PROMO_UNAVAILABLE");
+});
+
+test("a 503 never exposes a system error code", () => {
+  const err = new Error("connect ETIMEDOUT");
+  err.status = 503;
+  err.code = "ETIMEDOUT";
+  assert.equal(run(err).body.code, undefined);
+});
+
+test("a 502 keeps its code to itself: only 503 is a status the client acts on", () => {
+  const err = new Error("Service pricing indisponible");
+  err.status = 502;
+  err.code = "PRICING_UPSTREAM_DOWN";
+  assert.equal(run(err).body.code, undefined);
+});
+
+test("an http-errors 503 stays unexposed", () => {
+  assert.equal(run(createError(503, "down", { code: "SOME_INTERNAL" })).body.code, undefined);
+});
+
 test("a system-looking code is not exposed even on a 4xx", () => {
   const err = createError(400, "bad");
   err.code = "ENOENT";
