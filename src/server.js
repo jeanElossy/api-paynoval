@@ -1740,6 +1740,7 @@ async function bootstrap() {
      * l'AML applique. `/limit-policies` : interne, quatre yeux.
      */
     app.use("/api/v1/limits", limitsRoutes);
+    app.use("/api/v1/promotions", require("./routes/promotionsRoutes"));
     app.use("/api/v1/limit-policies", limitPoliciesRoutes);
     app.use("/api/v1/fees", feesRoutes);
     app.use("/api/v1/fx-rules", fxRulesRoutes);

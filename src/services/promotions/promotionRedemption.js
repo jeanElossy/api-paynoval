@@ -44,6 +44,48 @@ async function releaseRedemption({ redemptionId, promotionId, db, logger = conso
   }
 }
 
+/**
+ * What a code would take off this fee, for display before the client confirms.
+ * Reserves nothing: the amount that counts is decided at the transfer itself.
+ */
+async function previewPromotion({ code, userId, fee, currency, db, now = new Date() }) {
+  const clean = String(code || "").trim().toUpperCase();
+  if (!clean) throw refusal("PROMO_INVALID", "Ce code promotionnel n'est pas valide.");
+
+  const database = db || getUsersConn().db;
+
+  let promotion;
+  let redemption;
+  try {
+    promotion = await database.collection(PROMOTIONS).findOne({ code: clean });
+    redemption = promotion
+      ? await database.collection(REDEMPTIONS).findOne({ _id: `${promotion._id}:${userId}` })
+      : null;
+  } catch (err) {
+    throw refusal("PROMO_UNAVAILABLE", "Vérification du code indisponible, réessayez.", 503);
+  }
+
+  assertUsable(promotion, now);
+
+  if (redemption && redemption.status !== "released") {
+    throw refusal("PROMO_ALREADY_USED", "Vous avez déjà utilisé ce code.", 409);
+  }
+  if (promotion.maxUses !== null && promotion.maxUses !== undefined && (promotion.uses || 0) >= promotion.maxUses) {
+    throw refusal("PROMO_EXHAUSTED", "Ce code a atteint sa limite d'utilisation.", 409);
+  }
+
+  const iso = String(currency || "").toUpperCase();
+  const discount = computeDiscount({
+    fee,
+    percent: promotion.discountPercent,
+    cap: promotion.maxDiscount?.[iso],
+    currency: iso,
+  });
+  if (discount <= 0) throw refusal("PROMO_NOT_ELIGIBLE", "Ce code ne s'applique pas à ce transfert.");
+
+  return { code: clean, discount, currency: iso, feeAfter: Number(fee) - discount };
+}
+
 /** Gives a cancelled transfer's code back to the client. */
 function restorePromotion(record) {
   if (!record?.redemptionId) return Promise.resolve();
@@ -135,4 +177,4 @@ async function reservePromotion({ code, userId, bundle, currency, db, now = new 
   return { bundle: applied, record, release };
 }
 
-module.exports = { releaseRedemption, reservePromotion, restorePromotion };
+module.exports = { previewPromotion, releaseRedemption, reservePromotion, restorePromotion };

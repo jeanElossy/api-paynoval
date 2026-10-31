@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { applyDiscountToBundle, computeDiscount } = require("../src/services/promotions/promotionPricing");
-const { reservePromotion } = require("../src/services/promotions/promotionRedemption");
+const { previewPromotion, reservePromotion } = require("../src/services/promotions/promotionRedemption");
 const { normalizePricingSnapshot, buildTreasuryRevenueBreakdown } = require("../src/services/pricingSnapshotNormalizer");
 
 const bundle = () => ({
@@ -188,4 +188,23 @@ test("un autre rail refuse le code à voix haute", () => {
     "utf8"
   );
   assert.match(external, /if \(body\.promoCode\)/);
+});
+
+test("la prévisualisation annonce la réduction sans rien réserver", async () => {
+  const promo = activePromo();
+  const db = fakeDb(promo);
+  db.collection("promotion_redemptions").findOne = async () => null;
+  const out = await previewPromotion({ code: "bienvenue", userId: "u1", fee: 2000, currency: "xof", db });
+  assert.deepEqual(out, { code: "BIENVENUE", discount: 400, currency: "XOF", feeAfter: 1600 });
+  assert.equal(promo.uses, 0);
+});
+
+test("la prévisualisation refuse un code déjà utilisé par ce client", async () => {
+  const db = fakeDb(activePromo());
+  const redemptions = db.collection("promotion_redemptions");
+  redemptions.findOne = async () => ({ status: "reserved" });
+  await assert.rejects(
+    previewPromotion({ code: "bienvenue", userId: "u1", fee: 2000, currency: "XOF", db }),
+    { code: "PROMO_ALREADY_USED" }
+  );
 });
