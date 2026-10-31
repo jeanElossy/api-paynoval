@@ -1,6 +1,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const { currentRequestId } = require("../utils/requestContext");
 const crypto = require("crypto");
 
 function isPlainObject(v) {
@@ -617,6 +618,14 @@ const transactionSchema = new mongoose.Schema(
       default: null,
     },
 
+    /** Request that created this movement (invariant 11). Set once, by the hook below. */
+    requestId: {
+      type: String,
+      default: null,
+      maxlength: 128,
+      immutable: true,
+    },
+
     metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -968,6 +977,13 @@ transactionSchema.set("toJSON", {
   transform(_doc, ret) {
     return serializeTransaction(ret);
   },
+});
+
+// One place, so no creation path can forget it: seven code paths create a
+// transaction. Outside a request (a cron), it stays null.
+transactionSchema.pre("validate", function attachRequestId(next) {
+  if (this.isNew && !this.requestId) this.requestId = currentRequestId();
+  next();
 });
 
 transactionSchema.pre("validate", function (next) {

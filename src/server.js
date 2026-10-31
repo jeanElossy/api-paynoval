@@ -302,8 +302,10 @@ setTxMetrics(
  * présente et toujours inoffensive, sans qu'aucun d'eux ait à changer.
  */
 const { requestIdMiddleware } = require("./utils/requestId");
+const { requestContextMiddleware } = require("./utils/requestContext");
 
 app.use(requestIdMiddleware);
+app.use(requestContextMiddleware);
 
 app.use(metrics.httpMiddleware);
 
