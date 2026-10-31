@@ -26,6 +26,7 @@ const {
 
 const {
   getInternalTreasuryAnalytics,
+  getInternalTreasuryPosition,
 } = require("../controllers/internalTreasuryAnalytics.controller");
 
 const {
@@ -123,6 +124,12 @@ router.get(
   "/internal/admin/treasury/analytics",
   requireInternalToken,
   getInternalTreasuryAnalytics
+);
+
+router.get(
+  "/internal/admin/treasury/position",
+  requireInternalToken,
+  getInternalTreasuryPosition
 );
 
 router.get(

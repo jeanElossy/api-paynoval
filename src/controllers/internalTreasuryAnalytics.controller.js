@@ -49,6 +49,7 @@ const { liveOnlyFilter } = require("../utils/accountMode");
 // getters qui lient le modèle à la connexion transactions. Les déstructurer ici
 // les évaluerait au chargement du module, avant `connectTransactionsDB()`.
 const runtime = require("../services/transactions/shared/runtime");
+const { SERIES_DAYS, buildPosition, currenciesOf } = require("../services/treasury/treasuryPosition");
 
 /* -------------------------------------------------------------------------- */
 /* Constantes                                                                  */
@@ -1217,3 +1218,81 @@ async function getInternalTreasuryAnalytics(req, res, next) {
 }
 
 module.exports = { getInternalTreasuryAnalytics };
+
+/* -------------------------------------------------------------------------- */
+/* Position par devise — écran Trésorerie                                      */
+/* -------------------------------------------------------------------------- */
+
+const IS_TREASURY = { accountType: "TREASURY" };
+
+async function treasuryNetByAccount(match) {
+  const rows = await aggLedger([
+    { $match: { ...IS_TREASURY, ...match } },
+    {
+      $group: {
+        _id: "$accountId",
+        inflow: sumIf(IS_CREDIT, LEDGER_AMOUNT),
+        outflow: sumIf(IS_DEBIT, LEDGER_AMOUNT),
+      },
+    },
+  ]);
+
+  return rows.map((row) => ({ _id: row._id, amount: row.inflow - row.outflow }));
+}
+
+/** GET /internal/admin/treasury/position?currency=XOF. Read-only; live money only. */
+async function getInternalTreasuryPosition(req, res, next) {
+  try {
+    const systems = await runtime.SystemBalance.find({ isSystem: true }).lean();
+    const known = currenciesOf(systems);
+    const currency = pickCurrency(req.query.currency) || known[0] || null;
+
+    if (!currency) {
+      return res.json({ success: true, data: { currency: null, currencies: [], accounts: [], series: [], moves: [] } });
+    }
+
+    const now = Date.now();
+    const posted = { currency, status: "POSTED" };
+    const startOfDay = startOfUtcDay(new Date(now));
+
+    const [pending, lastDay, today, series, moves] = await Promise.all([
+      treasuryNetByAccount({ currency, status: "PENDING" }),
+      treasuryNetByAccount({ ...posted, createdAt: { $gte: new Date(now - 86400000) } }),
+      treasuryNetByAccount({ ...posted, createdAt: { $gte: startOfDay } }),
+      ledgerDailySeries(
+        { ...IS_TREASURY, status: "POSTED", createdAt: { $gte: new Date(now - SERIES_DAYS * 86400000) } },
+        currency
+      ),
+      runtime.LedgerEntry.find({ ...liveOnlyFilter(), ...IS_TREASURY, currency })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("reference entryType direction amount createdAt")
+        .lean()
+        .maxTimeMS(AGG_TIMEOUT_MS),
+    ]);
+
+    return res.json({
+      success: true,
+      data: buildPosition({
+        systems,
+        currency,
+        pending,
+        lastDay,
+        today: today.reduce((sum, row) => sum + row.amount, 0),
+        series,
+        moves: moves.map((move) => ({
+          id: String(move._id),
+          reference: move.reference || null,
+          entryType: move.entryType || null,
+          amount: (move.direction === "DEBIT" ? -1 : 1) * Number(String(move.amount)),
+          createdAt: move.createdAt,
+        })),
+        now,
+      }),
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports.getInternalTreasuryPosition = getInternalTreasuryPosition;
