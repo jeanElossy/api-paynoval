@@ -91,8 +91,10 @@ test("one indexed query on the initiating account — never on the receiver", as
   };
   const rows = await loadUsageRows({ userId: "u1", now: NOW, Transaction });
   assert.equal(rows.length, 1);
-  assert.deepEqual(Object.keys(calls[0]).sort(), ["createdAt", "userId"]);
+  assert.deepEqual(Object.keys(calls[0]).sort(), ["context", "createdAt", "userId"]);
   assert.equal(calls[0].userId, "u1");
+  // Seul l'historique de départ d'un compte de démonstration est écarté.
+  assert.deepEqual(calls[0].context, { $ne: "sandbox_seed" });
 });
 
 test("pot contributions count as PayNoval transfers", async () => {

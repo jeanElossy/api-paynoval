@@ -41,6 +41,7 @@ const {
 } = require("../../providers/sandbox/sandboxScenario");
 const scenarios = require("./sandboxScenarioStore");
 const events = require("./sandboxProviderEvents");
+const { assertDataset, buildSeedTransactions } = require("./demoDatasets");
 
 const SANDBOX = ACCOUNT_MODES.SANDBOX;
 
@@ -374,10 +375,13 @@ async function reset(user) {
     }
   }
 
-  await scenarios.markReset(userId, new Date());
+  const at = new Date();
+  await scenarios.markReset(userId, at);
+  const seeded = await seedDataset(userId, { now: at });
 
   return {
     ...closed,
+    seeded,
     // Fonds encore gelés après clôture : une opération n'a pas pu être
     // terminée. Dit, pas masqué (règle B.1).
     reservedAfterReset: reserved,
@@ -407,6 +411,63 @@ async function loadSandboxOwner(userId) {
 
   assertSandboxUser(owner);
   return { ...owner, _id: id };
+}
+
+/**
+ * Pose l'historique de départ d'une nouvelle génération. Le numéro de génération
+ * s'obtient par une incrémentation atomique : chaque génération n'est écrite
+ * qu'une fois, et ses références uniques rendent un rejeu sans effet.
+ */
+async function seedDataset(userId, { now = new Date() } = {}) {
+  const profile = await requireProfile(userId);
+  if (!profile.dataset) return 0;
+
+  const generation = await scenarios.nextSeedGeneration(userId);
+  const lines = buildSeedTransactions({
+    dataset: profile.dataset,
+    userId,
+    counterpartyId: String(profile.counterpartyId),
+    ownerName: profile.ownerName,
+    counterpartyName: profile.counterpartyName,
+    generation,
+    currency: profile.currency,
+    now,
+  });
+
+  const { Transaction } = models();
+
+  for (const line of lines) {
+    const doc = new Transaction(line);
+    const invalid = doc.validateSync();
+    if (invalid) throw invalid;
+  }
+
+  if (lines.length) {
+    await Transaction.bulkWrite(
+      lines.map((line) => ({
+        updateOne: {
+          filter: { reference: line.reference, mode: SANDBOX },
+          update: { $setOnInsert: line },
+          upsert: true,
+        },
+      })),
+      { ordered: false, timestamps: false }
+    );
+  }
+
+  return lines.length;
+}
+
+/** Choisit le jeu de départ d'un compte, puis le pose. Rappelé, il rejoue. */
+async function applyDataset(userId, { dataset, counterpartyId, ownerName, counterpartyName }) {
+  const owner = await loadSandboxOwner(userId);
+  await scenarios.setDataset(owner._id, {
+    dataset: assertDataset(dataset),
+    counterpartyId,
+    ownerName,
+    counterpartyName,
+  });
+  return { seeded: await seedDataset(owner._id) };
 }
 
 /** Actions du back-office : les mêmes fonctions que celles du monteur. */
@@ -540,6 +601,7 @@ module.exports = {
   adminGetState,
   adminUpdateScenario,
   adminReset,
+  applyDataset,
   provisionAccount,
   provisionTreasuries,
   // exportés pour les tests

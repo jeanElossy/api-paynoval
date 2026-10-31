@@ -17,7 +17,7 @@
 const runtime = require("../shared/runtime");
 const { pickAuthedUserId } = require("../shared/helpers");
 const { buildOwnershipQuery } = require("../shared/ownershipQuery");
-const { resolveHistoryStart } = require("../../sandbox/historyWindow");
+const { resolveHistoryWindow, applyHistoryWindow } = require("../../sandbox/historyWindow");
 const {
   RANGES,
   aggregateInsights,
@@ -58,16 +58,18 @@ function createInsightsHandler({
 
       const range = RANGES[req.query.range] ? req.query.range : "30d";
       const at = now();
-      const rangeFrom = new Date(rangeStart(range, at));
-      // Compte sandbox réinitialisé : rien d'antérieur à la réinitialisation.
-      const historyStart = await resolveHistoryStart(req);
-      const from = historyStart && historyStart > rangeFrom ? historyStart : rangeFrom;
+      const from = new Date(rangeStart(range, at));
 
-      const query = {
-        ...buildOwnershipQuery(Transaction, userId),
-        status: "confirmed",
-        createdAt: { $gte: from },
-      };
+      // Compte sandbox réinitialisé : rien d'antérieur à la réinitialisation,
+      // sauf son jeu de départ.
+      const query = applyHistoryWindow(
+        {
+          ...buildOwnershipQuery(Transaction, userId),
+          status: "confirmed",
+          createdAt: { $gte: from },
+        },
+        await resolveHistoryWindow(req)
+      );
 
       const docs = [];
       let truncated = false;

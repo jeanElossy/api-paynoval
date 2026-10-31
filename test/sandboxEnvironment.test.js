@@ -253,3 +253,106 @@ test("le back-office agit sur un compte relu en base, jamais sur sa parole", () 
   assert.match(tools, /assertSandboxUser\(owner\)/);
   assert.match(routes, /router\.use\(internalProtect\)/);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Jeux de départ (2026-10-31)                                                */
+/* -------------------------------------------------------------------------- */
+
+const mongoose = require("mongoose");
+const { buildSeedTransactions, DATASET_NAMES } = require("../src/services/sandbox/demoDatasets");
+const { applyHistoryWindow, resolveHistoryWindow } = require("../src/services/sandbox/historyWindow");
+
+const SEED_INPUT = {
+  dataset: "active",
+  userId: "64b000000000000000000001",
+  counterpartyId: "64b000000000000000000002",
+  ownerName: "Awa Démo",
+  counterpartyName: "Koffi Démo (bénéficiaire)",
+  generation: 1,
+  currency: "XOF",
+  now: new Date("2026-10-31T12:00:00Z"),
+};
+
+test("chaque ligne de chaque jeu passe la validation du vrai modèle", () => {
+  const Transaction = require("../src/models/Transaction")(mongoose.createConnection());
+
+  for (const dataset of DATASET_NAMES) {
+    for (const line of buildSeedTransactions({ ...SEED_INPUT, dataset })) {
+      const doc = new Transaction(line);
+      // `validateSync` rend null ou undefined sans erreur, selon les versions.
+      assert.ok(!doc.validateSync(), line.reference);
+      assert.equal(doc.mode, "sandbox");
+      assert.equal(doc.status, "confirmed");
+      assert.equal(doc.internalImported, true);
+      assert.ok(!("verificationToken" in line));
+    }
+  }
+});
+
+test("le jeu « compte neuf » est vide, un jeu inconnu est refusé", () => {
+  assert.deepEqual(buildSeedTransactions({ ...SEED_INPUT, dataset: "fresh" }), []);
+  assert.throws(() => buildSeedTransactions({ ...SEED_INPUT, dataset: "riche" }), {
+    code: "INVALID_DEMO_DATASET",
+  });
+});
+
+test("une contrepartie manquante arrête le jeu, sans valeur inventée", () => {
+  assert.throws(() => buildSeedTransactions({ ...SEED_INPUT, counterpartyId: null }), {
+    code: "INVALID_DEMO_DATASET",
+  });
+});
+
+test("les références sont uniques et stables par génération, l'historique est passé", () => {
+  const a = buildSeedTransactions(SEED_INPUT);
+  const b = buildSeedTransactions(SEED_INPUT);
+  const refs = a.map((l) => l.reference);
+  assert.equal(new Set(refs).size, refs.length);
+  assert.deepEqual(refs, b.map((l) => l.reference));
+  assert.notDeepEqual(refs, buildSeedTransactions({ ...SEED_INPUT, generation: 2 }).map((l) => l.reference));
+  assert.ok(a.every((l) => l.createdAt < SEED_INPUT.now));
+});
+
+test("le jeu couvre dépôts, retraits et transferts dans les deux sens", () => {
+  const lines = buildSeedTransactions(SEED_INPUT);
+  assert.deepEqual(
+    [...new Set(lines.map((l) => l.operationType))].sort(),
+    ["DEPOSIT", "TRANSFER", "WITHDRAW"]
+  );
+  assert.ok(lines.some((l) => l.operationType === "TRANSFER" && l.sender === SEED_INPUT.userId));
+  assert.ok(lines.some((l) => l.operationType === "TRANSFER" && l.receiver === SEED_INPUT.userId));
+});
+
+test("après une réinitialisation, l'historique montre le jeu en cours et rien d'autre", () => {
+  const start = new Date("2026-10-31T00:00:00Z");
+  assert.deepEqual(applyHistoryWindow({ userId: "u" }, { start, seedId: "u:2" }), {
+    $and: [
+      { userId: "u" },
+      {
+        $or: [
+          { createdAt: { $gte: start } },
+          { context: "sandbox_seed", contextId: "u:2" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(applyHistoryWindow({ userId: "u" }, null), { userId: "u" });
+});
+
+test("un compte réel n'a jamais de fenêtre", async () => {
+  const getProfile = async () => {
+    throw new Error("ne doit pas être lu");
+  };
+  assert.equal(await resolveHistoryWindow({ user: { _id: "u", mode: "live" } }, { getProfile }), null);
+});
+
+test("l'historique de départ sort des plafonds", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../src/services/limits/limitUsage.js"), "utf8");
+  assert.match(src, /context: \{ \$ne: "sandbox_seed" \}/);
+});
+
+test("la réinitialisation rejoue le jeu, et aucune écriture du grand livre n'en dépend", () => {
+  const tools = fs.readFileSync(path.join(__dirname, "../src/services/sandbox/sandboxToolsService.js"), "utf8");
+  const seed = tools.slice(tools.indexOf("async function seedDataset"), tools.indexOf("async function applyDataset"));
+  assert.match(tools, /const seeded = await seedDataset\(userId, \{ now: at \}\)/);
+  assert.doesNotMatch(seed, /applySandboxFunding|postFunding|LedgerEntry/);
+});

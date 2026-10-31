@@ -148,7 +148,8 @@ const cagnotteRow = (s) => ({
  */
 async function loadUsageRows({ userId, now = Date.now(), Transaction, CagnotteSettlement = null }) {
   const since = new Date(now - WINDOWS.rolling30d);
-  const rows = await Transaction.find({ userId, createdAt: { $gte: since } })
+  // L'historique de départ d'un compte de démonstration n'a engagé aucun argent.
+  const rows = await Transaction.find({ userId, createdAt: { $gte: since }, context: { $ne: "sandbox_seed" } })
     .select(USAGE_FIELDS)
     .lean();
 

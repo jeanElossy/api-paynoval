@@ -117,6 +117,23 @@ async function ensureProfile(userId, { currency, initialBalance }, { session = n
   );
 }
 
+async function nextSeedGeneration(userId) {
+  const doc = await model().findOneAndUpdate(
+    { userId: toObjectId(userId) },
+    { $inc: { seedGeneration: 1 } },
+    { new: true }
+  );
+  return doc.seedGeneration;
+}
+
+async function setDataset(userId, { dataset, counterpartyId, ownerName, counterpartyName }) {
+  return model().findOneAndUpdate(
+    { userId: toObjectId(userId) },
+    { $set: { dataset, counterpartyId: toObjectId(counterpartyId), ownerName, counterpartyName } },
+    { new: true }
+  );
+}
+
 /** Réinitialisation : réglages par défaut, historique repart de `at`. */
 async function markReset(userId, at = new Date()) {
   return model().findOneAndUpdate(
@@ -139,4 +156,6 @@ module.exports = {
   saveScenario,
   ensureProfile,
   markReset,
+  nextSeedGeneration,
+  setDataset,
 };

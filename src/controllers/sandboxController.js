@@ -95,6 +95,16 @@ const adminReset = asyncHandler(async (req, res) => {
   res.json({ success: true, data: await tools.adminReset(req.params.userId) });
 });
 
+const applyDataset = asyncHandler(async (req, res) => {
+  const out = await tools.applyDataset(req.params.userId, {
+    dataset: req.body?.dataset,
+    counterpartyId: req.body?.counterpartyId,
+    ownerName: req.body?.ownerName,
+    counterpartyName: req.body?.counterpartyName,
+  });
+  res.status(201).json({ success: true, data: out });
+});
+
 const provisionTreasuries = asyncHandler(async (req, res) => {
   const out = await tools.provisionTreasuries(
     Array.isArray(req.body?.treasuries) ? req.body.treasuries : []
@@ -114,6 +124,7 @@ module.exports = {
   adminGetState,
   adminUpdateScenario,
   adminReset,
+  applyDataset,
   provisionAccount,
   provisionTreasuries,
 };

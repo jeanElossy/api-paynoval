@@ -23,5 +23,6 @@ router.post("/treasuries/provision", controller.provisionTreasuries);
 router.get("/accounts/:userId/state", controller.adminGetState);
 router.put("/accounts/:userId/scenario", controller.adminUpdateScenario);
 router.post("/accounts/:userId/reset", controller.adminReset);
+router.post("/accounts/:userId/dataset", controller.applyDataset);
 
 module.exports = router;

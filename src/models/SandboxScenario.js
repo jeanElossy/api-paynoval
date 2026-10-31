@@ -64,6 +64,13 @@ const schema = new mongoose.Schema(
       required: true,
     },
 
+    /** Jeu de départ et sa contrepartie, rejoués à chaque réinitialisation. */
+    dataset: { type: String, default: null },
+    seedGeneration: { type: Number, default: 0 },
+    counterpartyId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    ownerName: { type: String, trim: true, default: null },
+    counterpartyName: { type: String, trim: true, default: null },
+
     /** Historique affiché à partir de cette date (réinitialisation). */
     historyStartsAt: {
       type: Date,
