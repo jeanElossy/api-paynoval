@@ -22,7 +22,7 @@
 
 const DEFAULT_ENFORCE_FROM = "2026-10-25T00:00:00.000Z";
 
-const STAFF_ROLES = Object.freeze(["support", "compliance", "admin", "superadmin", "security", "fraud-analyst"]);
+const STAFF_ROLES = Object.freeze(["finance", "readonly", "support", "compliance", "admin", "superadmin", "security", "fraud-analyst"]);
 
 function enforceFromDate(env = process.env) {
   const raw = String(env.STAFF_2FA_ENFORCE_FROM || "").trim();

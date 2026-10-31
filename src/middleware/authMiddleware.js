@@ -21,6 +21,7 @@ if (process.env.NODE_ENV !== "production") {
   }
 }
 
+const { readSessionRefusal } = require("./sessionRevocation");
 const jwt = require("jsonwebtoken");
 const createError = require("http-errors");
 const asyncHandler = require("express-async-handler");
@@ -625,6 +626,20 @@ exports.protect = asyncHandler(async (req, _res, next) => {
 
   if (!user) {
     return next(createError(401, "Utilisateur non trouvé"));
+  }
+
+  /**
+   * Revocation stops at the backend unless it is repeated here: this service
+   * moves the money. Same rule as `paynoval-backend/middleware/authMiddleware.js`.
+   */
+  const sessionRefusal = await readSessionRefusal({
+    user,
+    decoded,
+    database: User.db,
+  });
+
+  if (sessionRefusal) {
+    return next(createError(sessionRefusal.status, sessionRefusal.message));
   }
 
   /* ==========================================================================

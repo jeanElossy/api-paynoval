@@ -128,9 +128,9 @@ function successRate(countSuccess, countFailed) {
 /* -------------------------------------------------------------------------- */
 
 /** Volume abouti, frais encaissés et répartition par statut, par devise. */
-async function aggregateMoney(since, run = runAgg) {
+async function aggregateMoney(since, run = runAgg, until = null) {
   const rows = await run([
-    { $match: { createdAt: { $gte: since } } },
+    { $match: { createdAt: { $gte: since, ...(until ? { $lt: until } : {}) } } },
     {
       $group: {
         _id: CURRENCY_SOURCE,
@@ -343,6 +343,7 @@ async function getInternalDashboardStats(req, res, next) {
     const windowKey = resolveWindow(req.query?.window);
     const now = Date.now();
     const since = new Date(now - WINDOWS[windowKey]);
+    const previousSince = new Date(now - 2 * WINDOWS[windowKey]);
     const sinceSeries = new Date(now - SERIES_DAYS * 24 * 60 * 60 * 1000);
 
     // Un bloc en échec ne doit pas vider tout l'écran : on dégrade bloc à bloc.
@@ -353,6 +354,7 @@ async function getInternalDashboardStats(req, res, next) {
       "series",
       "corridors",
       "providers",
+      "previousMoney",
     ];
 
     /**
@@ -370,6 +372,8 @@ async function getInternalDashboardStats(req, res, next) {
       aggregateSeries(sinceSeries, run),
       aggregateCorridors(since, run),
       aggregateProviders(since, run),
+      // Same length just before: the comparison every dashboard opens with.
+      aggregateMoney(previousSince, run, since),
     ]);
 
     const degraded = [];
@@ -412,4 +416,4 @@ async function getInternalDashboardStats(req, res, next) {
   }
 }
 
-module.exports = { getInternalDashboardStats };
+module.exports = { aggregateMoney, getInternalDashboardStats };

@@ -37,6 +37,8 @@ const {
 
 const { listAmlLogs } = require("../controllers/internalAdminAmlLogs.controller");
 
+const riskAdmin = require("../controllers/internalAdminRisk.controller");
+
 const router = express.Router();
 
 /**
@@ -190,5 +192,13 @@ router.get(
 );
 
 router.get("/internal/admin/aml/logs", requireInternalToken, listAmlLogs);
+
+/* Read models and decisions for the console; the backend applies the roles. */
+router.get("/internal/admin/reconciliation/latest", requireInternalToken, riskAdmin.latestReconciliation);
+router.get("/internal/admin/review-cases", requireInternalToken, riskAdmin.listReviewCases);
+router.post("/internal/admin/review-cases/:transactionId/decide", requireInternalToken, riskAdmin.decideReviewCase);
+router.get("/internal/admin/blacklist", requireInternalToken, riskAdmin.listBlacklist);
+router.post("/internal/admin/blacklist", requireInternalToken, riskAdmin.addBlacklistEntry);
+router.post("/internal/admin/blacklist/:id/deactivate", requireInternalToken, riskAdmin.deactivateBlacklistEntry);
 
 module.exports = router;
