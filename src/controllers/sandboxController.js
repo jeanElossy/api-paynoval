@@ -118,6 +118,7 @@ const adminReset = asyncHandler(async (req, res) => {
 const applyDataset = asyncHandler(async (req, res) => {
   const out = await tools.applyDataset(req.params.userId, {
     dataset: req.body?.dataset,
+    country: req.body?.country,
     counterpartyId: req.body?.counterpartyId,
     ownerName: req.body?.ownerName,
     counterpartyName: req.body?.counterpartyName,

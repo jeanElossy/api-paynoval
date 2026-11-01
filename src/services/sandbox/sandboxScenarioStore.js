@@ -126,10 +126,10 @@ async function nextSeedGeneration(userId) {
   return doc.seedGeneration;
 }
 
-async function setDataset(userId, { dataset, counterpartyId, ownerName, counterpartyName }) {
+async function setDataset(userId, { dataset, countryCode, counterpartyId, ownerName, counterpartyName }) {
   return model().findOneAndUpdate(
     { userId: toObjectId(userId) },
-    { $set: { dataset, counterpartyId: toObjectId(counterpartyId), ownerName, counterpartyName } },
+    { $set: { dataset, countryCode, counterpartyId: toObjectId(counterpartyId), ownerName, counterpartyName } },
     { new: true }
   );
 }

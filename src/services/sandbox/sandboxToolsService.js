@@ -514,6 +514,7 @@ async function seedDataset(userId, { now = new Date() } = {}) {
     counterpartyName: profile.counterpartyName,
     generation,
     currency: profile.currency,
+    country: profile.countryCode || "CI",
     now,
   });
 
@@ -545,10 +546,11 @@ async function seedDataset(userId, { now = new Date() } = {}) {
 }
 
 /** Choisit le jeu de départ d'un compte, puis le pose. Rappelé, il rejoue. */
-async function applyDataset(userId, { dataset, counterpartyId, ownerName, counterpartyName }) {
+async function applyDataset(userId, { dataset, country, counterpartyId, ownerName, counterpartyName }) {
   const owner = await loadSandboxOwner(userId);
   await scenarios.setDataset(owner._id, {
     dataset: assertDataset(dataset),
+    countryCode: country,
     counterpartyId,
     ownerName,
     counterpartyName,

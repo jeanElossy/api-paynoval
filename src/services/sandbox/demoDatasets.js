@@ -64,8 +64,26 @@ function assertDataset(dataset) {
   return dataset;
 }
 
-function buildLine(entry, index, ctx) {
-  const { userId, counterpartyId, ownerName, counterpartyName, generation, currency, now } = ctx;
+/**
+ * Les montants du jeu sont en XOF. Une devise forte se divise par 500, et le
+ * mobile money n'existe que pour les comptes ivoiriens : ailleurs, la carte.
+ */
+function localize(entry, currency) {
+  if (currency === "XOF") return entry;
+
+  const scale = (v) => Math.round((v / 500) * 100) / 100;
+  const amount = scale(entry.amount);
+  const fee = scale(entry.fee);
+
+  if (entry.kind === "deposit" || entry.kind === "withdraw") {
+    return { ...entry, amount, fee, rail: "card", provider: "visa_direct" };
+  }
+  return { ...entry, amount, fee };
+}
+
+function buildLine(rawEntry, index, ctx) {
+  const { userId, counterpartyId, ownerName, counterpartyName, generation, currency, country, now } = ctx;
+  const entry = localize(rawEntry, currency);
   const at = new Date(now.getTime() - entry.daysAgo * DAY_MS);
 
   const base = {
@@ -80,15 +98,15 @@ function buildLine(entry, index, ctx) {
     userId,
     amount: String(entry.amount),
     transactionFees: String(entry.fee),
-    netAmount: String(entry.amount - entry.fee),
-    localAmount: String(entry.amount - entry.fee),
+    netAmount: String(Math.round((entry.amount - entry.fee) * 100) / 100),
+    localAmount: String(Math.round((entry.amount - entry.fee) * 100) / 100),
     exchangeRate: "1",
     currency,
     currencySource: currency,
     currencyTarget: currency,
     senderCurrencySymbol: currency,
     localCurrencySymbol: currency,
-    country: "CI",
+    country,
     fundsCaptured: true,
     beneficiaryCredited: true,
     confirmedAt: at,
@@ -112,14 +130,15 @@ function buildLine(entry, index, ctx) {
   }
 
   if (entry.kind === "withdraw") {
+    const card = entry.rail === "card";
     return {
       ...base,
-      flow: FLOW_OF.withdraw,
+      flow: card ? "PAYNOVAL_TO_CARD_PAYOUT" : FLOW_OF.withdraw,
       operationType: "WITHDRAW",
       funds: "paynoval",
-      destination: "mobilemoney",
+      destination: card ? "visa_direct" : "mobilemoney",
       provider: entry.provider,
-      operator: entry.provider,
+      operator: card ? null : entry.provider,
       sender: userId,
       senderName: ownerName,
       nameDestinataire: ownerName,
@@ -153,6 +172,7 @@ function buildSeedTransactions({
   counterpartyName,
   generation,
   currency,
+  country = "CI",
   now,
 }) {
   assertDataset(dataset);
@@ -161,7 +181,7 @@ function buildSeedTransactions({
     throw seedError("Jeu de données : compte, contrepartie ou devise manquants.");
   }
 
-  const ctx = { userId, counterpartyId, ownerName, counterpartyName, generation, currency, now };
+  const ctx = { userId, counterpartyId, ownerName, counterpartyName, generation, currency, country, now };
   return DATASETS[dataset].map((entry, index) => buildLine(entry, index, ctx));
 }
 

@@ -463,3 +463,43 @@ test("chaque modèle financier porte `mode` à la racine, jamais dans un sous-sc
   }
 });
 
+test("le pays d'une carte vient de l'émetteur, jamais du téléphone", async () => {
+  const { cardCountry } = require("../src/middleware/cardCountry");
+  const run = async (user, body, card = null) => {
+    const req = { user, body };
+    await new Promise((done, fail) =>
+      cardCountry({ loadCard: async () => card })(req, {}, (err) => (err ? fail(err) : done()))
+    );
+    return req.body;
+  };
+  const cardRail = { funds: "visa_direct", cardId: "c1", fromCountry: "FR" };
+
+  // Compte réel : le pays de l'émetteur fait foi, même contre le téléphone.
+  const live = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI" }, { issuerCountry: "FR" });
+  assert.equal(live.sourceCardCountry, "FR");
+
+  // Compte réel sans émetteur connu : rien n'est deviné, le moteur refusera.
+  const unknown = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI", binCountry: "CI" });
+  assert.equal(unknown.sourceCardCountry, undefined);
+  assert.equal(unknown.binCountry, undefined);
+
+  // Carte de test : le pays du compte, en simulation seulement.
+  const demo = await run({ _id: "u", mode: "sandbox", country: "France" }, cardRail);
+  assert.equal(demo.sourceCardCountry, "FR");
+
+  const payout = await run({ _id: "u", mode: "sandbox" }, { destination: "visa_direct", toCountry: "CI" });
+  assert.equal(payout.cardCountry, "CI");
+});
+
+test("un jeu en devise forte reste valide et passe par la carte, jamais par le mobile money", () => {
+  const Transaction = require("../src/models/Transaction")(mongoose.createConnection());
+  const lines = buildSeedTransactions({ ...SEED_INPUT, currency: "EUR", country: "FR" });
+
+  for (const line of lines) {
+    assert.ok(!new Transaction(line).validateSync(), line.reference);
+    assert.equal(line.country, "FR");
+    assert.notEqual(line.funds, "mobilemoney");
+    assert.notEqual(line.destination, "mobilemoney");
+  }
+});
+
