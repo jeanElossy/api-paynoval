@@ -91,8 +91,10 @@ test("one indexed query on the initiating account — never on the receiver", as
   };
   const rows = await loadUsageRows({ userId: "u1", now: NOW, Transaction });
   assert.equal(rows.length, 1);
-  assert.deepEqual(Object.keys(calls[0]).sort(), ["createdAt", "userId"]);
+  assert.deepEqual(Object.keys(calls[0]).sort(), ["createdAt", "excludedFromUsage", "userId"]);
   assert.equal(calls[0].userId, "u1");
+  // Seul ce que la simulation a écarté sort du cumul.
+  assert.deepEqual(calls[0].excludedFromUsage, { $ne: true });
 });
 
 test("pot contributions count as PayNoval transfers", async () => {

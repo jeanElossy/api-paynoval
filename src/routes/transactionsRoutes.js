@@ -744,6 +744,7 @@ const requireTrustedDepositPhone = require("../middleware/requireTrustedDepositP
 const express = require("express");
 const nodeCrypto = require("crypto");
 const rateLimit = require("express-rate-limit");
+const { cardCountry } = require("../middleware/cardCountry");
 const { body, param, query } = require("express-validator");
 const asyncHandler = require("express-async-handler");
 
@@ -1291,6 +1292,7 @@ router.post(
   idempotency(),
   normalizeProviderRails,
   normalizeInitiateBody,
+  cardCountry(),
   // Service control (docs/architecture/service-control.md): a 503 here is
   // never frozen by the idempotency registry — the same key replays once.
   serviceControlGuard({ phase: "initiate", describe: describeInitiate, label: "transactions.initiate" }),

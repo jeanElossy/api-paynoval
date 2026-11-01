@@ -1383,7 +1383,9 @@ module.exports = async function amlMiddleware(req, res, next) {
       });
     }
 
-    if (stats && Number(stats.sameDestShortTime || 0) > 3) {
+    // Une démonstration enchaîne de petites opérations : ni blocage, ni alerte au
+    // personnel pour de l'argent fictif. La surveillance est production seulement.
+    if (req.user?.mode !== "sandbox" && stats && Number(stats.sameDestShortTime || 0) > 3) {
       logger.warn("[AML] Structuring suspect", {
         provider,
         userId,

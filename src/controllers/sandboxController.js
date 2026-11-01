@@ -10,6 +10,8 @@ const asyncHandler = require("express-async-handler");
 const tools = require("../services/sandbox/sandboxToolsService");
 const threeDS = require("../services/sandbox/sandboxThreeDSService");
 const { ACCOUNT_MODES } = require("../utils/accountMode");
+const { mapUserToReqUser } = require("../middleware/authMiddleware");
+const { confirmController } = require("../services/transactions/handlers/confirmTransaction");
 
 function idempotencyKeyOf(req) {
   const raw = req.get("Idempotency-Key") || req.body?.idempotencyKey || "";
@@ -36,6 +38,7 @@ const updateScenario = asyncHandler(async (req, res) => {
   const scenario = await tools.updateScenario(req.user, {
     outcome: req.body?.outcome,
     confirmationDelaySeconds: req.body?.confirmationDelaySeconds,
+    applyTo: req.body?.applyTo,
   });
   res.json({ success: true, data: { scenario } });
 });
@@ -55,6 +58,24 @@ const drain = asyncHandler(async (req, res) => {
 
 const reset = asyncHandler(async (req, res) => {
   res.json({ success: true, data: await tools.reset(req.user) });
+});
+
+const listPendingTransfers = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await tools.listPendingTransfers(req.user) });
+});
+
+/**
+ * Répondre à la place du destinataire : le VRAI contrôleur de confirmation,
+ * appelé avec son identité. Il répond lui-même, succès ou refus.
+ */
+const confirmAsRecipient = asyncHandler(async (req, res, next) => {
+  const recipient = await tools.loadRecipientOf(req.user, req.params.id);
+
+  const asRecipient = Object.create(req);
+  asRecipient.user = mapUserToReqUser(recipient);
+  asRecipient.body = { transactionId: req.params.id, securityAnswer: req.body?.securityAnswer };
+
+  return confirmController(asRecipient, res, next);
 });
 
 const getThreeDSChallenge = asyncHandler(async (req, res) => {
@@ -77,6 +98,34 @@ const provisionAccount = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: out });
 });
 
+const adminGetState = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await tools.adminGetState(req.params.userId) });
+});
+
+const adminUpdateScenario = asyncHandler(async (req, res) => {
+  const scenario = await tools.adminUpdateScenario(req.params.userId, {
+    outcome: req.body?.outcome,
+    confirmationDelaySeconds: req.body?.confirmationDelaySeconds,
+    applyTo: req.body?.applyTo,
+  });
+  res.json({ success: true, data: { scenario } });
+});
+
+const adminReset = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await tools.adminReset(req.params.userId) });
+});
+
+const applyDataset = asyncHandler(async (req, res) => {
+  const out = await tools.applyDataset(req.params.userId, {
+    dataset: req.body?.dataset,
+    country: req.body?.country,
+    counterpartyId: req.body?.counterpartyId,
+    ownerName: req.body?.ownerName,
+    counterpartyName: req.body?.counterpartyName,
+  });
+  res.status(201).json({ success: true, data: out });
+});
+
 const provisionTreasuries = asyncHandler(async (req, res) => {
   const out = await tools.provisionTreasuries(
     Array.isArray(req.body?.treasuries) ? req.body.treasuries : []
@@ -91,8 +140,14 @@ module.exports = {
   faucet,
   drain,
   reset,
+  listPendingTransfers,
+  confirmAsRecipient,
   getThreeDSChallenge,
   submitThreeDSDecision,
+  adminGetState,
+  adminUpdateScenario,
+  adminReset,
+  applyDataset,
   provisionAccount,
   provisionTreasuries,
 };

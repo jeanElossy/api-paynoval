@@ -41,6 +41,7 @@ const {
 } = require("../../providers/sandbox/sandboxScenario");
 const scenarios = require("./sandboxScenarioStore");
 const events = require("./sandboxProviderEvents");
+const { assertDataset, buildSeedTransactions } = require("./demoDatasets");
 
 const SANDBOX = ACCOUNT_MODES.SANDBOX;
 
@@ -200,6 +201,7 @@ async function getState(user) {
     scenario: {
       outcome: profile.outcome,
       confirmationDelaySeconds: profile.confirmationDelaySeconds,
+      applyTo: profile.applyTo || "all",
     },
     defaults: { ...DEFAULT_SCENARIO },
     outcomes: [...OUTCOME_VALUES],
@@ -373,15 +375,200 @@ async function reset(user) {
     }
   }
 
-  await scenarios.markReset(userId, new Date());
+  const at = new Date();
+  await scenarios.markReset(userId, at);
+
+  // Les prises d'avant ne comptent plus : ni plafonds, ni anti-doublon.
+  const owner = new mongoose.Types.ObjectId(String(userId));
+  await models().Transaction.updateMany(
+    { mode: SANDBOX, $or: [{ userId: owner }, { sender: owner }], excludedFromUsage: { $ne: true } },
+    { $set: { excludedFromUsage: true } }
+  );
+
+  const seeded = await seedDataset(userId, { now: at });
 
   return {
     ...closed,
+    seeded,
     // Fonds encore gelés après clôture : une opération n'a pas pu être
     // terminée. Dit, pas masqué (règle B.1).
     reservedAfterReset: reserved,
     state: await getState(user),
   };
+}
+
+/**
+ * Compte de simulation désigné par le back-office, relu dans la base Users : le
+ * mode vient de la base, jamais de l'appelant. Un compte réel est introuvable.
+ */
+async function loadSandboxOwner(userId) {
+  const id = String(userId || "").trim();
+
+  if (!mongoose.isValidObjectId(id)) {
+    throw httpError(400, "INVALID_USER_ID", "Identifiant utilisateur invalide.");
+  }
+
+  const owner = await runtime.usersConn.db
+    .collection("users")
+    .findOne(
+      { _id: new mongoose.Types.ObjectId(id) },
+      { projection: { mode: 1, isSandbox: 1, isReviewerAccount: 1 } }
+    );
+
+  if (!owner) throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+
+  assertSandboxUser(owner);
+  return { ...owner, _id: id };
+}
+
+/**
+ * ── LE DESTINATAIRE, QUAND ON N'A QU'UN TÉLÉPHONE ─────────────────────────────
+ *
+ * Un transfert PayNoval ne se termine que lorsque le destinataire répond à la
+ * question de sécurité : jusque-là, les fonds restent réservés. Un partenaire
+ * seul devant son téléphone resterait bloqué. C'est l'usage des simulations de
+ * Wise : provoquer l'événement de l'autre partie.
+ *
+ * Rien n'est contourné : la réponse passe par le VRAI contrôleur de confirmation,
+ * avec l'identité du destinataire, donc même comparaison, même compteur
+ * d'essais et même verrouillage. Seul l'expéditeur d'un transfert en attente,
+ * vers un compte de SON groupe, peut agir ainsi.
+ */
+function transferIdOf(raw) {
+  const id = String(raw || "").trim();
+  if (!mongoose.isValidObjectId(id)) throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+  return id;
+}
+
+async function listPendingTransfers(user) {
+  const userId = assertSandboxUser(user);
+  const { Transaction } = models();
+
+  const rows = await Transaction.find({
+    mode: SANDBOX,
+    sender: new mongoose.Types.ObjectId(userId),
+    flow: "PAYNOVAL_INTERNAL_TRANSFER",
+    status: "pending",
+  })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .select("reference amount currency senderCurrencySymbol nameDestinataire securityQuestion createdAt")
+    .lean();
+
+  return rows.map((tx) => ({
+    id: String(tx._id),
+    reference: tx.reference,
+    amount: decToNumber(tx.amount),
+    currency: tx.senderCurrencySymbol || tx.currency || null,
+    recipientName: tx.nameDestinataire || null,
+    securityQuestion: tx.securityQuestion || null,
+    createdAt: tx.createdAt,
+  }));
+}
+
+/** Le compte destinataire, relu en base, s'il est bien dans le groupe de l'appelant. */
+async function loadRecipientOf(user, transactionId) {
+  const userId = assertSandboxUser(user);
+  const { Transaction } = models();
+
+  const tx = await Transaction.findOne({
+    _id: transferIdOf(transactionId),
+    mode: SANDBOX,
+    sender: new mongoose.Types.ObjectId(userId),
+    flow: "PAYNOVAL_INTERNAL_TRANSFER",
+  })
+    .select("receiver")
+    .lean();
+
+  if (!tx?.receiver) throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+
+  const recipient = await runtime.usersConn.db.collection("users").findOne({ _id: tx.receiver });
+
+  if (
+    !recipient ||
+    resolveUserMode(recipient) !== SANDBOX ||
+    !user.sandboxGroupId ||
+    String(recipient.sandboxGroupId) !== String(user.sandboxGroupId)
+  ) {
+    throw httpError(404, "NOT_FOUND", "Ressource introuvable.");
+  }
+
+  return recipient;
+}
+
+/**
+ * Pose l'historique de départ d'une nouvelle génération. Le numéro de génération
+ * s'obtient par une incrémentation atomique : chaque génération n'est écrite
+ * qu'une fois, et ses références uniques rendent un rejeu sans effet.
+ */
+async function seedDataset(userId, { now = new Date() } = {}) {
+  const profile = await requireProfile(userId);
+  if (!profile.dataset) return 0;
+
+  const generation = await scenarios.nextSeedGeneration(userId);
+  const lines = buildSeedTransactions({
+    dataset: profile.dataset,
+    userId,
+    counterpartyId: String(profile.counterpartyId),
+    ownerName: profile.ownerName,
+    counterpartyName: profile.counterpartyName,
+    generation,
+    currency: profile.currency,
+    country: profile.countryCode || "CI",
+    now,
+  });
+
+  const { Transaction } = models();
+
+  for (const line of lines) {
+    const doc = new Transaction(line);
+    const invalid = doc.validateSync();
+    if (invalid) throw invalid;
+  }
+
+  if (lines.length) {
+    await Transaction.bulkWrite(
+      lines.map((line) => ({
+        updateOne: {
+          filter: { reference: line.reference, mode: SANDBOX },
+          update: { $setOnInsert: line },
+          upsert: true,
+          // Par opération : à ce niveau, l'option globale est ignorée, et Mongoose
+          // poserait `updatedAt` en conflit avec celui de la ligne.
+          timestamps: false,
+        },
+      })),
+      { ordered: false }
+    );
+  }
+
+  return lines.length;
+}
+
+/** Choisit le jeu de départ d'un compte, puis le pose. Rappelé, il rejoue. */
+async function applyDataset(userId, { dataset, country, counterpartyId, ownerName, counterpartyName }) {
+  const owner = await loadSandboxOwner(userId);
+  await scenarios.setDataset(owner._id, {
+    dataset: assertDataset(dataset),
+    countryCode: country,
+    counterpartyId,
+    ownerName,
+    counterpartyName,
+  });
+  return { seeded: await seedDataset(owner._id) };
+}
+
+/** Actions du back-office : les mêmes fonctions que celles du monteur. */
+async function adminGetState(userId) {
+  return getState(await loadSandboxOwner(userId));
+}
+
+async function adminUpdateScenario(userId, input) {
+  return updateScenario(await loadSandboxOwner(userId), input);
+}
+
+async function adminReset(userId) {
+  return reset(await loadSandboxOwner(userId));
 }
 
 /**
@@ -499,6 +686,12 @@ module.exports = {
   faucet,
   drain,
   reset,
+  listPendingTransfers,
+  loadRecipientOf,
+  adminGetState,
+  adminUpdateScenario,
+  adminReset,
+  applyDataset,
   provisionAccount,
   provisionTreasuries,
   // exportés pour les tests

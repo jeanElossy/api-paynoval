@@ -11,6 +11,7 @@ const mongoose = require("mongoose");
 const runtime = require("../transactions/shared/runtime");
 const {
   DEFAULT_SCENARIO,
+  SCENARIO_SCOPES,
   normalizeScenario,
 } = require("../../providers/sandbox/sandboxScenario");
 
@@ -51,7 +52,31 @@ async function loadScenario(userId) {
   return normalizeScenario({
     outcome: doc.outcome,
     confirmationDelaySeconds: doc.confirmationDelaySeconds,
+    applyTo: doc.applyTo,
   });
+}
+
+/**
+ * Scénario de l'ordre en cours. Un scénario « prochaine opération » est
+ * CONSOMMÉ par une mise à jour conditionnelle : deux ordres simultanés ne le
+ * jouent pas deux fois, et le compte revient au défaut.
+ */
+async function takeScenario(userId) {
+  const taken = await model().findOneAndUpdate(
+    { userId: toObjectId(userId), applyTo: SCENARIO_SCOPES.NEXT },
+    { $set: { ...DEFAULT_SCENARIO } },
+    { new: false }
+  );
+
+  if (taken) {
+    return normalizeScenario({
+      outcome: taken.outcome,
+      confirmationDelaySeconds: taken.confirmationDelaySeconds,
+      applyTo: SCENARIO_SCOPES.NEXT,
+    });
+  }
+
+  return loadScenario(userId);
 }
 
 async function saveScenario(userId, input) {
@@ -92,6 +117,23 @@ async function ensureProfile(userId, { currency, initialBalance }, { session = n
   );
 }
 
+async function nextSeedGeneration(userId) {
+  const doc = await model().findOneAndUpdate(
+    { userId: toObjectId(userId) },
+    { $inc: { seedGeneration: 1 } },
+    { new: true }
+  );
+  return doc.seedGeneration;
+}
+
+async function setDataset(userId, { dataset, countryCode, counterpartyId, ownerName, counterpartyName }) {
+  return model().findOneAndUpdate(
+    { userId: toObjectId(userId) },
+    { $set: { dataset, countryCode, counterpartyId: toObjectId(counterpartyId), ownerName, counterpartyName } },
+    { new: true }
+  );
+}
+
 /** Réinitialisation : réglages par défaut, historique repart de `at`. */
 async function markReset(userId, at = new Date()) {
   return model().findOneAndUpdate(
@@ -110,7 +152,10 @@ async function markReset(userId, at = new Date()) {
 module.exports = {
   getProfile,
   loadScenario,
+  takeScenario,
   saveScenario,
   ensureProfile,
   markReset,
+  nextSeedGeneration,
+  setDataset,
 };

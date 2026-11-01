@@ -15,6 +15,7 @@
  * - rend les webhooks idempotents via eventId dans webhookHistory
  */
 
+const { treasurySystemTypeForMode } = require("../services/treasuryRegistry");
 const createError = require("http-errors");
 
 const { publishDomainEvent } = require("../services/events/publisher");
@@ -235,12 +236,15 @@ function buildReferralSyncError(err) {
 }
 
 function resolveFeesTreasuryMeta(tx) {
+  // En simulation, la trésorerie fictive, toujours : l'environnement de simulation
+  // n'a aucune trésorerie réelle, et un identifiant stocké n'y fait pas foi.
+  const sandbox = tx?.mode === "sandbox";
   const treasurySystemType = normalizeTreasurySystemType(
-    tx?.treasurySystemType || DEFAULT_FEES_TREASURY_SYSTEM_TYPE
+    sandbox ? treasurySystemTypeForMode(tx?.treasurySystemType || DEFAULT_FEES_TREASURY_SYSTEM_TYPE, "sandbox") : tx?.treasurySystemType || DEFAULT_FEES_TREASURY_SYSTEM_TYPE
   );
 
   const treasuryUserId = String(
-    tx?.treasuryUserId ||
+    (sandbox ? null : tx?.treasuryUserId) ||
       resolveTreasuryFromSystemType(treasurySystemType) ||
       ""
   ).trim();

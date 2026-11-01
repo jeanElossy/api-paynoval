@@ -15,8 +15,28 @@ const express = require("express");
 const { protect } = require("../middleware/authMiddleware");
 const requireInternalAuth = require("../middleware/internalAuth");
 const controller = require("../controllers/sandboxController");
+const rateLimit = require("express-rate-limit");
 
 const router = express.Router();
+
+/**
+ * Par COMPTE : tout arrive de la passerelle, une clé par adresse ferait partager
+ * le même compteur à tous les partenaires. Posés après `protect`.
+ */
+const perAccount = (name, max) =>
+  rateLimit({
+    name,
+    windowMs: 60 * 1000,
+    max,
+    keyGenerator: (req) => String(req.user?._id || req.user?.id),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, status: 429, message: "Trop de requêtes, veuillez réessayer plus tard." },
+  });
+
+// Même seuil que `/confirm` : cette route vérifie une réponse de sécurité.
+const confirmLimiter = perAccount("sandbox-confirm", 10);
+const toolsLimiter = perAccount("sandbox-tools", 20);
 
 router.get("/3ds/:token", requireInternalAuth("gateway"), controller.getThreeDSChallenge);
 router.post(
@@ -29,8 +49,10 @@ router.use(protect, controller.requireSandboxAccount);
 
 router.get("/state", controller.getState);
 router.put("/scenario", controller.updateScenario);
-router.post("/faucet", controller.faucet);
-router.post("/drain", controller.drain);
-router.post("/reset", controller.reset);
+router.post("/faucet", toolsLimiter, controller.faucet);
+router.post("/drain", toolsLimiter, controller.drain);
+router.post("/reset", toolsLimiter, controller.reset);
+router.get("/transfers/pending", controller.listPendingTransfers);
+router.post("/transfers/:id/confirm", confirmLimiter, controller.confirmAsRecipient);
 
 module.exports = router;

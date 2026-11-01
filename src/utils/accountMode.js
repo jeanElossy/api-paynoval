@@ -30,6 +30,8 @@
  * retombe sur un prestataire réel faute de migration.
  */
 
+const { ENVIRONMENTS, resolveEnvironment } = require("../services/appEnv");
+
 const ACCOUNT_MODES = Object.freeze({
   LIVE: "live",
   SANDBOX: "sandbox",
@@ -203,11 +205,11 @@ function isReferralEligibleMode(mode) {
 }
 
 /**
- * Interrupteur général de la simulation. ÉTEINT par défaut : un environnement
- * qui n'a rien déclaré ne sert aucun compte de simulation. Après un tournage,
- * le couper suffit à fermer toutes les sessions sandbox d'un geste.
+ * Interrupteur général. ÉTEINT par défaut, et INDÉPENDANT de la variable en
+ * production : aucun réglage ne peut y ouvrir la simulation.
  */
 function isSandboxEnabled(env = process.env) {
+  if (resolveEnvironment(env).env === ENVIRONMENTS.PRODUCTION) return false;
   const raw = String(env.SANDBOX_MODE_ENABLED ?? "").trim().toLowerCase();
   return ["true", "1", "yes", "on"].includes(raw);
 }

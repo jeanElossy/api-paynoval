@@ -38,7 +38,7 @@ function defaultDeps() {
   const scenarios = require("../../services/sandbox/sandboxScenarioStore");
 
   return {
-    loadScenario: scenarios.loadScenario,
+    loadScenario: scenarios.takeScenario,
     scheduleProviderEvent: events.scheduleProviderEvent,
   };
 }

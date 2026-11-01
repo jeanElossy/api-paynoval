@@ -130,6 +130,16 @@ const transactionSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * Hors des plafonds et de l'anti-doublon. Simulation seulement : l'historique
+     * de départ, et ce qu'une réinitialisation a remis à zéro. Sans cela, une
+     * reprise de tournage après réinitialisation butait sur les prises d'avant.
+     */
+    excludedFromUsage: {
+      type: Boolean,
+      default: undefined,
+    },
+
     reference: {
       type: String,
       required: true,
@@ -994,6 +1004,9 @@ transactionSchema.pre("validate", function attachRequestId(next) {
 });
 
 transactionSchema.pre("validate", function (next) {
+  // Réservé à la simulation : une transaction réelle compte toujours.
+  if (this.mode !== "sandbox") this.excludedFromUsage = undefined;
+
   const systemReferralTx =
     this.initiatedBy === "system" ||
     this.context === "referral_bonus" ||

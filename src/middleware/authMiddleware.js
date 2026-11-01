@@ -282,6 +282,7 @@ const {
   isSandboxEnabled,
 } = require("../utils/accountMode");
 const { evaluateModeBoundary } = require("./modeBoundary");
+const { APP_ENV } = require("../services/appEnv");
 
 function timingSafeEqualStr(a, b) {
   // Un token vide n'authentifie personne : garde conservée de l'implémentation
@@ -387,6 +388,7 @@ function mapUserToReqUser(userDoc) {
     isSandbox: mode === ACCOUNT_MODES.SANDBOX,
     sandboxGroupId: userDoc.sandboxGroupId ? String(userDoc.sandboxGroupId) : null,
     sandboxDisabledAt: userDoc.sandboxDisabledAt || null,
+    sandboxExpiresAt: userDoc.sandboxExpiresAt || null,
 
     email: userDoc.email,
     role: userDoc.role,
@@ -435,6 +437,7 @@ function assertModeBoundary(reqUser, decoded = null) {
     user: reqUser,
     decoded,
     sandboxEnabled: isSandboxEnabled(),
+    appEnv: APP_ENV,
   });
 
   if (!verdict.ok) {
@@ -535,6 +538,8 @@ exports.internalProtect = asyncHandler(async (req, _res, next) => {
  * qu'à ce qu'un utilisateur ordinaire peut faire sur son propre compte. Le
  * privilège d'exploitation exige un JWT valide et un rôle en base.
  */
+exports.mapUserToReqUser = mapUserToReqUser;
+
 exports.protect = asyncHandler(async (req, _res, next) => {
   const gotInternal = String(getInternalHeaderToken(req) || "").trim();
   const isInternalCaller = Boolean(gotInternal && isValidInternalToken(gotInternal));

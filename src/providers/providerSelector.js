@@ -27,6 +27,8 @@ const visaDirectAdapter = require("./card/visaDirectAdapter");
 const { getTxMetrics } = require("../services/txMetrics");
 const { ACCOUNT_MODES, requireMode } = require("../utils/accountMode");
 const { getSandboxAdapter } = require("./sandbox/sandboxAdapters");
+const { APP_ENV } = require("../services/appEnv");
+const { assertRealRailAllowed } = require("../services/sandboxEnvironment");
 
 function norm(v) {
   return String(v || "").trim().toLowerCase();
@@ -108,7 +110,7 @@ function getCardAdapter(provider) {
  * L'adapter de simulation n'est PAS instrumenté : ses latences fabriquées
  * fausseraient les mesures des vrais prestataires.
  */
-function getProviderAdapter({ rail, provider, mode }) {
+function getProviderAdapter({ rail, provider, mode, appEnv = APP_ENV }) {
   const resolvedMode = requireMode(mode, `adapter ${norm(rail)}/${norm(provider)}`);
 
   if (resolvedMode === ACCOUNT_MODES.SANDBOX) {
@@ -118,6 +120,10 @@ function getProviderAdapter({ rail, provider, mode }) {
     const real = resolveRealAdapter({ rail, provider });
     return getSandboxAdapter({ rail: norm(rail), realAdapter: real });
   }
+
+  // Dans l'environnement de simulation, aucun rail réel ne s'ouvre, quel que
+  // soit le mode porté par l'appelant.
+  assertRealRailAllowed({ appEnv, rail, provider });
 
   const adapter = resolveRealAdapter({ rail, provider });
   const normalizedRail = norm(rail);

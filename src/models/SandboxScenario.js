@@ -14,7 +14,11 @@
  */
 
 const mongoose = require("mongoose");
-const { OUTCOME_VALUES, DELAY_BOUNDS } = require("../providers/sandbox/sandboxScenario");
+const {
+  OUTCOME_VALUES,
+  SCOPE_VALUES,
+  DELAY_BOUNDS,
+} = require("../providers/sandbox/sandboxScenario");
 
 const schema = new mongoose.Schema(
   {
@@ -22,6 +26,13 @@ const schema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       required: true,
       immutable: true,
+    },
+
+    /** `next` : consommé par le prochain ordre, puis retour au défaut. */
+    applyTo: {
+      type: String,
+      enum: SCOPE_VALUES,
+      default: "all",
     },
 
     outcome: {
@@ -52,6 +63,14 @@ const schema = new mongoose.Schema(
       type: mongoose.Schema.Types.Decimal128,
       required: true,
     },
+
+    /** Jeu de départ et sa contrepartie, rejoués à chaque réinitialisation. */
+    dataset: { type: String, default: null },
+    countryCode: { type: String, trim: true, uppercase: true, default: null },
+    seedGeneration: { type: Number, default: 0 },
+    counterpartyId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    ownerName: { type: String, trim: true, default: null },
+    counterpartyName: { type: String, trim: true, default: null },
 
     /** Historique affiché à partir de cette date (réinitialisation). */
     historyStartsAt: {

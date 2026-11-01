@@ -122,6 +122,7 @@ async function detectBasicFraud({
     senderCurrencySymbol: String(currency || '').trim(),
     amount: dec2(amt), // match exact 2 décimales (cohérent avec Decimal128)
     createdAt: { $gte: since },
+    excludedFromUsage: { $ne: true },
   };
 
   if (flow) query.flow = String(flow);
