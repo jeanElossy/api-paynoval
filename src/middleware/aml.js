@@ -45,7 +45,8 @@ const RISKY_COUNTRIES_ISO = new Set([
   "LY",
 ]);
 
-const ALLOWED_STRIPE_CURRENCY_CODES = ["EUR", "USD", "CAD"];
+/** Devises des huit pays de compte de la V1, à resserrer sur la liste du partenaire signé. */
+const ALLOWED_CARD_CURRENCY_CODES = ["EUR", "USD", "CAD", "GBP", "XOF"];
 
 const EMPTY_BLACKLIST = Object.freeze({
   emails: [],
@@ -1426,14 +1427,13 @@ module.exports = async function amlMiddleware(req, res, next) {
      * Cette règle visait le rail `stripe`, retiré du périmètre le 2026-09-08.
      * Elle est conservée en la RECIBLANT sur le rail carte : la contrainte de
      * devise vient du réseau, pas du prestataire, et elle survit donc au
-     * changement de partenaire. La liste `ALLOWED_STRIPE_CURRENCY_CODES` garde
-     * son nom pour l'instant — la renommer est une tâche de nommage, pas de
-     * sécurité, et la mêler à ce correctif brouillerait la relecture.
+     * changement de partenaire. Le code de refus `STRIPE_CURRENCY_NOT_ALLOWED` reste
+     * tel quel : les applications installées le connaissent.
      */
     if (
       ["visa_direct", "card"].includes(provider) &&
       currencyCode &&
-      !ALLOWED_STRIPE_CURRENCY_CODES.includes(currencyCode)
+      !ALLOWED_CARD_CURRENCY_CODES.includes(currencyCode)
     ) {
       logger.warn("[AML] Devise Stripe non autorisée", {
         userId,

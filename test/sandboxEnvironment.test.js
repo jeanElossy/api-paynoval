@@ -525,3 +525,15 @@ test("les outils de simulation sont limités par compte, pas par adresse de pass
   assert.match(routes, /router\.post\("\/reset", toolsLimiter/);
 });
 
+test("un solde insuffisant est un refus clair, pas une erreur 500", async () => {
+  const src = fs.readFileSync(path.join(__dirname, "../src/models/TxWalletBalance.js"), "utf8");
+  assert.match(src, /err\.code = "INSUFFICIENT_FUNDS"/);
+  assert.match(src, /err\.status = 422/);
+  assert.doesNotMatch(src, /throw new Error\(`(Solde insuffisant pour|Fonds disponibles insuffisants)/);
+});
+
+test("le dépôt par carte accepte les devises des pays de compte", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../src/middleware/aml.js"), "utf8");
+  assert.match(src, /ALLOWED_CARD_CURRENCY_CODES = \["EUR", "USD", "CAD", "GBP", "XOF"\]/);
+});
+
