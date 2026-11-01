@@ -30,6 +30,20 @@ const {
  * antérieur à la migration n'a pas de champ `mode`, et c'est un portefeuille
  * de production (voir `utils/accountMode.liveOnlyFilter`).
  */
+/**
+ * Un solde insuffisant est un refus, pas une panne : 422 et un code stable, pour
+ * que le client affiche la vraie raison au lieu d'une erreur interne, et qu'un
+ * envoi ne passe pas pour « incertain ».
+ */
+function insufficientFunds(message) {
+  const err = new Error(message);
+  err.status = 422;
+  err.statusCode = 422;
+  err.expose = true;
+  err.code = "INSUFFICIENT_FUNDS";
+  return err;
+}
+
 function splitModeOpts(opts = {}, operation = "portefeuille") {
   const { mode, ...queryOpts } = opts || {};
   const resolved = requireMode(mode, `TxWalletBalance.${operation}`);
@@ -414,7 +428,7 @@ module.exports = (conn = mongoose) => {
     );
 
     if (!doc) {
-      throw new Error(`Solde insuffisant pour ${cur}`);
+      throw insufficientFunds(`Solde insuffisant pour ${cur}`);
     }
 
     safeLogInfo(
@@ -457,7 +471,7 @@ module.exports = (conn = mongoose) => {
     );
 
     if (!doc) {
-      throw new Error(`Fonds disponibles insuffisants pour réserve ${cur}`);
+      throw insufficientFunds(`Fonds disponibles insuffisants pour réserve ${cur}`);
     }
 
     safeLogInfo(
