@@ -478,6 +478,15 @@ test("le pays d'une carte vient de l'émetteur, jamais du téléphone", async ()
   const live = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI" }, { issuerCountry: "FR" });
   assert.equal(live.sourceCardCountry, "FR");
 
+  // Aucun chemin de contournement : le moteur lit aussi ces champs.
+  const forged = await run(
+    { _id: "u", mode: "live" },
+    { ...cardRail, cardCountry: "CI", metadata: { cardCountry: "CI" }, meta: { cardCountry: "CI" }, recipientInfo: { cardCountry: "CI" }, beneficiary: { cardCountry: "CI" } }
+  );
+  assert.equal(forged.sourceCardCountry, undefined);
+  assert.equal(forged.cardCountry, undefined);
+  assert.ok(!JSON.stringify(forged).includes('"cardCountry"'));
+
   // Compte réel sans émetteur connu : rien n'est deviné, le moteur refusera.
   const unknown = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI", binCountry: "CI" });
   assert.equal(unknown.sourceCardCountry, undefined);
@@ -501,5 +510,18 @@ test("un jeu en devise forte reste valide et passe par la carte, jamais par le m
     assert.notEqual(line.funds, "mobilemoney");
     assert.notEqual(line.destination, "mobilemoney");
   }
+});
+
+test("excludedFromUsage ne peut jamais exister sur une transaction réelle", async () => {
+  const Transaction = require("../src/models/Transaction")(mongoose.createConnection());
+  const doc = new Transaction({ mode: "live", reference: "R", amount: "10", excludedFromUsage: true, internalImported: true });
+  await doc.validate().catch(() => {});
+  assert.equal(doc.excludedFromUsage, undefined);
+});
+
+test("les outils de simulation sont limités par compte, pas par adresse de passerelle", () => {
+  const routes = fs.readFileSync(path.join(__dirname, "../src/routes/sandboxRoutes.js"), "utf8");
+  assert.match(routes, /keyGenerator: \(req\) => String\(req\.user/);
+  assert.match(routes, /router\.post\("\/reset", toolsLimiter/);
 });
 

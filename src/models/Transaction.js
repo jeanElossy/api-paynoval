@@ -1004,6 +1004,9 @@ transactionSchema.pre("validate", function attachRequestId(next) {
 });
 
 transactionSchema.pre("validate", function (next) {
+  // Réservé à la simulation : une transaction réelle compte toujours.
+  if (this.mode !== "sandbox") this.excludedFromUsage = undefined;
+
   const systemReferralTx =
     this.initiatedBy === "system" ||
     this.context === "referral_bonus" ||

@@ -20,7 +20,15 @@ const mongoose = require("mongoose");
 
 const { ACCOUNT_MODES } = require("../utils/accountMode");
 
-const CLIENT_FIELDS = Object.freeze(["sourceCardCountry", "binCountry"]);
+/** Tous les chemins par lesquels le moteur lirait un pays de carte source. */
+function dropClientCountry(body) {
+  delete body.sourceCardCountry;
+  delete body.binCountry;
+  delete body.cardCountry;
+  for (const holder of [body.recipientInfo, body.beneficiary, body.metadata, body.meta]) {
+    if (holder && typeof holder === "object") delete holder.cardCountry;
+  }
+}
 
 function isCardRail(value) {
   return ["visa_direct", "card"].includes(String(value || "").trim().toLowerCase());
@@ -52,7 +60,7 @@ function cardCountry({ loadCard = loadOwnCard } = {}) {
 
     try {
       if (isCardRail(body.funds)) {
-        for (const field of CLIENT_FIELDS) delete body[field];
+        dropClientCountry(body);
 
         const card = body.cardId ? await loadCard(req.user?._id || req.user?.id, body.cardId) : null;
         const country = sourceCountryOf({
