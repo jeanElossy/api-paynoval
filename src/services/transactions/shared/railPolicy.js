@@ -195,28 +195,44 @@ function evaluateRailPolicy({
 }
 
 /**
- * V1 CAPABILITIES BY REGION — enforced, never report-only.
+ * V1 CAPABILITIES BY REGION — enforced, never report-only. Juge le pays du
+ * COMPTE ; `corridorValidation.js` juge celui de l'instrument.
  *
- *   transfers   PayNoval → PayNoval / mobile money / card, from any region
- *               (remittance to a Wave or Orange wallet, like Wise or Wave);
- *   deposit     mobile money (Africa only) or card;
- *   withdraw    mobile money (Africa only) or card.
+ *   Europe / Amérique  dépôt et retrait par CARTE seulement — jamais de mobile
+ *                      money ; transferts vers PayNoval, mobile money (envoi
+ *                      vers un portefeuille Wave ou Orange, comme Wise) ou
+ *                      carte ;
+ *   Afrique            AUCUNE carte (décision de l'utilisateur du 2026-11-03 :
+ *                      en V1, aucun partenaire carte en Afrique) — ni dépôt,
+ *                      ni retrait, ni transfert vers une carte ; mobile money
+ *                      et PayNoval seulement.
  *
- * Europe, America and elsewhere deposit and withdraw by CARD. It is a product
- * scope, not a risk heuristic: it stays on regardless of `RAIL_POLICY_STRICT`,
- * like Stripe capabilities are enforced by the server whatever the app shows.
- * An account whose country PayNoval does not serve has no region: refused
- * (fail closed, rule B.2).
+ * It is a product scope, not a risk heuristic: it stays on regardless of
+ * `RAIL_POLICY_STRICT`, like Stripe capabilities are enforced by the server
+ * whatever the app shows — l'application n'est jamais crue sur parole. Un
+ * compte dont PayNoval ne sert pas le pays n'a pas de région : refusé (fail
+ * closed, rule B.2). S'applique de la même façon aux comptes de simulation.
  *
  * `action` is the RAW body action: Tx-Core folds "send" and "withdraw" into
- * the same payout flow, but only a withdrawal is region-bound.
+ * the same payout flow, but only a withdrawal is region-bound for mobile money.
  *
  * @param {{ region: string|null, action: string, funds: string, destination: string }} input
  * @returns {{ allowed: boolean, code?: string, rail?: string, side?: string }}
  */
+const CARD_RAILS = ["card", "visa", "visa_direct", "visadirect", "stripe"];
+
 function evaluateRegionScope({ region, action, funds, destination } = {}) {
   const act = normalizeText(action);
   const isMobileMoney = (rail) => ["mobilemoney", "mobile_money", "momo"].includes(normalizeRail(rail));
+  const isCard = (rail) => CARD_RAILS.includes(normalizeText(rail)) || normalizeRail(rail) === "card";
+
+  // Afrique : aucune carte, de quelque côté et pour quelque opération que ce soit.
+  if (region === "africa") {
+    const cardSide = isCard(funds) ? "funds" : isCard(destination) ? "destination" : null;
+    if (!cardSide) return { allowed: true };
+    return { allowed: false, code: "CARD_NOT_AVAILABLE_IN_REGION", rail: "card", side: cardSide };
+  }
+
   const mobileMoneySide =
     act === "deposit" && isMobileMoney(funds)
       ? "funds"
@@ -225,7 +241,6 @@ function evaluateRegionScope({ region, action, funds, destination } = {}) {
         : null;
 
   if (!mobileMoneySide) return { allowed: true };
-  if (region === "africa") return { allowed: true };
 
   return {
     allowed: false,

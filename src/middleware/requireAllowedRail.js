@@ -79,8 +79,13 @@ function requireAllowedRail(req, _res, next) {
     logger?.warn?.(
       `[RAIL-SCOPE][BLOCKED] user=${req.user?._id || req.user?.id || "unknown"} ${scope.side}=${scope.rail} (${scope.code})`
     );
+    // Un message par refus : chaque région a SON moyen local.
+    const message =
+      scope.code === "CARD_NOT_AVAILABLE_IN_REGION"
+        ? "La carte n’est pas disponible pour un compte africain : utilisez le mobile money ou PayNoval."
+        : "Le dépôt et le retrait par mobile money sont réservés aux comptes africains : utilisez une carte.";
     return next(
-      createError(403, "Le dépôt et le retrait par mobile money sont réservés aux comptes africains : utilisez une carte.", {
+      createError(403, message, {
         code: scope.code,
         rail: scope.rail,
         side: scope.side,
