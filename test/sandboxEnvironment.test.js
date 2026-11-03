@@ -537,3 +537,16 @@ test("le dépôt par carte accepte les devises des pays de compte", () => {
   assert.match(src, /ALLOWED_CARD_CURRENCY_CODES = \["EUR", "USD", "CAD", "GBP", "XOF"\]/);
 });
 
+
+test("jeu de démonstration : aucune ligne carte pour un compte ivoirien, aucun mobile money ailleurs", () => {
+  const lignes = (currency, country) => buildSeedTransactions({ ...SEED_INPUT, currency, country });
+  const rails = (txs) => txs.flatMap((t) => [t.funds, t.destination].filter(Boolean));
+
+  const ci = rails(lignes("XOF", "CI"));
+  assert.ok(ci.includes("mobilemoney"));
+  assert.equal(ci.some((r) => /card|visa/.test(r)), false);
+
+  const fr = lignes("EUR", "FR").filter((t) => ["DEPOSIT", "WITHDRAW"].includes(t.operationType) || /COLLECTION|TOPUP|PAYOUT/.test(t.flow || ""));
+  assert.ok(fr.length > 0);
+  assert.equal(fr.some((t) => t.funds === "mobilemoney" || t.destination === "mobilemoney"), false);
+});

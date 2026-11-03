@@ -185,16 +185,29 @@ test("V1: a transfer to someone is a TRANSFER, never a withdrawal", () => {
   for (const pays of ["ML", "BF"]) {
     const rules = grille.filter((r) => r.scope.toCountry === pays || r.scope.country === pays);
     assert.ok(rules.length > 0, pays);
-    // Destination-only: transfers received (mobile money AND card), no deposit, no withdrawal.
-    assert.deepEqual([...new Set(rules.map((r) => `${r.scope.txType}/${r.scope.method}`))].sort(), ["TRANSFER/CARD", "TRANSFER/MOBILEMONEY"], pays);
-    assert.deepEqual([...new Set(rules.map((r) => r.scope.provider))].sort(), ["moov", "orange", "visa_direct"], pays);
+    // Destination seulement : transferts reçus par mobile money (aucune carte
+    // en Afrique en V1), ni dépôt ni retrait.
+    assert.deepEqual([...new Set(rules.map((r) => `${r.scope.txType}/${r.scope.method}`))].sort(), ["TRANSFER/MOBILEMONEY"], pays);
+    assert.deepEqual([...new Set(rules.map((r) => r.scope.provider))].sort(), ["moov", "orange"], pays);
   }
   // From every account currency, e.g. a Canadian account to a Malian Orange wallet.
   const cadToMali = grille.find((r) => r.code === "TRANSFER_MOBILEMONEY_ORANGE_ML_CAD");
   assert.equal(cadToMali?.fx.mode, "MARKUP_PERCENT");
-  // Card transfers are received everywhere, Africa included.
-  for (const code of ["TRANSFER_CARD_GB_XOF", "TRANSFER_CARD_CI_EUR", "TRANSFER_CARD_ML_CAD", "TRANSFER_CARD_BF_GBP"]) {
+  // Carte : reçue en Europe et en Amérique, depuis un compte qui y a droit.
+  for (const code of ["TRANSFER_CARD_GB_EUR", "TRANSFER_CARD_FR_CAD", "TRANSFER_CARD_US_GBP"]) {
     assert.ok(grille.some((r) => r.code === code), code);
+  }
+  // Aucun prix pour un corridor refusé : ni carte vers l'Afrique, ni carte
+  // depuis un compte africain (XOF), ni dépôt / retrait carte en Côte d'Ivoire.
+  for (const code of [
+    "TRANSFER_CARD_CI_EUR",
+    "TRANSFER_CARD_ML_CAD",
+    "TRANSFER_CARD_BF_GBP",
+    "TRANSFER_CARD_GB_XOF",
+    "DEPOSIT_CARD_CI",
+    "WITHDRAW_CARD_CI",
+  ]) {
+    assert.equal(grille.some((r) => r.code === code), false, code);
   }
   // Account countries keep their own deposit / withdrawal.
   for (const code of ["DEPOSIT_CARD_GB", "WITHDRAW_CARD_GB", "DEPOSIT_CARD_US", "WITHDRAW_MOBILEMONEY_CI_WAVE"]) {

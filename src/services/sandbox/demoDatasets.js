@@ -27,7 +27,8 @@ const ACTIVE_HISTORY = Object.freeze([
   { daysAgo: 3, kind: "transfer_out", amount: 25000, fee: 250 },
   { daysAgo: 5, kind: "withdraw", provider: "orange", amount: 40000, fee: 800 },
   { daysAgo: 8, kind: "transfer_in", amount: 60000, fee: 0 },
-  { daysAgo: 11, kind: "deposit", rail: "card", provider: "visa_direct", amount: 100000, fee: 2500 },
+  // Pas de carte pour un compte africain (2026-11-03) : dépôt mobile money.
+  { daysAgo: 11, kind: "deposit", rail: "mobilemoney", provider: "mtn", amount: 100000, fee: 0 },
   { daysAgo: 14, kind: "transfer_out", amount: 15000, fee: 150 },
   { daysAgo: 19, kind: "withdraw", provider: "mtn", amount: 30000, fee: 600 },
   { daysAgo: 23, kind: "deposit", rail: "mobilemoney", provider: "orange", amount: 75000, fee: 0 },
@@ -67,6 +68,7 @@ function assertDataset(dataset) {
 /**
  * Les montants du jeu sont en XOF. Une devise forte se divise par 500, et le
  * mobile money n'existe que pour les comptes ivoiriens : ailleurs, la carte.
+ * Un compte en XOF (ivoirien) n'a, lui, aucune ligne carte.
  */
 function localize(entry, currency) {
   if (currency === "XOF") return entry;

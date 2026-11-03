@@ -2,8 +2,9 @@
 
 /**
  * V1 capabilities by region: mobile money deposits and withdrawals are for
- * African accounts; Europe / America deposit and withdraw by card; transfers
- * (PayNoval → PayNoval / mobile money / card) are open from any region.
+ * African accounts; Europe / America deposit and withdraw by card only.
+ * Un compte africain n'utilise AUCUNE carte (2026-11-03 : pas de partenaire
+ * carte en Afrique en V1) — ni dépôt, ni retrait, ni transfert vers une carte.
  */
 
 const test = require("node:test");
@@ -42,6 +43,14 @@ test("the V1 matrix", () => {
     ["europe", "send", "paynoval", "mobilemoney", true],
     ["america", "send", "paynoval", "paynoval", true],
     ["europe", "send", "paynoval", "visa_direct", true],
+    // Afrique : aucune carte, de quelque côté que ce soit.
+    ["africa", "deposit", "visa_direct", "paynoval", false],
+    ["africa", "deposit", "card", "paynoval", false],
+    ["africa", "withdraw", "paynoval", "visa_direct", false],
+    ["africa", "send", "paynoval", "visa_direct", false],
+    ["africa", "send", "paynoval", "card", false],
+    ["africa", "send", "paynoval", "mobilemoney", true],
+    ["africa", "send", "paynoval", "paynoval", true],
   ];
   for (const [region, action, funds, destination, allowed] of cases) {
     assert.equal(evaluateRegionScope({ region, action, funds, destination }).allowed, allowed, JSON.stringify({ region, action, funds, destination }));
@@ -58,4 +67,22 @@ test("the middleware refuses a French mobile money deposit, lets an Ivorian one 
 
   const card = await run({ _id: "u1", country: "France" }, { action: "deposit", funds: "visa_direct", destination: "paynoval" });
   assert.equal(card, null);
+});
+
+test("the middleware refuses any card for an Ivorian account, in simulation as in live", async () => {
+  for (const mode of ["live", "sandbox"]) {
+    for (const body of [
+      { action: "deposit", funds: "visa_direct", destination: "paynoval" },
+      { action: "withdraw", funds: "paynoval", destination: "visa_direct" },
+      { action: "send", funds: "paynoval", destination: "visa_direct" },
+    ]) {
+      const refused = await run({ _id: "u2", country: "Côte d'Ivoire", mode }, body);
+      assert.equal(refused?.status, 403, JSON.stringify({ mode, body }));
+      assert.equal(refused?.code, "CARD_NOT_AVAILABLE_IN_REGION");
+      assert.match(refused?.message, /mobile money/);
+    }
+  }
+
+  const momo = await run({ _id: "u2", country: "Côte d'Ivoire" }, { action: "send", funds: "paynoval", destination: "mobilemoney" });
+  assert.equal(momo, null);
 });

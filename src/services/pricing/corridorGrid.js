@@ -49,12 +49,16 @@
  * `compte: true` : on y ouvre un compte, donc on y DÉPOSE et on y RETIRE.
  * `compte: false` : pays de destination seulement (Mali, Burkina Faso).
  * `reception` : comment on y REÇOIT un transfert (`TRANSFER`, prix propre) —
- * carte partout ; mobile money EN PLUS en Côte d'Ivoire, au Mali, au Burkina Faso.
+ * carte en Europe et en Amérique ; mobile money en Côte d'Ivoire, au Mali, au
+ * Burkina Faso.
+ * `carte: false` : un compte de ce pays n'utilise AUCUNE carte — ni dépôt, ni
+ * retrait, ni transfert vers une carte (2026-11-03 : en V1, aucun partenaire
+ * carte en Afrique). Aucun prix n'est donc proposé pour ces corridors refusés.
  */
 const MARCHES = Object.freeze([
-  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true, reception: ["mobilemoney", "card"] },
-  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false, reception: ["mobilemoney", "card"] },
-  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false, reception: ["mobilemoney", "card"] },
+  { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true, carte: false, reception: ["mobilemoney"] },
+  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false, carte: false, reception: ["mobilemoney"] },
+  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false, carte: false, reception: ["mobilemoney"] },
   { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true, reception: ["card"] },
   { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true, reception: ["card"] },
   { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true, reception: ["card"] },
@@ -89,6 +93,15 @@ const OPERATEUR_CARTE = "visa_direct";
 /** Devises distinctes présentes dans les marchés, triées pour un ordre stable. */
 function devisesServies(marches = MARCHES) {
   return [...new Set(marches.map((m) => m.devise))].sort();
+}
+
+/**
+ * Devises des comptes autorisés à la carte : seules sources d'un transfert vers
+ * une carte. Une devise partagée avec un pays sans carte reste servie si un
+ * autre pays de compte y a droit.
+ */
+function devisesCarte(marches = MARCHES) {
+  return [...new Set(marches.filter((m) => m.compte && m.carte !== false).map((m) => m.devise))].sort();
 }
 
 function paysSansOperateur(carte = OPERATEURS_PAR_PAYS, marches = MARCHES) {
@@ -169,7 +182,9 @@ function reglesTransfertExterne({ feePercent, markupPercent, marches, operateurs
     ];
 
     for (const { method, provider, rail } of cibles) {
-      for (const de of devises) {
+      // Vers une carte : seulement depuis la devise d'un compte qui a droit à la carte.
+      const sources = method === "CARD" ? devisesCarte(marches) : devises;
+      for (const de of sources) {
         regles.push({
           name: `Transfert — ${provider} ${nom} (${de} → ${vers})`,
           code: `TRANSFER_${rail}_${pays}_${de}`,
@@ -210,7 +225,7 @@ function reglesTransfertExterne({ feePercent, markupPercent, marches, operateurs
 function reglesDepotRetrait({ feePercent, marches, operateursParPays }) {
   const regles = [];
 
-  for (const { pays, devise, nom, compte = true } of marches) {
+  for (const { pays, devise, nom, compte = true, carte } of marches) {
     const operateurs = operateursParPays[pays] || [];
     // Deposit / withdrawal: account countries only (a transfer is not a
     // withdrawal: it has its own rules, `reglesTransfertExterne`).
@@ -247,8 +262,8 @@ function reglesDepotRetrait({ feePercent, marches, operateursParPays }) {
       }
     }
 
-    // Card: account countries only (Mali / Burkina Faso receive by mobile money).
-    for (const txType of compte ? ["DEPOSIT", "WITHDRAW"] : []) {
+    // Carte : pays de compte autorisés à la carte seulement (pas l'Afrique en V1).
+    for (const txType of compte && carte !== false ? ["DEPOSIT", "WITHDRAW"] : []) {
       const libelle = txType === "DEPOSIT" ? "Dépôt" : "Retrait";
 
       regles.push({
