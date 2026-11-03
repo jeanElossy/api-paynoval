@@ -451,38 +451,39 @@ test("l'exemption de limite de Tx-Core suppose une limite à la passerelle", () 
 });
 
 /* ══════════════════════════════════════════════════════════════════════════ */
-/* AUCUNE CARTE EN AFRIQUE (2026-11-03)                                       */
+/* CHAQUE RÉGION SON MOYEN (2026-11-03)                                       */
 /* ══════════════════════════════════════════════════════════════════════════ */
 
-test("encaissement par carte : refusé pour un payeur en Côte d'Ivoire, au Mali, au Burkina Faso", () => {
+const refuse = (rail, pays, code) =>
+  assert.throws(() => service.assertRailAllowedForPayer(rail, pays), (e) => e.code === code, `${rail} ${pays}`);
+
+test("invité africain : mobile money oui, carte non", () => {
   for (const pays of ["Côte d'Ivoire", "CI", "Mali", "Burkina Faso"]) {
-    assert.throws(
-      () => service.assertCardAllowedForPayer("card", pays),
-      (e) => e.code === "CARD_NOT_AVAILABLE_IN_REGION" && e.statusCode === 403,
-      pays
-    );
+    assert.doesNotThrow(() => service.assertRailAllowedForPayer("mobilemoney", pays), pays);
+    refuse("card", pays, "CARD_NOT_AVAILABLE_IN_REGION");
   }
 });
 
-test("encaissement par carte : accepté en Europe et en Amérique, pays EXIGÉ", () => {
-  for (const pays of ["France", "Canada", "USA", "Belgique"]) {
-    assert.doesNotThrow(() => service.assertCardAllowedForPayer("card", pays), pays);
+test("invité d'Europe ou d'Amérique : carte oui, mobile money non", () => {
+  for (const pays of ["France", "Canada", "USA", "Belgique", "Allemagne", "Espagne", "Royaume-Uni"]) {
+    assert.doesNotThrow(() => service.assertRailAllowedForPayer("card", pays), pays);
+    refuse("mobilemoney", pays, "MOBILE_MONEY_NOT_AVAILABLE_IN_REGION");
   }
-  assert.throws(
-    () => service.assertCardAllowedForPayer("card", ""),
-    (e) => e.code === "PAYER_COUNTRY_REQUIRED"
-  );
 });
 
-test("le mobile money n'est pas concerné, l'Afrique comprise", () => {
-  assert.doesNotThrow(() => service.assertCardAllowedForPayer("mobilemoney", "Côte d'Ivoire"));
-  assert.doesNotThrow(() => service.assertCardAllowedForPayer("mobilemoney", ""));
+test("pays absent ou hors périmètre : refusé, quel que soit le moyen", () => {
+  for (const rail of ["card", "mobilemoney"]) {
+    refuse(rail, "", "PAYER_COUNTRY_REQUIRED");
+    refuse(rail, undefined, "PAYER_COUNTRY_REQUIRED");
+  }
+  refuse("card", "Atlantide", "PAYER_COUNTRY_NOT_SUPPORTED");
+  refuse("mobilemoney", "Sénégal", "MOBILE_MONEY_NOT_AVAILABLE_IN_REGION");
 });
 
 test("le contrôle est fait AVANT tout appel au prestataire", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "src", "services", "collections", "collectionService.js"), "utf8");
   const fn = src.slice(src.indexOf("async function initiateCollection"));
-  const check = fn.indexOf("assertCardAllowedForPayer(rail, entree.payer?.country)");
+  const check = fn.indexOf("assertRailAllowedForPayer(rail, entree.payer?.country)");
   assert.ok(check > -1);
   assert.ok(check < fn.indexOf("getProviderAdapter("));
 });
