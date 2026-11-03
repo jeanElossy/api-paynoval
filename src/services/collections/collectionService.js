@@ -47,6 +47,7 @@ const mongoose = require("mongoose");
 const logger = require("../../logger");
 const { publishDomainEvent } = require("../events/publisher");
 const { getProviderAdapter } = require("../../providers/providerSelector");
+const { getCountryRegion } = require("../transactions/handlers/corridorValidation");
 
 /**
  * Rails et prestataires SERVIS. Table close, alignée sur
@@ -185,6 +186,45 @@ function assertRailEtPrestataire(rail, provider) {
 }
 
 /**
+ * AUCUNE CARTE EN AFRIQUE (2026-11-03 — en V1, aucun partenaire carte africain).
+ *
+ * Un encaissement par carte (participation invitée à une cagnotte) est refusé
+ * quand le payeur est en Côte d'Ivoire, au Mali ou au Burkina Faso, comme le
+ * sont le dépôt, le retrait et le transfert par carte d'un compte africain
+ * (`shared/railPolicy.js#evaluateRegionScope`).
+ *
+ * Le pays est ici DÉCLARÉ par le payeur : un invité n'a pas de compte dont on
+ * relirait le pays. Il est donc EXIGÉ pour la carte (fermeture, règle B.2) —
+ * sans lui, rien ne permet d'appliquer la règle. ⚠️ Quand le partenaire carte
+ * sera branché, c'est le pays ÉMETTEUR qu'il rend qui devra être contrôlé : une
+ * déclaration se falsifie. La page publique garde d'ailleurs la carte fermée.
+ *
+ * S'applique AVANT tout appel au prestataire : rien n'est encaissé, donc rien
+ * n'est à rembourser. Le rappel, lui, n'est jamais refusé (l'argent est déjà
+ * prélevé) : ce contrôle appartient à l'initiation.
+ */
+function assertCardAllowedForPayer(rail, payerCountry) {
+  if (rail !== "card") return;
+
+  const country = norm(payerCountry);
+  if (!country) {
+    throw new CollectionError(
+      400,
+      "PAYER_COUNTRY_REQUIRED",
+      "Pays du payeur absent : un paiement par carte ne peut pas être vérifié sans lui."
+    );
+  }
+
+  if (getCountryRegion(country) === "africa") {
+    throw new CollectionError(
+      403,
+      "CARD_NOT_AVAILABLE_IN_REGION",
+      "La carte n'est pas disponible en Côte d'Ivoire, au Mali ni au Burkina Faso : payez par mobile money."
+    );
+  }
+}
+
+/**
  * Référence PayNoval de l'encaissement, DÉRIVÉE de la clé d'idempotence.
  *
  * Elle doit être stable d'une tentative à l'autre : c'est elle qui produit le
@@ -257,6 +297,7 @@ async function initiateCollection(conn, entree = {}) {
   assertAucuneDonneeCarte(entree);
 
   const { rail, provider } = assertRailEtPrestataire(entree.rail, entree.provider);
+  assertCardAllowedForPayer(rail, entree.payer?.country);
 
   const purpose = lower(entree.purpose);
   if (!PURPOSES.includes(purpose)) {
@@ -689,6 +730,7 @@ module.exports = {
   CollectionError,
   assertAucuneDonneeCarte,
   assertRailEtPrestataire,
+  assertCardAllowedForPayer,
   referenceFromIdempotencyKey,
   objectIdFromReference,
   initiateCollection,

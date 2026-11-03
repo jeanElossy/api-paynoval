@@ -449,3 +449,40 @@ test("l'exemption de limite de Tx-Core suppose une limite à la passerelle", () 
     "la passerelle doit porter le limiteur des encaissements publics"
   );
 });
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* AUCUNE CARTE EN AFRIQUE (2026-11-03)                                       */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+test("encaissement par carte : refusé pour un payeur en Côte d'Ivoire, au Mali, au Burkina Faso", () => {
+  for (const pays of ["Côte d'Ivoire", "CI", "Mali", "Burkina Faso"]) {
+    assert.throws(
+      () => service.assertCardAllowedForPayer("card", pays),
+      (e) => e.code === "CARD_NOT_AVAILABLE_IN_REGION" && e.statusCode === 403,
+      pays
+    );
+  }
+});
+
+test("encaissement par carte : accepté en Europe et en Amérique, pays EXIGÉ", () => {
+  for (const pays of ["France", "Canada", "USA", "Belgique"]) {
+    assert.doesNotThrow(() => service.assertCardAllowedForPayer("card", pays), pays);
+  }
+  assert.throws(
+    () => service.assertCardAllowedForPayer("card", ""),
+    (e) => e.code === "PAYER_COUNTRY_REQUIRED"
+  );
+});
+
+test("le mobile money n'est pas concerné, l'Afrique comprise", () => {
+  assert.doesNotThrow(() => service.assertCardAllowedForPayer("mobilemoney", "Côte d'Ivoire"));
+  assert.doesNotThrow(() => service.assertCardAllowedForPayer("mobilemoney", ""));
+});
+
+test("le contrôle est fait AVANT tout appel au prestataire", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "services", "collections", "collectionService.js"), "utf8");
+  const fn = src.slice(src.indexOf("async function initiateCollection"));
+  const check = fn.indexOf("assertCardAllowedForPayer(rail, entree.payer?.country)");
+  assert.ok(check > -1);
+  assert.ok(check < fn.indexOf("getProviderAdapter("));
+});
