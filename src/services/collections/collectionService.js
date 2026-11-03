@@ -186,40 +186,58 @@ function assertRailEtPrestataire(rail, provider) {
 }
 
 /**
- * AUCUNE CARTE EN AFRIQUE (2026-11-03 — en V1, aucun partenaire carte africain).
+ * CHAQUE RÉGION SON MOYEN (2026-11-03 — décisions de l'utilisateur).
  *
- * Un encaissement par carte (participation invitée à une cagnotte) est refusé
- * quand le payeur est en Côte d'Ivoire, au Mali ou au Burkina Faso, comme le
- * sont le dépôt, le retrait et le transfert par carte d'un compte africain
- * (`shared/railPolicy.js#evaluateRegionScope`).
+ * Un invité paie une cagnotte (encaissement) par le moyen de SA région :
+ *   - Côte d'Ivoire, Mali, Burkina Faso : MOBILE MONEY seulement — aucune carte,
+ *     en V1 il n'y a aucun partenaire carte en Afrique ;
+ *   - Europe et Amérique : CARTE seulement — jamais de mobile money ;
+ *   - pays hors du périmètre V1 : refusé (fermeture, règle B.2).
+ * Même règle que le dépôt d'un compte (`shared/railPolicy.js#evaluateRegionScope`).
  *
  * Le pays est ici DÉCLARÉ par le payeur : un invité n'a pas de compte dont on
- * relirait le pays. Il est donc EXIGÉ pour la carte (fermeture, règle B.2) —
- * sans lui, rien ne permet d'appliquer la règle. ⚠️ Quand le partenaire carte
- * sera branché, c'est le pays ÉMETTEUR qu'il rend qui devra être contrôlé : une
- * déclaration se falsifie. La page publique garde d'ailleurs la carte fermée.
+ * relirait le pays. Il est donc EXIGÉ (fermeture) — sans lui, rien ne permet
+ * d'appliquer la règle. ⚠️ Quand le partenaire carte sera branché, c'est le pays
+ * ÉMETTEUR qu'il rend qui devra être contrôlé : une déclaration se falsifie.
+ * La page publique garde d'ailleurs la carte fermée.
  *
  * S'applique AVANT tout appel au prestataire : rien n'est encaissé, donc rien
  * n'est à rembourser. Le rappel, lui, n'est jamais refusé (l'argent est déjà
  * prélevé) : ce contrôle appartient à l'initiation.
  */
-function assertCardAllowedForPayer(rail, payerCountry) {
-  if (rail !== "card") return;
-
+function assertRailAllowedForPayer(rail, payerCountry) {
   const country = norm(payerCountry);
   if (!country) {
     throw new CollectionError(
       400,
       "PAYER_COUNTRY_REQUIRED",
-      "Pays du payeur absent : un paiement par carte ne peut pas être vérifié sans lui."
+      "Pays du payeur absent : le moyen de paiement ne peut pas être vérifié sans lui."
     );
   }
 
-  if (getCountryRegion(country) === "africa") {
+  const region = getCountryRegion(country);
+
+  if (rail === "card" && region === "africa") {
     throw new CollectionError(
       403,
       "CARD_NOT_AVAILABLE_IN_REGION",
       "La carte n'est pas disponible en Côte d'Ivoire, au Mali ni au Burkina Faso : payez par mobile money."
+    );
+  }
+
+  if (rail === "mobilemoney" && region !== "africa") {
+    throw new CollectionError(
+      403,
+      "MOBILE_MONEY_NOT_AVAILABLE_IN_REGION",
+      "Le mobile money est réservé aux payeurs de Côte d'Ivoire, du Mali et du Burkina Faso : payez par carte."
+    );
+  }
+
+  if (!region) {
+    throw new CollectionError(
+      403,
+      "PAYER_COUNTRY_NOT_SUPPORTED",
+      "Ce pays n'est pas encore servi par PayNoval."
     );
   }
 }
@@ -297,7 +315,7 @@ async function initiateCollection(conn, entree = {}) {
   assertAucuneDonneeCarte(entree);
 
   const { rail, provider } = assertRailEtPrestataire(entree.rail, entree.provider);
-  assertCardAllowedForPayer(rail, entree.payer?.country);
+  assertRailAllowedForPayer(rail, entree.payer?.country);
 
   const purpose = lower(entree.purpose);
   if (!PURPOSES.includes(purpose)) {
@@ -730,7 +748,7 @@ module.exports = {
   CollectionError,
   assertAucuneDonneeCarte,
   assertRailEtPrestataire,
-  assertCardAllowedForPayer,
+  assertRailAllowedForPayer,
   referenceFromIdempotencyKey,
   objectIdFromReference,
   initiateCollection,
