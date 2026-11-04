@@ -19,6 +19,34 @@
 const mongoose = require("mongoose");
 
 const { ACCOUNT_MODES } = require("../utils/accountMode");
+const { resoudreTypeExterne } = require("../services/transactions/shared/externalTxType");
+
+/**
+ * ⚠️ CARTE DU COMPTE OBLIGATOIRE (2026-11-04). La carte relue ici ne servait
+ * qu'à lire son pays : un `cardId` qui n'était PAS une carte du compte ne
+ * faisait pas refuser (en simulation, le pays du compte le remplaçait), et la
+ * carte qui REÇOIT un retrait n'était pas contrôlée du tout — l'identifiant
+ * du téléphone était cru. Désormais, échec en FERMETURE :
+ *   - carte qui PAIE (dépôt, recharge d'un transfert) : carte enregistrée du compte ;
+ *   - carte qui REÇOIT un RETRAIT : carte enregistrée du compte.
+ * La carte d'un TIERS (transfert) n'est pas concernée : elle passe par le
+ * lien SMS, le code et la question (`docs/architecture/transfer-claims.md`).
+ */
+function cardNotOwned(side) {
+  return Object.assign(
+    new Error(
+      side === "destination"
+        ? "Un retrait par carte ne peut aller que vers une carte enregistrée sur votre compte."
+        : "Cette carte n'est pas une carte enregistrée sur votre compte."
+    ),
+    { status: 403, statusCode: 403, code: "CARD_NOT_OWNED" }
+  );
+}
+
+function isWithdrawal(body = {}) {
+  const declared = resoudreTypeExterne(body) || String(body.operationType || "").trim().toUpperCase();
+  return declared === "WITHDRAW" || declared === "WITHDRAWAL";
+}
 
 /** Tous les chemins par lesquels le moteur lirait un pays de carte source. */
 function dropClientCountry(body) {
@@ -59,10 +87,13 @@ function cardCountry({ loadCard = loadOwnCard } = {}) {
     if (!body) return next();
 
     try {
+      const userId = req.user?._id || req.user?.id;
+
       if (isCardRail(body.funds)) {
         dropClientCountry(body);
 
-        const card = body.cardId ? await loadCard(req.user?._id || req.user?.id, body.cardId) : null;
+        const card = body.cardId ? await loadCard(userId, body.cardId) : null;
+        if (!card) throw cardNotOwned("source");
         const country = sourceCountryOf({
           card,
           mode: req.user?.mode,
@@ -70,6 +101,14 @@ function cardCountry({ loadCard = loadOwnCard } = {}) {
         });
 
         if (country) body.sourceCardCountry = country;
+      }
+
+      // Retrait vers une carte : la SIENNE, enregistrée sur le compte.
+      if (isCardRail(body.destination) && isWithdrawal(body)) {
+        const card = body.cardId ? await loadCard(userId, body.cardId) : null;
+        if (!card) throw cardNotOwned("destination");
+        // Les quatre derniers chiffres viennent de la carte enregistrée, jamais du téléphone.
+        if (card.last4) body.cardLast4 = String(card.last4);
       }
 
       // Carte d'un tiers : pas de carte enregistrée chez nous, le pays vient du
@@ -89,4 +128,4 @@ function cardCountry({ loadCard = loadOwnCard } = {}) {
   };
 }
 
-module.exports = { cardCountry, sourceCountryOf };
+module.exports = { cardCountry, sourceCountryOf, isWithdrawal };
