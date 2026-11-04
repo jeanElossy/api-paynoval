@@ -123,48 +123,40 @@ function resolveCancellationFeeRule({ countryCode, currency } = {}) {
     };
   }
 
-  if (cur === "CAD") {
-    return {
-      countryCode: null,
-      countryName: null,
-      currency: "CAD",
-      amount: 2.99,
-      type: "fixed",
-      percent: 0,
-      feeId: null,
-      source: "FALLBACK_CURRENCY_CAD_CANCEL_2_99",
-      label: "$CAD 2.99",
-      resolvedBy: "currency",
-    };
-  }
+  /**
+   * Table unique des six devises (2026-11-04, décision de l'utilisateur) :
+   * 300 en XOF / XAF, 2,99 en CAD, USD, EUR, GBP. Elle ne sert qu'à défaut d'un
+   * barème `CANCELLATION` publié au back-office.
+   */
+  const PAR_DEVISE = {
+    XOF: { amount: 300, label: "300 F CFA" },
+    XAF: { amount: 300, label: "300 XAF" },
+    CAD: { amount: 2.99, label: "$CAD 2.99" },
+    USD: { amount: 2.99, label: "$2.99" },
+    EUR: { amount: 2.99, label: "2,99 €" },
+    GBP: { amount: 2.99, label: "£2.99" },
+  };
 
-  if (cur === "XOF" || cur === "XAF") {
+  if (PAR_DEVISE[cur]) {
     return {
       countryCode: null,
       countryName: null,
       currency: cur,
-      amount: 300,
+      amount: PAR_DEVISE[cur].amount,
       type: "fixed",
       percent: 0,
       feeId: null,
-      source: `FALLBACK_CURRENCY_${cur}_CANCEL_300`,
-      label: cur === "XOF" ? "300 F CFA" : `300 ${cur}`,
+      source: `FALLBACK_CURRENCY_${cur}_CANCEL`,
+      label: PAR_DEVISE[cur].label,
       resolvedBy: "currency",
     };
   }
 
-  return {
-    countryCode: null,
-    countryName: null,
-    currency: cur,
-    amount: 0,
-    type: "fixed",
-    percent: 0,
-    feeId: null,
-    source: "NO_STATIC_CANCEL_FEE",
-    label: `0 ${cur}`,
-    resolvedBy: "none",
-  };
+  /**
+   * Devise hors table : AUCUN montant n'est inventé. Rendait « 0 », ce qui
+   * offrait l'annulation gratuite ; l'appelant refuse désormais (règle B.2).
+   */
+  return null;
 }
 
 module.exports = {

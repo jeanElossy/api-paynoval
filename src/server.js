@@ -1531,10 +1531,30 @@ async function bootstrap() {
       const { announceCagnotteReadiness } = require("./utils/cagnotteReadiness");
 
       announceCagnotteReadiness(process.env, logger);
+
     } catch (err) {
       logger.error(
         `❌ Annonce du module Cagnotte impossible : ${err?.message || err}`
       );
+    }
+
+    try {
+      /**
+       * Règle B.6 : un démarrage qui ment est la panne la plus chère. Sans base
+       * de lien, aucun transfert vers un portefeuille ou une carte ne peut
+       * être envoyé (le destinataire ne recevrait rien) : on le dit.
+       */
+      if (!require("./services/transferClaims/claimSms").claimLinkBase()) {
+        logger.warn(
+          "[CLAIM] CLAIM_LINK_BASE_URL absente — CONSÉQUENCE : les transferts vers un " +
+            "portefeuille mobile money ou une carte sont REFUSÉS (aucun lien de réception " +
+            "ne peut être envoyé au destinataire)."
+        );
+      } else {
+        logger.info("[CLAIM] réclamation par lien active : " + require("./services/transferClaims/claimSms").claimLinkBase());
+      }
+    } catch (err) {
+      logger.error(`❌ Annonce de la réclamation par lien impossible : ${err?.message || err}`);
     }
 
     /**
@@ -1683,6 +1703,13 @@ async function bootstrap() {
      */
     app.use("/api/v1/sandbox", require("./routes/sandboxRoutes"));
     app.use("/api/v1/internal/sandbox", require("./routes/internalSandboxRoutes"));
+
+    /**
+     * Réclamation d'un transfert par son destinataire (2026-11-04) : le lien
+     * reçu par SMS, le code et la réponse de sécurité. Passerelle seule.
+     * Voir `services/transferClaims/`.
+     */
+    app.use("/api/v1/transfer-claims", require("./routes/transferClaimRoutes"));
 
     app.use("/api/v1/notifications", protect, notificationRoutes);
     app.use("/api/v1/pay", protect, payRoutes);

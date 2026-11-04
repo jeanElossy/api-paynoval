@@ -103,35 +103,47 @@ function resolveFeesTreasuryMeta(tx) {
   };
 }
 
-function getStaticCancellationFee(sourceCurrency) {
-  const c = String(sourceCurrency || "").trim().toUpperCase();
-
-  if (["XOF", "XAF"].includes(c)) {
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * FRAIS D'ANNULATION — UN SEUL CALCUL, CELUI QUI EST AFFICHÉ (2026-11-04)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Cette route prélevait une TROISIÈME table codée en dur (`getStaticCancellation
+ * Fee` : 300 XOF / XAF, 2,99 CAD / USD / EUR, 0 sinon), différente de ce que
+ * l'app affichait (`/fees/simulate` : barème du back-office, puis la table de
+ * `config/cancellationFees.js`). Mesuré : en EUR, affiché 0, prélevé 2,99 ; en
+ * GBP, rien du tout.
+ *
+ * Décisions de l'utilisateur (2026-11-04) :
+ *   - le montant vient du barème du back-office, sinon de la table unique des
+ *     six devises — exactement le calcul de `/fees/simulate`
+ *     (`cancellation.service.resolveCancellationFeeAmounts`) ;
+ *   - seule l'annulation DÉCIDÉE PAR L'EXPÉDITEUR est facturée : un refus du
+ *     destinataire, et l'expiration, rendent tout l'argent ;
+ *   - un montant introuvable REFUSE l'annulation (503) au lieu de la rendre
+ *     gratuite. Les fonds ne restent pas bloqués pour autant : l'expiration
+ *     les libère, sans frais.
+ */
+async function resolveCancelFee({ tx, sourceCurrency, grossSource, cancelledBySender }) {
+  if (!cancelledBySender) {
     return {
-      amount: 300,
-      type: "fixed",
-      percent: 0,
-      feeId: null,
-      source: "STATIC_CANCEL_300",
+      cancellationFee: 0,
+      cancellationFeeType: "fixed",
+      cancellationFeePercent: 0,
+      cancellationFeeId: null,
+      cancellationFeeSource: "RECIPIENT_REFUSAL_FREE",
     };
   }
 
-  if (["CAD", "USD", "EUR"].includes(c)) {
-    return {
-      amount: 2.99,
-      type: "fixed",
-      percent: 0,
-      feeId: null,
-      source: "STATIC_CANCEL_2_99",
-    };
-  }
+  const { resolveCancellationFeeAmounts } = require("../../cancellation.service");
+  const fee = await resolveCancellationFeeAmounts({ tx, sourceCurrency, grossSource });
 
   return {
-    amount: 0,
-    type: "fixed",
-    percent: 0,
-    feeId: null,
-    source: "STATIC_CANCEL_0",
+    cancellationFee: round2(fee.cancellationFee),
+    cancellationFeeType: fee.cancellationFeeType || "fixed",
+    cancellationFeePercent: Number(fee.cancellationFeePercent || 0) || 0,
+    cancellationFeeId: fee.cancellationFeeId || null,
+    cancellationFeeSource: fee.cancellationFeeSource || "unknown",
   };
 }
 
@@ -295,6 +307,12 @@ function assertCancellable({ req, tx }) {
     if (userId !== senderId) {
       throw createError(403, "Seul l’expéditeur peut annuler cette transaction");
     }
+    // Le destinataire a réclamé : le versement est parti, plus d'annulation.
+    if (tx.providerStatus === "CLAIMED_BY_RECIPIENT") {
+      throw createError(409, "Le destinataire a accepté ce transfert : il est en cours de versement.", {
+        code: "ALREADY_CLAIMED",
+      });
+    }
   } else {
     throw createError(400, `Flow non supporté pour cancel: ${tx.flow}`);
   }
@@ -311,16 +329,6 @@ function assertCancellable({ req, tx }) {
 
   const grossSource = round2(toFloat(tx.amount));
   const netStored = round2(toFloat(tx.netAmount));
-  const staticFee = getStaticCancellationFee(sourceCurrency);
-  const cancellationFee = round2(staticFee.amount);
-
-  if (cancellationFee > grossSource) {
-    throw createError(400, "Frais d’annulation supérieurs au montant réservé");
-  }
-
-  if (cancellationFee > netStored && netStored > 0) {
-    throw createError(400, "Frais d’annulation supérieurs au net à rembourser");
-  }
 
   return {
     userId,
@@ -329,11 +337,20 @@ function assertCancellable({ req, tx }) {
     sourceCurrency,
     grossSource,
     netStored,
-    cancellationFee,
-    cancellationFeeType: staticFee.type || "fixed",
-    cancellationFeePercent: Number(staticFee.percent || 0) || 0,
-    cancellationFeeSource: staticFee.source || "static_rule",
+    // Seul l'expéditeur paie une annulation ; un refus du destinataire est gratuit.
+    cancelledBySender: userId === senderId,
   };
+}
+
+/** Frais au-delà du montant réservé ou du net à rembourser : refusé. */
+function assertFeeFits({ cancellationFee, grossSource, netStored }) {
+  if (cancellationFee > grossSource) {
+    throw createError(400, "Frais d’annulation supérieurs au montant réservé");
+  }
+
+  if (cancellationFee > netStored && netStored > 0) {
+    throw createError(400, "Frais d’annulation supérieurs au net à rembourser");
+  }
 }
 
 async function cancelController(req, res, next) {
@@ -399,14 +416,34 @@ async function cancelController(req, res, next) {
 
     const previewCheck = assertCancellable({ req, tx: preview });
 
+    const fee = await resolveCancelFee({
+      tx: preview,
+      sourceCurrency: previewCheck.sourceCurrency,
+      grossSource: previewCheck.grossSource,
+      cancelledBySender: previewCheck.cancelledBySender,
+    });
+    assertFeeFits({ ...fee, grossSource: previewCheck.grossSource, netStored: previewCheck.netStored });
+
+    /**
+     * FERMETURE (règle B.2) : des frais sans trésorerie pour les recevoir
+     * étaient silencieusement ABANDONNÉS — l'annulation passait gratuite. On
+     * refuse désormais, et on le dit.
+     */
+    if (fee.cancellationFee > 0 && !resolveFeesTreasuryMeta(preview)?.treasuryUserId) {
+      throw createError(503, "Annulation momentanément indisponible : trésorerie des frais non configurée.", {
+        code: "FEES_TREASURY_UNAVAILABLE",
+      });
+    }
+
     const fx = await resolveTreasuryCreditInCad({
-      cancellationFee: previewCheck.cancellationFee,
+      cancellationFee: fee.cancellationFee,
       sourceCurrency: previewCheck.sourceCurrency,
     });
 
     quote = {
       sourceCurrency: previewCheck.sourceCurrency,
-      cancellationFee: previewCheck.cancellationFee,
+      cancelledBySender: previewCheck.cancelledBySender,
+      ...fee,
       ...fx,
     };
 
@@ -431,16 +468,8 @@ async function cancelController(req, res, next) {
         throw createError(404, "Transaction introuvable");
       }
 
-      const {
-        userId,
-        receiverId,
-        sourceCurrency,
-        grossSource,
-        cancellationFee,
-        cancellationFeeType,
-        cancellationFeePercent,
-        cancellationFeeSource,
-      } = assertCancellable({ req, tx });
+      const { userId, receiverId, sourceCurrency, grossSource, netStored, cancelledBySender } =
+        assertCancellable({ req, tx });
 
       /**
        * Le devis a été calculé hors transaction, sur un état qui a pu changer
@@ -452,7 +481,7 @@ async function cancelController(req, res, next) {
       if (
         !quote ||
         quote.sourceCurrency !== sourceCurrency ||
-        quote.cancellationFee !== cancellationFee
+        quote.cancelledBySender !== cancelledBySender
       ) {
         throw createError(
           409,
@@ -461,12 +490,16 @@ async function cancelController(req, res, next) {
       }
 
       const {
+        cancellationFee,
+        cancellationFeeType,
+        cancellationFeePercent,
+        cancellationFeeId,
+        cancellationFeeSource,
         treasuryFeeAmount,
         treasuryFeeCurrency,
         treasuryConversionRate,
       } = quote;
-
-      const cancellationFeeId = null;
+      assertFeeFits({ cancellationFee, grossSource, netStored });
 
       if (tx.fundsReserved && !tx.reserveReleased) {
         await releaseSenderReserve({
@@ -499,11 +532,14 @@ async function cancelController(req, res, next) {
        * Même motif que `if (tx.fundsReserved && !tx.reserveReleased)` juste
        * au-dessus. Voir `models/Transaction.js`.
        */
-      if (
-        cancellationFee > 0 &&
-        treasuryMeta?.treasuryUserId &&
-        !tx.cancellationFeeCharged
-      ) {
+      // Des frais sans trésorerie ne sont plus abandonnés en silence (B.2).
+      if (cancellationFee > 0 && !treasuryMeta?.treasuryUserId) {
+        throw createError(503, "Annulation momentanément indisponible : trésorerie des frais non configurée.", {
+          code: "FEES_TREASURY_UNAVAILABLE",
+        });
+      }
+
+      if (cancellationFee > 0 && !tx.cancellationFeeCharged) {
         feeChargeResult = await chargeCancellationFee({
           transaction: tx,
           senderId: tx.sender,
@@ -648,4 +684,96 @@ async function cancelController(req, res, next) {
   }
 }
 
-module.exports = { cancelController };
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * ANNULATION SANS FRAIS, À L'INITIATIVE DU DESTINATAIRE (2026-11-04)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Appelée par la réclamation (`services/transferClaims`) quand le destinataire
+ * d'un versement vers un portefeuille ou une carte REFUSE, après avoir prouvé
+ * qu'il possède le numéro. Il n'a pas de compte : pas de `req.user`, d'où cette
+ * entrée système. Gratuit (décision de l'utilisateur) : toute la réserve
+ * revient à l'expéditeur.
+ *
+ * Mêmes gardes et mêmes écritures que `cancelController`, moins les frais :
+ * transition permise par la machine à états, réserve libérée une seule fois
+ * (`reserveReleased`), notification et événement de domaine sous la même
+ * session, promotion restituée après le commit.
+ */
+async function cancelWithoutFee({ transactionId, reason }) {
+  const session = await startTxSession();
+  let promotionToRestore = null;
+
+  try {
+    const out = await runInTransaction(session, async (sess) => {
+      const sessOpts = maybeSessionOpts(sess);
+      const tx = await loadCancelTarget(transactionId, sessOpts);
+      if (!tx) throw createError(404, "Transaction introuvable");
+
+      if (!isOutboundExternalPayout(tx)) {
+        throw createError(400, `Flow non supporté pour ce refus : ${tx.flow}`);
+      }
+      assertTransition(tx.status, "cancelled");
+
+      if (tx.fundsCaptured || tx.beneficiaryCredited) {
+        throw createError(409, "Transaction déjà exécutée, annulation impossible");
+      }
+
+      const sourceCurrency = resolveSourceCurrency(tx);
+      if (!sourceCurrency) throw createError(500, "Devise source introuvable sur la transaction");
+      const grossSource = round2(toFloat(tx.amount));
+
+      if (tx.fundsReserved && !tx.reserveReleased) {
+        await releaseSenderReserve({
+          transaction: tx,
+          senderId: tx.sender,
+          amount: grossSource,
+          currency: sourceCurrency,
+          session: sess,
+        });
+        tx.reserveReleased = true;
+        tx.reserveReleasedAt = new Date();
+      }
+
+      tx.status = "cancelled";
+      tx.cancelledAt = new Date();
+      tx.cancelReason = sanitize(reason || "Refusé par le destinataire");
+      tx.providerStatus = "REFUSED_BY_RECIPIENT";
+      tx.cancellationFee = 0;
+      promotionToRestore = tx.promotion || null;
+
+      await tx.save(sessOpts);
+      await notifyTransactionEvent(tx, "cancelled", sess, sourceCurrency);
+      await publishDomainEvent(
+        {
+          name: "transaction.cancelled.v1",
+          aggregateId: String(tx._id),
+          occurredAt: new Date(),
+          payload: {
+            transactionId: String(tx._id),
+            reference: tx.reference || "",
+            senderId: String(tx.sender || ""),
+            amount: Number(grossSource ?? 0),
+            currency: String(sourceCurrency || ""),
+            reason: "REFUSED_BY_RECIPIENT",
+            cancelledAt: new Date().toISOString(),
+            mode: String(tx.mode || ""),
+          },
+        },
+        sess
+      );
+
+      return { transactionId: String(tx._id), status: tx.status, releasedAmount: grossSource, currency: sourceCurrency };
+    });
+
+    await restorePromotion(promotionToRestore);
+    return out;
+  } catch (err) {
+    await safeAbort(session);
+    throw err;
+  } finally {
+    await safeEndSession(session);
+  }
+}
+
+module.exports = { cancelController, cancelWithoutFee, resolveCancelFee, assertCancellable };

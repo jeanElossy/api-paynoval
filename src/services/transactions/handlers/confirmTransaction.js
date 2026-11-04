@@ -214,6 +214,9 @@ function normalizeStatus(status) {
  * `test/confirmPolicyMatchesStateMachine.test.js` échoue si cette liste
  * réintroduit un statut que la machine refuse.
  */
+// Depuis le 2026-11-04, plus aucun payout ne se confirme par cette route (voir
+// `assertConfirmable`) : la constante reste la liste de référence des états
+// d'où un payout peut avancer, épinglée sur la machine à états par les tests.
 const PAYOUT_CONFIRMABLE_DEPUIS = Object.freeze(["pending", "pending_review"]);
 
 function assertCorridorLockIsValid(tx) {
@@ -571,28 +574,19 @@ function assertConfirmable({ req, tx, now }) {
       );
     }
   } else if (isOutboundExternalPayout(tx)) {
-    const statutActuel = normalizeStatus(tx.status);
-
-    if (!PAYOUT_CONFIRMABLE_DEPUIS.includes(statutActuel)) {
-      throw createError(409, "Transaction non confirmable dans son état actuel");
-    }
-
     /**
-     * La machine à états a le DERNIER mot. La liste ci-dessus restreint, elle
-     * n'autorise pas : une transition doit être permise par les DEUX.
-     *
-     * Avant le 2026-09-03, cette branche n'appelait pas `assertTransition` — la
-     * liste en dur décidait seule, et elle DIVERGEAIT de la machine dans les
-     * deux sens (voir le commentaire de `PAYOUT_CONFIRMABLE_DEPUIS`).
+     * ⚠️ FERMÉ AU 2026-11-04. L'EXPÉDITEUR confirmait ici son propre transfert
+     * vers un portefeuille ou une carte, avec une réponse… qu'il a lui-même
+     * fixée. Un transfert vers un tiers se confirme désormais par le
+     * DESTINATAIRE, via son lien (code SMS + réponse) :
+     * `services/transferClaims/claimService.claim`. Un retrait vers soi n'a
+     * rien à confirmer (il part à l'initiation).
      */
-    assertTransition(statutActuel, "confirmed");
-
-    if (String(tx.sender) !== getAuthedUserId(req)) {
-      throw createError(
-        403,
-        "Vous n’êtes pas autorisé à confirmer cette transaction"
-      );
-    }
+    throw createError(
+      409,
+      "Ce transfert se confirme par le destinataire, avec le lien reçu par SMS.",
+      { code: "CONFIRM_BY_RECIPIENT_LINK" }
+    );
   } else {
     throw createError(400, `Flow non supporté pour confirm: ${tx.flow}`);
   }

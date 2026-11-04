@@ -444,23 +444,42 @@ async function listPendingTransfers(user) {
   const userId = assertSandboxUser(user);
   const { Transaction } = models();
 
+  /**
+   * Transferts PayNoval ET, depuis le 2026-11-04, transferts vers un
+   * portefeuille ou une carte qui attendent la réclamation du destinataire
+   * (`services/transferClaims`). Un retrait vers soi n'y figure pas : il n'a
+   * rien à confirmer.
+   */
   const rows = await Transaction.find({
     mode: SANDBOX,
     sender: new mongoose.Types.ObjectId(userId),
-    flow: "PAYNOVAL_INTERNAL_TRANSFER",
     status: "pending",
+    $or: [
+      { flow: "PAYNOVAL_INTERNAL_TRANSFER" },
+      {
+        flow: { $in: ["PAYNOVAL_TO_MOBILEMONEY_PAYOUT", "PAYNOVAL_TO_CARD_PAYOUT"] },
+        providerStatus: "AWAITING_RECIPIENT_CLAIM",
+      },
+    ],
   })
     .sort({ createdAt: -1 })
     .limit(20)
-    .select("reference amount currency senderCurrencySymbol nameDestinataire securityQuestion createdAt")
+    .select("reference flow amount currency senderCurrencySymbol nameDestinataire securityQuestion createdAt meta")
     .lean();
+
+  const KIND = {
+    PAYNOVAL_INTERNAL_TRANSFER: "paynoval",
+    PAYNOVAL_TO_MOBILEMONEY_PAYOUT: "mobilemoney",
+    PAYNOVAL_TO_CARD_PAYOUT: "card",
+  };
 
   return rows.map((tx) => ({
     id: String(tx._id),
     reference: tx.reference,
+    kind: KIND[tx.flow] || "paynoval",
     amount: decToNumber(tx.amount),
     currency: tx.senderCurrencySymbol || tx.currency || null,
-    recipientName: tx.nameDestinataire || null,
+    recipientName: tx.nameDestinataire || tx.meta?.externalRecipient?.recipientName || null,
     securityQuestion: tx.securityQuestion || null,
     createdAt: tx.createdAt,
   }));
