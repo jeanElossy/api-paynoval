@@ -23,8 +23,13 @@
 
 const crypto = require("crypto");
 
-/** Essais (réponse ou code faux) avant blocage du lien. */
-const MAX_FAILED_ATTEMPTS = 5;
+/**
+ * Essais (réponse ou code faux) avant blocage du lien : TROIS (décision de
+ * l'utilisateur du 2026-11-04, au lieu de cinq). C'est le réglage courant des
+ * banques pour un code à usage unique ; ici il faut les DEUX bonnes preuves,
+ * trois échecs suffisent à un vrai destinataire.
+ */
+const MAX_FAILED_ATTEMPTS = 3;
 
 /** Durée de vie d'un code SMS. */
 const OTP_TTL_MS = 10 * 60 * 1000;

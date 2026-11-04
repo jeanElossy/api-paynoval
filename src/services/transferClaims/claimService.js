@@ -206,8 +206,9 @@ async function requestCode(token, { now = Date.now() } = {}) {
 }
 
 /**
- * Un échec de plus, compté atomiquement. Au cinquième, le lien se bloque et
- * l'expéditeur est prévenu. Rend les essais restants.
+ * Un échec de plus, compté atomiquement. Au dernier permis
+ * (`MAX_FAILED_ATTEMPTS`, trois), le lien se bloque et l'expéditeur est
+ * prévenu. Rend les essais restants.
  */
 async function registerFailure(claim, tx) {
   const after = await ClaimModel().findOneAndUpdate(

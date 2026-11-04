@@ -68,10 +68,10 @@ test("envois de code bornés : une minute d'écart, cinq au plus", () => {
   assert.equal(rules.otpSendBlocker({ claim: { otpSendCount: 5 }, now }), "OTP_SEND_LIMIT");
 });
 
-test("essais : cinq échecs au plus, et le code expire en dix minutes", () => {
-  assert.equal(rules.MAX_FAILED_ATTEMPTS, 5);
-  assert.equal(rules.remainingAfterFailure(0), 4);
-  assert.equal(rules.remainingAfterFailure(4), 0);
+test("essais : trois échecs au plus (décision du 2026-11-04), et le code expire en dix minutes", () => {
+  assert.equal(rules.MAX_FAILED_ATTEMPTS, 3);
+  assert.equal(rules.remainingAfterFailure(0), 2);
+  assert.equal(rules.remainingAfterFailure(2), 0);
   const now = Date.now();
   assert.equal(rules.otpExpired({ claim: { otpHash: "x", otpExpiresAt: new Date(now + 1000) }, now }), false);
   assert.equal(rules.otpExpired({ claim: { otpHash: "x", otpExpiresAt: new Date(now - 1) }, now }), true);
