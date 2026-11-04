@@ -478,22 +478,25 @@ test("le pays d'une carte vient de l'émetteur, jamais du téléphone", async ()
   const live = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI" }, { issuerCountry: "FR" });
   assert.equal(live.sourceCardCountry, "FR");
 
-  // Aucun chemin de contournement : le moteur lit aussi ces champs.
+  // Aucun chemin de contournement : le moteur lit aussi ces champs. (Carte du
+  // compte SANS émetteur connu : depuis le 2026-11-04, une carte qui n'est pas
+  // au compte est refusée d'emblée — voir le test « carte du compte ».)
   const forged = await run(
     { _id: "u", mode: "live" },
-    { ...cardRail, cardCountry: "CI", metadata: { cardCountry: "CI" }, meta: { cardCountry: "CI" }, recipientInfo: { cardCountry: "CI" }, beneficiary: { cardCountry: "CI" } }
+    { ...cardRail, cardCountry: "CI", metadata: { cardCountry: "CI" }, meta: { cardCountry: "CI" }, recipientInfo: { cardCountry: "CI" }, beneficiary: { cardCountry: "CI" } },
+    {}
   );
   assert.equal(forged.sourceCardCountry, undefined);
   assert.equal(forged.cardCountry, undefined);
   assert.ok(!JSON.stringify(forged).includes('"cardCountry"'));
 
   // Compte réel sans émetteur connu : rien n'est deviné, le moteur refusera.
-  const unknown = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI", binCountry: "CI" });
+  const unknown = await run({ _id: "u", mode: "live" }, { ...cardRail, sourceCardCountry: "CI", binCountry: "CI" }, {});
   assert.equal(unknown.sourceCardCountry, undefined);
   assert.equal(unknown.binCountry, undefined);
 
   // Carte de test : le pays du compte, en simulation seulement.
-  const demo = await run({ _id: "u", mode: "sandbox", country: "France" }, cardRail);
+  const demo = await run({ _id: "u", mode: "sandbox", country: "France" }, cardRail, {});
   assert.equal(demo.sourceCardCountry, "FR");
 
   const payout = await run({ _id: "u", mode: "sandbox" }, { destination: "visa_direct", toCountry: "CI" });
