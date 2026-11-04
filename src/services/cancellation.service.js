@@ -208,6 +208,13 @@ async function resolveCancellationFeeAmounts({
       currency: sourceCurrency,
     });
 
+    // Ni barème ni table pour cette devise : on refuse, on n'invente pas 0 (B.2).
+    if (!rule) {
+      throw createError(503, "Frais d’annulation introuvables pour cette devise.", {
+        code: "CANCELLATION_FEE_UNAVAILABLE",
+      });
+    }
+
     console.warn(
       `⚠️ [CANCEL] aucun barème CANCELLATION ne couvre ${senderCountryCode || "?"}/` +
         `${sourceCurrency} — repli sur la table statique (${rule.source}). ` +

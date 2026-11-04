@@ -517,6 +517,15 @@ exports.simulateFee = async (req, res) => {
           currency: fromCur,
         });
 
+        // Même refus que le prélèvement : aucun montant inventé (B.2).
+        if (!statique) {
+          return res.status(503).json({
+            success: false,
+            code: "CANCELLATION_FEE_UNAVAILABLE",
+            message: "Frais d’annulation introuvables pour cette devise.",
+          });
+        }
+
         feeValue = roundMoney(statique.amount, fromCur);
         feeType = statique.type || "fixed";
         feeId = statique.feeId || null;
