@@ -70,6 +70,7 @@ const {
 const { submitExternalExecution } = require("./submitExternalExecution");
 const claimService = require("../../transferClaims/claimService");
 const { claimLinkBase } = require("../../transferClaims/claimSms");
+const { assertWithdrawalToOwnPhone } = require("../withdrawOwnership");
 const { normalizeE164 } = require("../../transferClaims/claimRules");
 const { toE164 } = require("../../../utils/phone");
 const { resolvePersistedIdempotencyKey } = require("../../../utils/idempotencyKeys");
@@ -659,6 +660,20 @@ async function initiateOutboundExternal(req, res, next) {
       fromCountry,
       toCountry,
     } = resolveCountries(body, country);
+
+    /**
+     * RETRAIT ⇒ VERS LE NUMÉRO DU COMPTE SEULEMENT (2026-11-04), avant tout
+     * prix et toute réservation. Un retrait n'a ni question ni lien SMS : sans
+     * ce contrôle, une session volée vidait le solde vers n'importe quel
+     * numéro (`../withdrawOwnership.js`).
+     */
+    assertWithdrawalToOwnPhone({
+      operationType: operationType,
+      isMobileMoneyPayout: flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_MOBILEMONEY_PAYOUT,
+      recipientPhone: externalRecipientMeta.phoneNumber,
+      payoutCountry: toCountry || resolvedCountry,
+      user: senderUser,
+    });
 
     let { currencySourceISO, currencyTargetISO } = resolveCurrencies({
       body,
