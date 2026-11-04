@@ -68,6 +68,10 @@ const {
 } = require("../shared/transactionEligibility");
 
 const { submitExternalExecution } = require("./submitExternalExecution");
+const claimService = require("../../transferClaims/claimService");
+const { claimLinkBase } = require("../../transferClaims/claimSms");
+const { normalizeE164 } = require("../../transferClaims/claimRules");
+const { toE164 } = require("../../../utils/phone");
 const { resolvePersistedIdempotencyKey } = require("../../../utils/idempotencyKeys");
 
 const DEFAULT_FEES_TREASURY_SYSTEM_TYPE = "FEES_TREASURY";
@@ -688,6 +692,49 @@ async function initiateOutboundExternal(req, res, next) {
     currencySourceISO = corridorLock.lockedSourceCurrency;
     currencyTargetISO = corridorLock.lockedTargetCurrency;
 
+    /**
+     * ══════════════════════════════════════════════════════════════════════
+     * RÉCLAMATION PAR LE DESTINATAIRE (2026-11-04, décision de l'utilisateur)
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * Un transfert vers un tiers partait chez le prestataire DÈS L'ENVOI : la
+     * question de sécurité était exigée, hachée… et jamais vérifiée. Elle l'est
+     * désormais, comme PayPal pour un paiement à un non-client : l'argent reste
+     * réservé, le destinataire reçoit un lien par SMS et doit fournir le code
+     * reçu ET la réponse. Le retrait vers soi (sans question) n'est pas concerné.
+     *
+     * Vérifié AVANT toute réserve : sans numéro joignable ni lien
+     * constructible, on refuse (fermeture) et on ne réserve rien.
+     */
+    let claimPhoneE164 = null;
+    if (questionExigee) {
+      const isCardPayout = flow === OUTBOUND_EXTERNAL_FLOWS.PAYNOVAL_TO_CARD_PAYOUT;
+      const rawPhone = isCardPayout
+        ? body.recipientPhone || body.recipientInfo?.phone || body.beneficiary?.phoneNumber
+        : externalRecipientMeta.phoneNumber;
+      const ISO_BY_KEY = { "cote d'ivoire": "CI", mali: "ML", "burkina faso": "BF" };
+      const iso = ISO_BY_KEY[String(corridorLock.lockedTargetCountry || "").toLowerCase()] || "";
+
+      claimPhoneE164 = normalizeE164(rawPhone) || toE164(rawPhone, iso).e164 || null;
+
+      if (!claimPhoneE164) {
+        throw createError(
+          400,
+          isCardPayout
+            ? "Numéro de téléphone du destinataire requis : il reçoit le lien pour accepter le transfert."
+            : "Numéro du destinataire invalide.",
+          { code: "RECIPIENT_PHONE_REQUIRED" }
+        );
+      }
+
+      if (!claimLinkBase()) {
+        throw createError(503, "Transfert momentanément indisponible : lien de réception non configuré.", {
+          code: "CLAIM_LINK_UNCONFIGURED",
+        });
+      }
+    }
+    let claimToken = null;
+
     if (!currencySourceISO) {
       throw createError(400, "Devise source introuvable");
     }
@@ -978,6 +1025,20 @@ async function initiateOutboundExternal(req, res, next) {
       tx.fundsReservedAt = new Date();
       tx.providerStatus = "FUNDS_RESERVED";
 
+      /**
+       * Le lien naît DANS la transaction de la réserve : pas de réserve sans
+       * lien, pas de lien sans réserve. Un rejeu du corps recrée l'un et
+       * l'autre (l'essai précédent a été annulé avec la transaction Mongo).
+       */
+      if (claimPhoneE164) {
+        claimToken = await claimService.createClaim({
+          tx,
+          recipientPhoneE164: claimPhoneE164,
+          session: sessOpts.session || null,
+        });
+        tx.providerStatus = "AWAITING_RECIPIENT_CLAIM";
+      }
+
       await tx.save(sessOpts);
 
       /**
@@ -1079,19 +1140,35 @@ async function initiateOutboundExternal(req, res, next) {
     }
 
     let execution = null;
+    let claimLink = null;
 
-    try {
-      execution = await submitExternalExecution({
-        req,
-        transactionId: tx._id.toString(),
+    if (claimToken) {
+      /**
+       * TRANSFERT VERS UN TIERS : rien ne part chez le prestataire. Le lien est
+       * envoyé au destinataire (aucun SMS en simulation), et c'est sa
+       * réclamation — code + réponse — qui lancera le versement
+       * (`transferClaims/claimService.claim`).
+       */
+      claimLink = await claimService.sendLinkAfterCommit({
+        tx,
+        token: claimToken,
+        recipientPhoneE164: claimPhoneE164,
+        senderName: senderUser?.fullName || "",
       });
-    } catch (e) {
-      logger.error("[TX-CORE][OUTBOUND] provider submission failed", {
-        transactionId: tx._id.toString(),
-        flow,
-        message: e.message,
-        status: e.status,
-      });
+    } else {
+      try {
+        execution = await submitExternalExecution({
+          req,
+          transactionId: tx._id.toString(),
+        });
+      } catch (e) {
+        logger.error("[TX-CORE][OUTBOUND] provider submission failed", {
+          transactionId: tx._id.toString(),
+          flow,
+          message: e.message,
+          status: e.status,
+        });
+      }
     }
 
       /**
@@ -1120,6 +1197,10 @@ async function initiateOutboundExternal(req, res, next) {
       // Authentification demandée au titulaire (3-D Secure) — `next_action`.
       nextAction: execution?.nextAction || null,
       securityQuestion: q,
+      // Réclamation : le destinataire doit encore confirmer par son lien.
+      awaitingRecipient: Boolean(claimToken),
+      recipientPhoneLast4: claimToken ? String(claimPhoneE164).slice(-4) : null,
+      claimLinkSent: claimLink?.sent === true,
       autoCancelAt: tx.autoCancelAt || null,
       autoCancelAfterDays: getAutoCancelAfterDays(),
       pricing: {

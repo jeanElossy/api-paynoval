@@ -216,6 +216,9 @@ function buildReceiverAmount(tx) {
  * un événement, le service de notification décide qui reçoit quoi et par où.
  */
 
+/** Événements qui ne s'adressent qu'à l'expéditeur. */
+const SENDER_ONLY_EVENTS = new Set(["claim_locked"]);
+
 function buildMessages(status, ctx) {
   const {
     senderName,
@@ -272,6 +275,22 @@ function buildMessages(status, ctx) {
         title: "Transfert annulé",
         message: `Le transfert de ${senderName} vers vous a été annulé. Référence: ${reference}.`,
       },
+    };
+  }
+
+  /**
+   * Réclamation par le destinataire (2026-11-04, `services/transferClaims`).
+   * L'expéditeur est prévenu quand son lien est bloqué : trop d'essais faux
+   * sur la réponse ou le code, peut-être une tentative de fraude.
+   */
+  if (status === "claim_locked") {
+    return {
+      sender: {
+        type: "transaction_claim_locked",
+        title: "Lien du destinataire bloqué",
+        message: `Trop d'essais incorrects sur le lien de votre transfert de ${senderPretty}. Les fonds restent réservés : vous pouvez l'annuler. Référence: ${reference}.`,
+      },
+      receiver: null,
     };
   }
 
@@ -610,17 +629,27 @@ async function notifyTransactionEvent(
     const sessOpts = maybeSessionOpts(session);
     const scope = String(options?.scope || "");
 
-    const [sender, receiver] = await Promise.all([
+    /**
+     * Événements adressés à l'EXPÉDITEUR SEUL (2026-11-04) : un versement vers
+     * un portefeuille ou une carte n'a pas de compte destinataire, et l'arrêt
+     * ci-dessous faisait taire aussi l'expéditeur.
+     */
+    const senderOnly = SENDER_ONLY_EVENTS.has(status);
+
+    const [sender, foundReceiver] = await Promise.all([
       runtime.User.findById(tx.sender)
         .select("_id email fullName preferences countryCode country")
         .lean()
         .session(sessOpts.session || null),
 
-      runtime.User.findById(tx.receiver)
-        .select("_id email fullName preferences countryCode country")
-        .lean()
-        .session(sessOpts.session || null),
+      senderOnly || !tx.receiver
+        ? null
+        : runtime.User.findById(tx.receiver)
+            .select("_id email fullName preferences countryCode country")
+            .lean()
+            .session(sessOpts.session || null),
     ]);
+    const receiver = foundReceiver || (senderOnly ? {} : null);
 
     if (!sender || !receiver) {
       logger?.warn?.("[transactionNotificationService] sender or receiver missing", {
@@ -724,6 +753,8 @@ async function notifyTransactionEvent(
       scope,
       sessOpts,
     });
+
+    if (senderOnly || !messages.receiver || !receiver._id) return;
 
     await enqueueUserNotification({
       tx,

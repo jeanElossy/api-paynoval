@@ -89,18 +89,18 @@ test("`processing` reste refusé sur la route utilisateur", () => {
   assert.ok(canTransition(STATES.PROCESSING, STATES.CONFIRMED));
 });
 
-test("la branche payout appelle assertTransition", () => {
-  assert.match(
-    SOURCE,
-    /assertTransition\(\s*statutActuel\s*,\s*"confirmed"\s*\)/,
-    "sans cet appel, la liste en dur déciderait seule — c'est le défaut d'origine"
-  );
-
-  // La liste doit être un filtre AVANT la machine, pas à la place.
-  const posListe = SOURCE.indexOf("PAYOUT_CONFIRMABLE_DEPUIS.includes(statutActuel)");
-  const posMachine = SOURCE.indexOf('assertTransition(statutActuel, "confirmed")');
-  assert.ok(posListe > -1 && posMachine > -1);
-  assert.ok(posListe < posMachine, "le filtre de route s'applique d'abord, la machine tranche ensuite");
+test("la branche payout refuse la confirmation par l'expéditeur (2026-11-04)", () => {
+  /**
+   * L'expéditeur confirmait ici son propre transfert vers un portefeuille ou
+   * une carte, avec une réponse qu'il avait lui-même fixée. Seul le
+   * destinataire confirme désormais, par son lien (code SMS + réponse) — et le
+   * versement ne part que de `transferClaims/claimService.release`.
+   */
+  const debut = SOURCE.indexOf("} else if (isOutboundExternalPayout(tx)) {");
+  assert.ok(debut > -1);
+  const branche = SOURCE.slice(debut, SOURCE.indexOf("} else {", debut));
+  assert.match(branche, /CONFIRM_BY_RECIPIENT_LINK/);
+  assert.doesNotMatch(branche, /assertTransition\(/, "plus aucune transition depuis cette branche");
 });
 
 test("la branche transfert interne consulte toujours la machine", () => {

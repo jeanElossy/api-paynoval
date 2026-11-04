@@ -54,5 +54,6 @@ router.post("/drain", toolsLimiter, controller.drain);
 router.post("/reset", toolsLimiter, controller.reset);
 router.get("/transfers/pending", controller.listPendingTransfers);
 router.post("/transfers/:id/confirm", confirmLimiter, controller.confirmAsRecipient);
+router.post("/transfers/:id/claim-link", toolsLimiter, controller.claimLink);
 
 module.exports = router;

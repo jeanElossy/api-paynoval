@@ -307,6 +307,12 @@ function assertCancellable({ req, tx }) {
     if (userId !== senderId) {
       throw createError(403, "Seul l’expéditeur peut annuler cette transaction");
     }
+    // Le destinataire a réclamé : le versement est parti, plus d'annulation.
+    if (tx.providerStatus === "CLAIMED_BY_RECIPIENT") {
+      throw createError(409, "Le destinataire a accepté ce transfert : il est en cours de versement.", {
+        code: "ALREADY_CLAIMED",
+      });
+    }
   } else {
     throw createError(400, `Flow non supporté pour cancel: ${tx.flow}`);
   }
@@ -678,4 +684,96 @@ async function cancelController(req, res, next) {
   }
 }
 
-module.exports = { cancelController, resolveCancelFee, assertCancellable };
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * ANNULATION SANS FRAIS, À L'INITIATIVE DU DESTINATAIRE (2026-11-04)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Appelée par la réclamation (`services/transferClaims`) quand le destinataire
+ * d'un versement vers un portefeuille ou une carte REFUSE, après avoir prouvé
+ * qu'il possède le numéro. Il n'a pas de compte : pas de `req.user`, d'où cette
+ * entrée système. Gratuit (décision de l'utilisateur) : toute la réserve
+ * revient à l'expéditeur.
+ *
+ * Mêmes gardes et mêmes écritures que `cancelController`, moins les frais :
+ * transition permise par la machine à états, réserve libérée une seule fois
+ * (`reserveReleased`), notification et événement de domaine sous la même
+ * session, promotion restituée après le commit.
+ */
+async function cancelWithoutFee({ transactionId, reason }) {
+  const session = await startTxSession();
+  let promotionToRestore = null;
+
+  try {
+    const out = await runInTransaction(session, async (sess) => {
+      const sessOpts = maybeSessionOpts(sess);
+      const tx = await loadCancelTarget(transactionId, sessOpts);
+      if (!tx) throw createError(404, "Transaction introuvable");
+
+      if (!isOutboundExternalPayout(tx)) {
+        throw createError(400, `Flow non supporté pour ce refus : ${tx.flow}`);
+      }
+      assertTransition(tx.status, "cancelled");
+
+      if (tx.fundsCaptured || tx.beneficiaryCredited) {
+        throw createError(409, "Transaction déjà exécutée, annulation impossible");
+      }
+
+      const sourceCurrency = resolveSourceCurrency(tx);
+      if (!sourceCurrency) throw createError(500, "Devise source introuvable sur la transaction");
+      const grossSource = round2(toFloat(tx.amount));
+
+      if (tx.fundsReserved && !tx.reserveReleased) {
+        await releaseSenderReserve({
+          transaction: tx,
+          senderId: tx.sender,
+          amount: grossSource,
+          currency: sourceCurrency,
+          session: sess,
+        });
+        tx.reserveReleased = true;
+        tx.reserveReleasedAt = new Date();
+      }
+
+      tx.status = "cancelled";
+      tx.cancelledAt = new Date();
+      tx.cancelReason = sanitize(reason || "Refusé par le destinataire");
+      tx.providerStatus = "REFUSED_BY_RECIPIENT";
+      tx.cancellationFee = 0;
+      promotionToRestore = tx.promotion || null;
+
+      await tx.save(sessOpts);
+      await notifyTransactionEvent(tx, "cancelled", sess, sourceCurrency);
+      await publishDomainEvent(
+        {
+          name: "transaction.cancelled.v1",
+          aggregateId: String(tx._id),
+          occurredAt: new Date(),
+          payload: {
+            transactionId: String(tx._id),
+            reference: tx.reference || "",
+            senderId: String(tx.sender || ""),
+            amount: Number(grossSource ?? 0),
+            currency: String(sourceCurrency || ""),
+            reason: "REFUSED_BY_RECIPIENT",
+            cancelledAt: new Date().toISOString(),
+            mode: String(tx.mode || ""),
+          },
+        },
+        sess
+      );
+
+      return { transactionId: String(tx._id), status: tx.status, releasedAmount: grossSource, currency: sourceCurrency };
+    });
+
+    await restorePromotion(promotionToRestore);
+    return out;
+  } catch (err) {
+    await safeAbort(session);
+    throw err;
+  } finally {
+    await safeEndSession(session);
+  }
+}
+
+module.exports = { cancelController, cancelWithoutFee, resolveCancelFee, assertCancellable };

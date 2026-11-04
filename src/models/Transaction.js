@@ -878,6 +878,16 @@ const transactionSchema = new mongoose.Schema(
       index: true,
     },
 
+    /**
+     * Réclamation par le destinataire (2026-11-04, `services/transferClaims`) :
+     * l'instant où il a fourni le code SMS et la bonne réponse, et où le
+     * versement a été autorisé.
+     */
+    claimedByRecipientAt: {
+      type: Date,
+      default: null,
+    },
+
     executedAt: {
       type: Date,
       default: null,

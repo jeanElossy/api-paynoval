@@ -6,6 +6,7 @@
  */
 
 const asyncHandler = require("express-async-handler");
+const claimService = require("../services/transferClaims/claimService");
 
 const tools = require("../services/sandbox/sandboxToolsService");
 const threeDS = require("../services/sandbox/sandboxThreeDSService");
@@ -69,6 +70,23 @@ const listPendingTransfers = asyncHandler(async (req, res) => {
  * appelé avec son identité. Il répond lui-même, succès ou refus.
  */
 const confirmAsRecipient = asyncHandler(async (req, res, next) => {
+  /**
+   * Transfert vers un portefeuille ou une carte (2026-11-04) : le destinataire
+   * n'a pas de compte. On répond par le MÊME chemin que sa page (`claim`), avec
+   * les mêmes vérifications ; seul le code SMS de démonstration est fourni.
+   */
+  const pending = await tools.listPendingTransfers(req.user);
+  const target = pending.find((t) => t.id === String(req.params.id));
+  if (target && target.kind !== "paynoval") {
+    const data = await claimService.sandboxAnswerAsRecipient({
+      transactionId: req.params.id,
+      senderId: req.user?._id || req.user?.id,
+      answer: String(req.body?.securityAnswer || ""),
+    });
+    res.set("Cache-Control", "no-store");
+    return res.json({ success: true, status: "confirmed", transferStatus: "confirmed", data });
+  }
+
   const recipient = await tools.loadRecipientOf(req.user, req.params.id);
 
   const asRecipient = Object.create(req);
@@ -76,6 +94,16 @@ const confirmAsRecipient = asyncHandler(async (req, res, next) => {
   asRecipient.body = { transactionId: req.params.id, securityAnswer: req.body?.securityAnswer };
 
   return confirmController(asRecipient, res, next);
+});
+
+/** SIMULATION : nouveau lien de la page du destinataire (aucun SMS en démonstration). */
+const claimLink = asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const data = await claimService.rotateSandboxLink({
+    transactionId: req.params.id,
+    senderId: req.user?._id || req.user?.id,
+  });
+  res.json({ success: true, data });
 });
 
 const getThreeDSChallenge = asyncHandler(async (req, res) => {
@@ -142,6 +170,7 @@ module.exports = {
   reset,
   listPendingTransfers,
   confirmAsRecipient,
+  claimLink,
   getThreeDSChallenge,
   submitThreeDSDecision,
   adminGetState,

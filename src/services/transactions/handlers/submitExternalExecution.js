@@ -183,6 +183,18 @@ async function submitExternalExecution({ req, transactionId }) {
    */
   requireMode(tx.mode, `transaction ${String(tx._id)}`);
 
+  /**
+   * GARDE EN PROFONDEUR (2026-11-04) : un transfert vers un tiers qui attend
+   * encore la réclamation de son destinataire (code SMS + réponse) ne part
+   * JAMAIS chez le prestataire, quel que soit l'appelant. Seul
+   * `transferClaims/claimService.claim` lève cet état, sous verrou.
+   */
+  if (tx.providerStatus === "AWAITING_RECIPIENT_CLAIM") {
+    throw createError(409, "Transfert en attente de la confirmation du destinataire.", {
+      code: "AWAITING_RECIPIENT_CLAIM",
+    });
+  }
+
   const resolved = resolveExecutor({
     flow: tx.flow,
     provider: tx.provider,
