@@ -237,6 +237,10 @@ Contrat complet : [`../docs/architecture/sandbox.md`](../docs/architecture/sandb
 - **Migration** : `npm run migrate:account-mode -- --target=test` (simulation) puis `--apply --confirm=<baseTx>,<baseUsers>`. Indispensable AVANT de servir ce code : une transaction sans `mode` ne s'enregistre plus.
 - Garde : `test/sandboxMode.test.js`.
 
+## Réclamation d'un transfert par son destinataire — depuis le 2026-11-04
+
+Contrat : [`../docs/architecture/transfer-claims.md`](../docs/architecture/transfer-claims.md). Un transfert vers un portefeuille mobile money ou une carte ne part plus chez le prestataire à l'initiation : fonds réservés, lien SMS au destinataire, qui fournit le code SMS **et** la réponse (`services/transferClaims/`, modèle `TransferClaim`, routes `/api/v1/transfer-claims/*` passerelle seule). Le versement ne part que de `claimService.release`, après un verrou `pending → processing`. `/confirm` refuse tout payout. Variable **requise** pour ces transferts : `CLAIM_LINK_BASE_URL` (absente ⇒ refus, annoncé au démarrage). Frais d'annulation : un seul calcul (`cancellation.service.resolveCancellationFeeAmounts`), l'expéditeur seul paie.
+
 ## Plafonds par opération — depuis le 2026-10-17
 
 `services/limits/` — ce que font Wise, Revolut et PayPal. Trois plafonds par **opération** (`DEPOSIT`, `WITHDRAW`, `TRANSFER`) × **rail** (`paynoval`, `mobilemoney`, `card`) × **devise** : par opération, sur **24 h glissantes**, sur **30 jours glissants**.
