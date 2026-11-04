@@ -41,6 +41,9 @@ module.exports = (err, req, res, next) => {
 
   // Détails pour la validation (ex: Joi, celebrate, etc.)
   if (err.details) response.errors = err.details;
+  // Réclamation d'un transfert (2026-11-04) : essais restants sur le lien, un
+  // simple nombre — rien qui renseigne sur la réponse ou le code.
+  if (Number.isInteger(err.attemptsLeft) && err.attemptsLeft >= 0) response.attemptsLeft = err.attemptsLeft;
 
   // Stack trace uniquement hors prod pour 500
   if (process.env.NODE_ENV !== 'production' && statusCode === 500) {
