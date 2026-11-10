@@ -18,15 +18,12 @@ const run = (user, body) =>
   new Promise((resolve) => requireAllowedRail({ user, body }, {}, (err) => resolve(err || null)));
 
 test("every served country has a region", () => {
-  for (const c of ["Côte d'Ivoire", "CI", "Mali", "Burkina Faso"]) {
-    assert.equal(getCountryRegion(c), "africa", c);
+  for (const c of ["Côte d'Ivoire", "CI"]) assert.equal(getCountryRegion(c), "africa", c);
+  for (const c of ["Canada", "CA"]) assert.equal(getCountryRegion(c), "america", c);
+  // Hors du périmètre V1 (deux pays depuis le 2026-11-10).
+  for (const c of ["Mali", "Burkina Faso", "France", "Belgique", "Allemagne", "Espagne", "GB", "USA", "Sénégal", "Atlantide"]) {
+    assert.equal(getCountryRegion(c), null, c);
   }
-  for (const c of ["France", "Belgique", "Allemagne", "Espagne", "Angleterre", "GB"]) {
-    assert.equal(getCountryRegion(c), "europe", c);
-  }
-  for (const c of ["Canada", "USA"]) assert.equal(getCountryRegion(c), "america", c);
-  // Out of the V1 perimeter.
-  for (const c of ["Sénégal", "Cameroun", "Atlantide"]) assert.equal(getCountryRegion(c), null, c);
 });
 
 test("the V1 matrix", () => {
@@ -57,15 +54,15 @@ test("the V1 matrix", () => {
   }
 });
 
-test("the middleware refuses a French mobile money deposit, lets an Ivorian one through", async () => {
-  const refused = await run({ _id: "u1", country: "France" }, { action: "deposit", funds: "mobilemoney", destination: "paynoval" });
+test("the middleware refuses a Canadian mobile money deposit, lets an Ivorian one through", async () => {
+  const refused = await run({ _id: "u1", country: "Canada" }, { action: "deposit", funds: "mobilemoney", destination: "paynoval" });
   assert.equal(refused?.status, 403);
   assert.equal(refused?.code, "MOBILE_MONEY_NOT_AVAILABLE_IN_REGION");
 
   const ok = await run({ _id: "u2", country: "Côte d'Ivoire" }, { action: "deposit", funds: "mobilemoney", destination: "paynoval" });
   assert.equal(ok, null);
 
-  const card = await run({ _id: "u1", country: "France" }, { action: "deposit", funds: "visa_direct", destination: "paynoval" });
+  const card = await run({ _id: "u1", country: "Canada" }, { action: "deposit", funds: "visa_direct", destination: "paynoval" });
   assert.equal(card, null);
 });
 

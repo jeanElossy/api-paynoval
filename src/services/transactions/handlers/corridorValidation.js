@@ -33,21 +33,23 @@ const createError = require("http-errors");
  *   depositRails         how an account of that country tops up;
  *   withdrawRails        where an account of that country withdraws to.
  *
- * Accounts: Canada, USA, Côte d'Ivoire, France, United Kingdom, Belgium,
- * Germany, Spain.
+ * V1 = DEUX PAYS (décision de l'utilisateur du 2026-11-10) : Côte d'Ivoire et
+ * Canada, et rien d'autre. Les six pays d'Europe et des États-Unis, le Mali et
+ * le Burkina Faso sont retirés COMPLÈTEMENT (la production n'avait que des
+ * comptes de test) : un compte d'un autre pays est refusé
+ * (`*_COUNTRY_NOT_SUPPORTED`). Un pays s'ajoute ici, avec ses partenaires.
  *
- * Moyens par région (décision de l'utilisateur du 2026-11-03 — en V1, AUCUN
- * partenaire carte en Afrique) :
- *   - Europe / Amérique : dépôt et retrait par CARTE seulement ; un transfert
- *     s'y reçoit sur carte ;
- *   - Afrique (Côte d'Ivoire, Mali, Burkina Faso) : MOBILE MONEY seulement —
- *     dépôt et retrait d'un compte ivoirien, réception d'un transfert. Aucune
- *     carte : ni carte émise en Afrique, ni versement sur carte vers l'Afrique ;
+ * Moyens par pays (2026-11-03 — en V1, AUCUN partenaire carte en Afrique) :
+ *   - Canada : dépôt et retrait par CARTE seulement ; un transfert s'y reçoit
+ *     sur carte ;
+ *   - Côte d'Ivoire : MOBILE MONEY seulement (Orange, MTN, Moov, Wave) —
+ *     dépôt, retrait, réception d'un transfert. Aucune carte : ni carte émise
+ *     en Afrique, ni versement sur carte vers l'Afrique ;
  *   - un compte africain ne transfère pas non plus vers une carte, où qu'elle
  *     soit : `shared/railPolicy.js#evaluateRegionScope`, qui juge le pays du
  *     COMPTE (celui-ci juge le pays de l'INSTRUMENT).
  * Les deux contrôles sont nécessaires : le pays de l'instrument seul laissait
- * un compte ivoirien payer avec une carte émise en France.
+ * un compte ivoirien payer avec une carte émise ailleurs.
  *
  * `region` feeds `shared/railPolicy.js#evaluateRegionScope`. Mirrored by the
  * mobile app (`tools/countryRegion.js`, pinned by its tests).
@@ -88,28 +90,6 @@ const COUNTRY_RULES = {
       "wave",
     ],
   },
-  mali: {
-    region: "africa",
-    accountOpening: false,
-    transferPayoutRails: [MOBILE_MONEY],
-    depositRails: [],
-    withdrawRails: [],
-    aliases: ["mali", "ml", "mli"],
-    currency: "XOF",
-    callingCodes: ["223"],
-    mobileOperators: ["orange", "orange_money", "moov", "moov_money"],
-  },
-  "burkina faso": {
-    region: "africa",
-    accountOpening: false,
-    transferPayoutRails: [MOBILE_MONEY],
-    depositRails: [],
-    withdrawRails: [],
-    aliases: ["burkina faso", "burkina-faso", "bf", "bfa"],
-    currency: "XOF",
-    callingCodes: ["226"],
-    mobileOperators: ["orange", "orange_money", "moov", "moov_money"],
-  },
   canada: {
     region: "america",
     accountOpening: true,
@@ -119,91 +99,6 @@ const COUNTRY_RULES = {
     aliases: ["canada", "ca", "can"],
     currency: "CAD",
     callingCodes: ["1"],
-    mobileOperators: [],
-  },
-  usa: {
-    region: "america",
-    accountOpening: true,
-    transferPayoutRails: [CARD],
-    depositRails: [CARD],
-    withdrawRails: [CARD],
-    aliases: [
-      "usa",
-      "us",
-      "united states",
-      "united states of america",
-      "etats unis",
-      "états unis",
-      "etats-unis",
-      "états-unis",
-    ],
-    currency: "USD",
-    callingCodes: ["1"],
-    mobileOperators: [],
-  },
-  france: {
-    region: "europe",
-    accountOpening: true,
-    transferPayoutRails: [CARD],
-    depositRails: [CARD],
-    withdrawRails: [CARD],
-    aliases: ["france", "fr", "fra"],
-    currency: "EUR",
-    callingCodes: ["33"],
-    mobileOperators: [],
-  },
-  "royaume uni": {
-    region: "europe",
-    accountOpening: true,
-    transferPayoutRails: [CARD],
-    depositRails: [CARD],
-    withdrawRails: [CARD],
-    aliases: [
-      "royaume uni",
-      "royaume-uni",
-      "angleterre",
-      "united kingdom",
-      "great britain",
-      "england",
-      "uk",
-      "gb",
-      "gbr",
-    ],
-    currency: "GBP",
-    callingCodes: ["44"],
-    mobileOperators: [],
-  },
-  belgique: {
-    region: "europe",
-    accountOpening: true,
-    transferPayoutRails: [CARD],
-    depositRails: [CARD],
-    withdrawRails: [CARD],
-    aliases: ["belgique", "belgium", "be", "bel"],
-    currency: "EUR",
-    callingCodes: ["32"],
-    mobileOperators: [],
-  },
-  allemagne: {
-    region: "europe",
-    accountOpening: true,
-    transferPayoutRails: [CARD],
-    depositRails: [CARD],
-    withdrawRails: [CARD],
-    aliases: ["allemagne", "germany", "deutschland", "de", "deu"],
-    currency: "EUR",
-    callingCodes: ["49"],
-    mobileOperators: [],
-  },
-  espagne: {
-    region: "europe",
-    accountOpening: true,
-    transferPayoutRails: [CARD],
-    depositRails: [CARD],
-    withdrawRails: [CARD],
-    aliases: ["espagne", "spain", "espana", "españa", "es", "esp"],
-    currency: "EUR",
-    callingCodes: ["34"],
     mobileOperators: [],
   },
 };
@@ -551,7 +446,7 @@ function validatePaynovalUserProfile({
     code: `${codePrefix}_COUNTRY_NOT_SUPPORTED`,
   });
 
-  // A destination-only country (Mali, Burkina Faso) holds no PayNoval account.
+  // Un pays sans ouverture de compte n'en détient aucun (aucun en V1 : les deux pays en ouvrent).
   if (getCountryRule(profileCountryKey)?.accountOpening !== true) {
     fail(
       422,
@@ -1045,8 +940,8 @@ function validateOutboundExternalCorridor({
   /**
    * V1 capabilities of the destination country. A withdrawal goes to the
    * user's own instrument (`withdrawRails`); a transfer is received by someone
-   * else (`transferPayoutRails` : carte en Europe / Amérique, mobile money en
-   * Côte d'Ivoire, au Mali, au Burkina Faso — aucune carte en Afrique).
+   * else (`transferPayoutRails` : carte au Canada, mobile money en Côte
+   * d'Ivoire — aucune carte en Afrique).
    */
   // Same test as the branch above: it chose the card rail or the mobile money one.
   const payoutRail = flow === "PAYNOVAL_TO_CARD_PAYOUT" || (flow !== "PAYNOVAL_TO_MOBILEMONEY_PAYOUT" && destination === "card") ? CARD : MOBILE_MONEY;
@@ -1058,7 +953,7 @@ function validateOutboundExternalCorridor({
     code: isWithdrawal ? "WITHDRAW_RAIL_NOT_AVAILABLE_FOR_COUNTRY" : "PAYOUT_RAIL_NOT_AVAILABLE_FOR_COUNTRY",
     message: isWithdrawal
       ? "Ce moyen de retrait n’est pas disponible pour ce pays."
-      : "Ce pays ne reçoit pas de transfert par ce moyen (carte en Europe et en Amérique ; mobile money en Côte d’Ivoire, au Mali et au Burkina Faso).",
+      : "Ce pays ne reçoit pas de transfert par ce moyen (carte au Canada ; mobile money en Côte d’Ivoire).",
   });
 
   const snapshot = buildCorridorSnapshot({

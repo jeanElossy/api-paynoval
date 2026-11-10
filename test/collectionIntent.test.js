@@ -457,16 +457,23 @@ test("l'exemption de limite de Tx-Core suppose une limite à la passerelle", () 
 const refuse = (rail, pays, code) =>
   assert.throws(() => service.assertRailAllowedForPayer(rail, pays), (e) => e.code === code, `${rail} ${pays}`);
 
-test("invité africain : mobile money oui, carte non", () => {
-  for (const pays of ["Côte d'Ivoire", "CI", "Mali", "Burkina Faso"]) {
+test("invité de Côte d'Ivoire : mobile money oui, carte non", () => {
+  for (const pays of ["Côte d'Ivoire", "CI"]) {
     assert.doesNotThrow(() => service.assertRailAllowedForPayer("mobilemoney", pays), pays);
     refuse("card", pays, "CARD_NOT_AVAILABLE_IN_REGION");
   }
 });
 
-test("invité d'Europe ou d'Amérique : carte oui, mobile money non", () => {
-  for (const pays of ["France", "Canada", "USA", "Belgique", "Allemagne", "Espagne", "Royaume-Uni"]) {
+test("invité du Canada : carte oui, mobile money non", () => {
+  for (const pays of ["Canada", "CA"]) {
     assert.doesNotThrow(() => service.assertRailAllowedForPayer("card", pays), pays);
+    refuse("mobilemoney", pays, "MOBILE_MONEY_NOT_AVAILABLE_IN_REGION");
+  }
+});
+
+test("V1 = deux pays (2026-11-10) : un invité d'un pays retiré est refusé, quel que soit le moyen", () => {
+  for (const pays of ["Mali", "Burkina Faso", "France", "USA", "Belgique", "Allemagne", "Espagne", "Royaume-Uni"]) {
+    refuse("card", pays, "PAYER_COUNTRY_NOT_SUPPORTED");
     refuse("mobilemoney", pays, "MOBILE_MONEY_NOT_AVAILABLE_IN_REGION");
   }
 });

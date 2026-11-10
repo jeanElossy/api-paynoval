@@ -14,15 +14,13 @@
  * Module pur : aucune entrée-sortie, testable sans base.
  */
 
-/** Devises activées par défaut — alignées sur `Vault.ALLOWED_CURRENCIES` du backend. */
-const DEFAULT_CAGNOTTE_CURRENCIES = Object.freeze([
-  "XOF",
-  "XAF",
-  "CAD",
-  "USD",
-  "EUR",
-  "GBP",
-]);
+/**
+ * Devises activées par défaut — alignées sur `Vault.ALLOWED_CURRENCIES` du
+ * backend. V1 = deux pays (2026-11-10) : franc CFA (Côte d'Ivoire) et dollar
+ * canadien. ⚠️ Si `CAGNOTTE_SUPPORTED_CURRENCIES` est posée sur Render, c'est
+ * elle qui fait foi : la réduire aussi.
+ */
+const DEFAULT_CAGNOTTE_CURRENCIES = Object.freeze(["XOF", "CAD"]);
 
 const ISO_4217 = /^[A-Z]{3}$/;
 

@@ -3,12 +3,13 @@
 /**
  * V1 COUNTRIES — pinned end to end on the corridor validators.
  *
- * Accounts: CA, US, CI, FR, GB, BE, DE, ES. Transfers received by card in
- * Europe / America, by mobile money (Orange, Moov — plus MTN, Wave in CI) in
- * Côte d'Ivoire, Mali, Burkina Faso. Internal PayNoval ↔ PayNoval between any
- * two account countries. Ivorian accounts deposit / withdraw by mobile money
- * only, the others by card only — aucune carte en Afrique en V1 (2026-11-03,
- * pas de partenaire carte africain).
+ * V1 = DEUX PAYS (décision du 2026-11-10) : Côte d'Ivoire et Canada.
+ * Comptes : CI, CA. Un transfert se reçoit par mobile money en Côte d'Ivoire
+ * (Orange, MTN, Moov, Wave), par carte au Canada. PayNoval ↔ PayNoval entre
+ * les deux. Compte ivoirien : dépôt / retrait mobile money seulement ; compte
+ * canadien : carte seulement — aucune carte en Afrique (2026-11-03).
+ * Les huit pays retirés (États-Unis, France, Royaume-Uni, Belgique,
+ * Allemagne, Espagne, Mali, Burkina Faso) sont refusés, chacun, ici.
  */
 
 const test = require("node:test");
@@ -41,24 +42,30 @@ const refusedWith = (fn, code) => {
 
 const ACCOUNTS = [
   ["Canada", "CAD"],
-  ["USA", "USD"],
   ["Côte d'Ivoire", "XOF"],
-  ["France", "EUR"],
-  ["Angleterre", "GBP"],
-  ["Belgique", "EUR"],
-  ["Allemagne", "EUR"],
-  ["Espagne", "EUR"],
 ];
 
-test("exactly the eight account countries open accounts", () => {
+const RETIRED = [
+  ["USA", "USD", "US"],
+  ["France", "EUR", "FR"],
+  ["Angleterre", "GBP", "GB"],
+  ["Belgique", "EUR", "BE"],
+  ["Allemagne", "EUR", "DE"],
+  ["Espagne", "EUR", "ES"],
+  ["Mali", "XOF", "ML"],
+  ["Burkina Faso", "XOF", "BF"],
+];
+
+test("exactly two countries are served, and both open accounts", () => {
+  assert.deepEqual(Object.keys(COUNTRY_RULES).sort(), ["canada", "cote d'ivoire"]);
   const opening = Object.entries(COUNTRY_RULES)
     .filter(([, r]) => r.accountOpening === true)
     .map(([k]) => k)
     .sort();
-  assert.deepEqual(opening, ["allemagne", "belgique", "canada", "cote d'ivoire", "espagne", "france", "royaume uni", "usa"]);
+  assert.deepEqual(opening, ["canada", "cote d'ivoire"]);
 });
 
-test("internal transfers between any two account countries", () => {
+test("internal transfers between the two account countries, both ways", () => {
   for (const [c1, cur1] of ACCOUNTS) {
     for (const [c2, cur2] of ACCOUNTS) {
       const res = validateInternalPaynovalCorridor({
@@ -74,17 +81,27 @@ test("internal transfers between any two account countries", () => {
   }
 });
 
-test("no account in a destination-only or unserved country", () => {
-  for (const [country, currency] of [["Mali", "XOF"], ["Burkina Faso", "XOF"], ["Sénégal", "XOF"]]) {
+test("a retired country can neither send nor receive a PayNoval transfer", () => {
+  for (const [country, currency] of [...RETIRED, ["Sénégal", "XOF"]]) {
     refusedWith(
       () =>
         validateInternalPaynovalCorridor({
           sender: user(country, currency, "s"),
-          receiver: user("France", "EUR", "r"),
+          receiver: user("Canada", "CAD", "r"),
           currencySource: currency,
-          currencyTarget: "EUR",
+          currencyTarget: "CAD",
         }),
       "SENDER_COUNTRY_NOT_SUPPORTED"
+    );
+    refusedWith(
+      () =>
+        validateInternalPaynovalCorridor({
+          sender: user("Canada", "CAD", "s"),
+          receiver: user(country, currency, "r"),
+          currencySource: "CAD",
+          currencyTarget: currency,
+        }),
+      "RECIPIENT_COUNTRY_NOT_SUPPORTED"
     );
   }
 });
@@ -99,22 +116,20 @@ const momoPayout = (toCountry, phone, operator, sender = user("Canada", "CAD")) 
     currencyTarget: "XOF",
   });
 
-test("mobile money transfers to Côte d'Ivoire, Mali, Burkina Faso — from any account country", () => {
-  assert.equal(momoPayout("Côte d'Ivoire", "+2250701020304", "wave").ok, true);
-  assert.equal(momoPayout("Mali", "+22370102030", "orange").ok, true);
-  assert.equal(momoPayout("Burkina Faso", "+22670102030", "moov", user("Angleterre", "GBP")).ok, true);
+test("mobile money transfers to Côte d'Ivoire, from either account country, all four operators", () => {
+  for (const op of ["orange", "mtn", "moov", "wave"]) {
+    assert.equal(momoPayout("Côte d'Ivoire", "+2250701020304", op).ok, true, op);
+    assert.equal(momoPayout("Côte d'Ivoire", "+2250701020304", op, user("Côte d'Ivoire", "XOF")).ok, true, op);
+  }
 });
 
-test("Mali and Burkina Faso: Orange and Moov only", () => {
-  refusedWith(() => momoPayout("Mali", "+22370102030", "wave"), "OPERATOR_NOT_ALLOWED_FOR_COUNTRY");
-  refusedWith(() => momoPayout("Burkina Faso", "+22670102030", "mtn"), "OPERATOR_NOT_ALLOWED_FOR_COUNTRY");
-});
-
-test("no mobile money transfer outside the three African destinations", () => {
+test("no mobile money transfer outside Côte d'Ivoire (Mali and Burkina Faso retired)", () => {
+  refusedWith(() => momoPayout("Mali", "+22370102030", "orange"), "DESTINATION_COUNTRY_NOT_SUPPORTED");
+  refusedWith(() => momoPayout("Burkina Faso", "+22670102030", "moov"), "DESTINATION_COUNTRY_NOT_SUPPORTED");
   refusedWith(() => momoPayout("Sénégal", "+221701020304", "orange"), "DESTINATION_COUNTRY_NOT_SUPPORTED");
 });
 
-const cardPayout = (toCountry, cardCountry, currencyTarget, action = "send", sender = user("Côte d'Ivoire", "XOF")) =>
+const cardPayout = (toCountry, cardCountry, currencyTarget, action = "send", sender = user("Canada", "CAD")) =>
   validateOutboundExternalCorridor({
     flow: "PAYNOVAL_TO_CARD_PAYOUT",
     body: { destination: "card", action, cardCountry },
@@ -124,27 +139,21 @@ const cardPayout = (toCountry, cardCountry, currencyTarget, action = "send", sen
     currencyTarget,
   });
 
-test("card transfers are received in Europe and America only", () => {
-  const fr = user("France", "EUR");
-  for (const [country, iso, cur] of [
-    ["France", "FR", "EUR"],
-    ["Espagne", "ES", "EUR"],
-    ["Angleterre", "GB", "GBP"],
-    ["USA", "US", "USD"],
-    ["Canada", "CA", "CAD"],
-  ]) {
-    assert.equal(cardPayout(country, iso, cur, "send", fr).ok, true, country);
+test("card transfers are received in Canada only", () => {
+  assert.equal(cardPayout("Canada", "CA", "CAD").ok, true);
+  assert.equal(cardPayout("Canada", "CA", "CAD", "withdraw").ok, true);
+  for (const [country, , iso] of RETIRED.filter(([, , iso]) => !["ML", "BF"].includes(iso))) {
+    refusedWith(() => cardPayout(country, iso, "CAD"), "CARD_COUNTRY_NOT_SUPPORTED");
   }
-  assert.equal(cardPayout("France", "FR", "EUR", "withdraw", fr).ok, true);
 });
 
-test("no card in Africa: no card transfer to Côte d'Ivoire, Mali, Burkina Faso, no card withdrawal there", () => {
+test("no card in Africa: no card transfer to Côte d'Ivoire, no card withdrawal there", () => {
   // Réintroduire la carte dans `COUNTRY_RULES` pour l'Afrique fait échouer ce test.
-  const fr = user("France", "EUR");
-  for (const [country, iso] of [["Côte d'Ivoire", "CI"], ["Mali", "ML"], ["Burkina Faso", "BF"]]) {
-    refusedWith(() => cardPayout(country, iso, "XOF", "send", fr), "PAYOUT_RAIL_NOT_AVAILABLE_FOR_COUNTRY");
-  }
-  refusedWith(() => cardPayout("Côte d'Ivoire", "CI", "XOF", "withdraw"), "WITHDRAW_RAIL_NOT_AVAILABLE_FOR_COUNTRY");
+  refusedWith(() => cardPayout("Côte d'Ivoire", "CI", "XOF"), "PAYOUT_RAIL_NOT_AVAILABLE_FOR_COUNTRY");
+  refusedWith(
+    () => cardPayout("Côte d'Ivoire", "CI", "XOF", "withdraw", user("Côte d'Ivoire", "XOF")),
+    "WITHDRAW_RAIL_NOT_AVAILABLE_FOR_COUNTRY"
+  );
   for (const [key, rule] of Object.entries(COUNTRY_RULES)) {
     if (rule.region !== "africa") continue;
     for (const capability of ["transferPayoutRails", "depositRails", "withdrawRails"]) {
@@ -168,11 +177,7 @@ test("no deposit with a card issued in Côte d'Ivoire", () => {
   );
 });
 
-test("no card transfer to a country outside the V1 perimeter", () => {
-  refusedWith(() => cardPayout("Sénégal", "SN", "XOF"), "CARD_COUNTRY_NOT_SUPPORTED");
-});
-
-test("deposits: mobile money in Côte d'Ivoire only, card for every account country", () => {
+test("deposits: mobile money in Côte d'Ivoire, card in Canada — nothing elsewhere", () => {
   const momo = validateInboundExternalCorridor({
     flow: "MOBILEMONEY_COLLECTION_TO_PAYNOVAL",
     body: { funds: "mobilemoney", action: "deposit", phoneNumber: "+2250701020304", operator: "orange" },
@@ -183,26 +188,27 @@ test("deposits: mobile money in Côte d'Ivoire only, card for every account coun
   });
   assert.equal(momo.ok, true);
 
+  const card = validateInboundExternalCorridor({
+    flow: "CARD_TOPUP_TO_PAYNOVAL",
+    body: { funds: "card", action: "deposit", sourceCardCountry: "CA" },
+    receiverUser: user("Canada", "CAD"),
+    fromCountry: "Canada",
+    currencySource: "CAD",
+    currencyTarget: "CAD",
+  });
+  assert.equal(card.ok, true);
+
+  // Un compte d'un pays retiré ne dépose plus rien.
   refusedWith(
     () =>
       validateInboundExternalCorridor({
-        flow: "MOBILEMONEY_COLLECTION_TO_PAYNOVAL",
-        body: { funds: "mobilemoney", action: "deposit", phoneNumber: "+22370102030", operator: "orange" },
-        receiverUser: user("Côte d'Ivoire", "XOF"),
-        fromCountry: "Mali",
-        currencySource: "XOF",
-        currencyTarget: "XOF",
+        flow: "CARD_TOPUP_TO_PAYNOVAL",
+        body: { funds: "card", action: "deposit", sourceCardCountry: "FR" },
+        receiverUser: user("France", "EUR"),
+        fromCountry: "France",
+        currencySource: "EUR",
+        currencyTarget: "EUR",
       }),
-    "DEPOSIT_RAIL_NOT_AVAILABLE_FOR_COUNTRY"
+    "RECEIVER_COUNTRY_NOT_SUPPORTED"
   );
-
-  const card = validateInboundExternalCorridor({
-    flow: "CARD_TOPUP_TO_PAYNOVAL",
-    body: { funds: "card", action: "deposit", sourceCardCountry: "GB" },
-    receiverUser: user("Angleterre", "GBP"),
-    fromCountry: "Angleterre",
-    currencySource: "GBP",
-    currencyTarget: "GBP",
-  });
-  assert.equal(card.ok, true);
 });

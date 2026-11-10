@@ -46,8 +46,11 @@ test("initiate: an Orange withdrawal is described with its feature, operator, co
 
 test("country names and codes resolve through COUNTRY_RULES", () => {
   assert.equal(sc.toCountryIso("Côte d'Ivoire"), "CI");
-  assert.equal(sc.toCountryIso("royaume uni"), "GB");
+  assert.equal(sc.toCountryIso("canada"), "CA");
+  // Un code ISO passe tel quel (normaliseur générique, partagé avec le backend) ;
+  // un NOM passe par COUNTRY_RULES — « royaume uni » n'y est plus (V1 = deux pays, 2026-11-10).
   assert.equal(sc.toCountryIso("BF"), "BF");
+  assert.equal(sc.toCountryIso("royaume uni"), null);
   assert.equal(sc.toCountryIso("Atlantis"), null);
 });
 

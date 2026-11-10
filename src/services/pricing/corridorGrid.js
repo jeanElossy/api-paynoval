@@ -46,45 +46,31 @@
  * Les marchés V1 — la même liste que `COUNTRY_RULES`
  * (`services/transactions/handlers/corridorValidation.js`), épinglée par test.
  *
+ * V1 = DEUX PAYS (2026-11-10) : Côte d'Ivoire et Canada ; l'Europe, les
+ * États-Unis, le Mali et le Burkina Faso sont retirés.
+ *
  * `compte: true` : on y ouvre un compte, donc on y DÉPOSE et on y RETIRE.
- * `compte: false` : pays de destination seulement (Mali, Burkina Faso).
+ * `compte: false` : pays de destination seulement (aucun en V1).
  * `reception` : comment on y REÇOIT un transfert (`TRANSFER`, prix propre) —
- * carte en Europe et en Amérique ; mobile money en Côte d'Ivoire, au Mali, au
- * Burkina Faso.
+ * carte au Canada ; mobile money en Côte d'Ivoire.
  * `carte: false` : un compte de ce pays n'utilise AUCUNE carte — ni dépôt, ni
  * retrait, ni transfert vers une carte (2026-11-03 : en V1, aucun partenaire
  * carte en Afrique). Aucun prix n'est donc proposé pour ces corridors refusés.
  */
 const MARCHES = Object.freeze([
   { pays: "CI", devise: "XOF", zone: "UEMOA", nom: "Côte d'Ivoire", compte: true, carte: false, reception: ["mobilemoney"] },
-  { pays: "ML", devise: "XOF", zone: "UEMOA", nom: "Mali", compte: false, carte: false, reception: ["mobilemoney"] },
-  { pays: "BF", devise: "XOF", zone: "UEMOA", nom: "Burkina Faso", compte: false, carte: false, reception: ["mobilemoney"] },
-  { pays: "FR", devise: "EUR", zone: "EUROPE", nom: "France", compte: true, reception: ["card"] },
-  { pays: "GB", devise: "GBP", zone: "EUROPE", nom: "Royaume-Uni", compte: true, reception: ["card"] },
-  { pays: "BE", devise: "EUR", zone: "EUROPE", nom: "Belgique", compte: true, reception: ["card"] },
-  { pays: "DE", devise: "EUR", zone: "EUROPE", nom: "Allemagne", compte: true, reception: ["card"] },
-  { pays: "ES", devise: "EUR", zone: "EUROPE", nom: "Espagne", compte: true, reception: ["card"] },
   { pays: "CA", devise: "CAD", zone: "AMNORD", nom: "Canada", compte: true, reception: ["card"] },
-  { pays: "US", devise: "USD", zone: "AMNORD", nom: "États-Unis", compte: true, reception: ["card"] },
 ]);
 
 /**
- * Quel opérateur mobile money sert quel pays — V1, décidé le 2026-09-30 :
- * Côte d'Ivoire : Orange, MTN, Moov, Wave ; Mali et Burkina Faso : Orange et
- * Moov. Le reste reçoit par carte. Seuls les quatre opérateurs réellement
+ * Quel opérateur mobile money sert quel pays — V1 (2026-09-30, réduit le
+ * 2026-11-10) : Côte d'Ivoire : Orange, MTN, Moov, Wave. Le Canada reçoit par
+ * carte. Seuls les quatre opérateurs réellement
  * intégrés figurent ici (`RAILS` de `models/Transaction.js`).
  */
 const OPERATEURS_PAR_PAYS = Object.freeze({
   CI: ["orange", "mtn", "moov", "wave"],
-  ML: ["orange", "moov"],
-  BF: ["orange", "moov"],
-  FR: [],
-  GB: [],
-  BE: [],
-  DE: [],
-  ES: [],
   CA: [],
-  US: [],
 });
 
 /** Le seul opérateur carte intégré — `stripe` a été retiré le 2026-09-08. */
