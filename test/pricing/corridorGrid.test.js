@@ -182,36 +182,33 @@ test("V1: the grid markets are exactly the countries Tx-Core serves", () => {
 
 test("V1: a transfer to someone is a TRANSFER, never a withdrawal", () => {
   const grille = construireGrille();
-  for (const pays of ["ML", "BF"]) {
-    const rules = grille.filter((r) => r.scope.toCountry === pays || r.scope.country === pays);
-    assert.ok(rules.length > 0, pays);
-    // Destination seulement : transferts reçus par mobile money (aucune carte
-    // en Afrique en V1), ni dépôt ni retrait.
-    assert.deepEqual([...new Set(rules.map((r) => `${r.scope.txType}/${r.scope.method}`))].sort(), ["TRANSFER/MOBILEMONEY"], pays);
-    assert.deepEqual([...new Set(rules.map((r) => r.scope.provider))].sort(), ["moov", "orange"], pays);
+  const codes = new Set(grille.map((r) => r.code));
+  // Mobile money : reçu en Côte d'Ivoire, depuis un compte XOF ou CAD, chez les quatre opérateurs.
+  for (const op of ["ORANGE", "MTN", "MOOV", "WAVE"]) {
+    for (const cur of ["XOF", "CAD"]) assert.ok(codes.has(`TRANSFER_MOBILEMONEY_${op}_CI_${cur}`), `${op} ${cur}`);
   }
-  // From every account currency, e.g. a Canadian account to a Malian Orange wallet.
-  const cadToMali = grille.find((r) => r.code === "TRANSFER_MOBILEMONEY_ORANGE_ML_CAD");
-  assert.equal(cadToMali?.fx.mode, "MARKUP_PERCENT");
-  // Carte : reçue en Europe et en Amérique, depuis un compte qui y a droit.
-  for (const code of ["TRANSFER_CARD_GB_EUR", "TRANSFER_CARD_FR_CAD", "TRANSFER_CARD_US_GBP"]) {
-    assert.ok(grille.some((r) => r.code === code), code);
-  }
+  assert.equal(grille.find((r) => r.code === "TRANSFER_MOBILEMONEY_ORANGE_CI_CAD")?.fx.mode, "MARKUP_PERCENT");
+  // Carte : reçue au Canada, depuis un compte qui y a droit (CAD).
+  assert.ok(codes.has("TRANSFER_CARD_CA_CAD"));
   // Aucun prix pour un corridor refusé : ni carte vers l'Afrique, ni carte
   // depuis un compte africain (XOF), ni dépôt / retrait carte en Côte d'Ivoire.
-  for (const code of [
-    "TRANSFER_CARD_CI_EUR",
-    "TRANSFER_CARD_ML_CAD",
-    "TRANSFER_CARD_BF_GBP",
-    "TRANSFER_CARD_GB_XOF",
-    "DEPOSIT_CARD_CI",
-    "WITHDRAW_CARD_CI",
-  ]) {
-    assert.equal(grille.some((r) => r.code === code), false, code);
+  for (const code of ["TRANSFER_CARD_CI_CAD", "TRANSFER_CARD_CI_XOF", "TRANSFER_CARD_CA_XOF", "DEPOSIT_CARD_CI", "WITHDRAW_CARD_CI"]) {
+    assert.equal(codes.has(code), false, code);
   }
-  // Account countries keep their own deposit / withdrawal.
-  for (const code of ["DEPOSIT_CARD_GB", "WITHDRAW_CARD_GB", "DEPOSIT_CARD_US", "WITHDRAW_MOBILEMONEY_CI_WAVE"]) {
-    assert.ok(grille.some((r) => r.code === code), code);
+  // Chaque pays garde son dépôt et son retrait.
+  for (const code of ["DEPOSIT_CARD_CA", "WITHDRAW_CARD_CA", "WITHDRAW_MOBILEMONEY_CI_WAVE"]) {
+    assert.ok(codes.has(code), code);
+  }
+});
+
+test("V1 = deux pays (2026-11-10) : aucun barème pour un pays ou une devise retirés", () => {
+  const grille = construireGrille();
+  const touched = (r) => [r.scope.country, r.scope.fromCountry, r.scope.toCountry].filter(Boolean);
+  for (const r of grille) {
+    for (const pays of touched(r)) assert.ok(["CI", "CA", "ALL"].includes(pays), `${r.code} → ${pays}`);
+    for (const cur of [r.scope.fromCurrency, r.scope.toCurrency].filter(Boolean)) {
+      assert.ok(["XOF", "CAD"].includes(cur), `${r.code} → ${cur}`);
+    }
   }
 });
 

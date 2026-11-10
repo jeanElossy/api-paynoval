@@ -110,7 +110,18 @@ test("devises : aucune normalisation « intelligente » — FCFA, USDT et vide s
       `« ${bad} » ne doit pas devenir une devise valide`
     );
   }
-  assert.equal(assertSupportedCagnotteCurrency(" xaf ", {}), "XAF");
+  assert.equal(assertSupportedCagnotteCurrency(" cad ", {}), "CAD");
+});
+
+test("devises V1 (2026-11-10) : XOF et CAD seulement — XAF, USD, EUR, GBP refusées par défaut", () => {
+  assert.equal(assertSupportedCagnotteCurrency("XOF", {}), "XOF");
+  for (const retired of ["XAF", "USD", "EUR", "GBP"]) {
+    assert.throws(
+      () => assertSupportedCagnotteCurrency(retired, {}),
+      (e) => e.code === "CURRENCY_NOT_SUPPORTED",
+      retired
+    );
+  }
 });
 
 /* ────────────────────────────────────────────────────────────────────────── */
