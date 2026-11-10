@@ -40,6 +40,7 @@ const {
   DEFAULT_SCENARIO,
 } = require("../../providers/sandbox/sandboxScenario");
 const scenarios = require("./sandboxScenarioStore");
+const { findOwnerConflict } = require("./sandboxTreasuryOwnership");
 const events = require("./sandboxProviderEvents");
 const { assertDataset, buildSeedTransactions } = require("./demoDatasets");
 
@@ -683,6 +684,29 @@ async function provisionTreasuries(treasuries = []) {
         409,
         "TREASURY_OWNER_MISMATCH",
         `Le compte ${ownerId} n'est pas le compte système sandbox ${systemType}.`
+      );
+    }
+
+    /**
+     * Rattachement vérifié AVANT toute création (2026-11-10). Une trésorerie
+     * active de ce type, rattachée à un AUTRE compte (compte système supprimé
+     * puis recréé par le backend), faisait lever `E11000` à l'index
+     * `one_active_system_wallet_per_type` — une « erreur interne » 500 à chaque
+     * création d'accès de démonstration. On refuse en 409, avec la marche à
+     * suivre ; on ne rattache jamais en silence (`sandboxTreasuryOwnership.js`).
+     */
+    const activeOfType = await SystemBalance.find(
+      { systemType, isActive: { $ne: false } },
+      { _id: 1, systemType: 1, userId: 1, ownerId: 1, isActive: 1 }
+    ).lean();
+    const conflict = findOwnerConflict({ systemType, requestedOwnerId: ownerId, wallets: activeOfType });
+    if (conflict) {
+      throw httpError(
+        409,
+        "SANDBOX_TREASURY_OWNER_MISMATCH",
+        `La trésorerie de simulation ${systemType} est rattachée à un autre compte système ` +
+          `(${conflict.currentOwnerIds.join(", ")}) que celui du backend (${ownerId}). ` +
+          "Réparation : npm run sandbox:repair-treasuries dans Tx-Core (diagnostic, puis --apply)."
       );
     }
 
