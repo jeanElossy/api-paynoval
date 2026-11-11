@@ -88,7 +88,8 @@ const helmet = require("helmet");
 const compression = require("compression");
 const cookieParser = require("cookie-parser");
 const mongoSanitize = require("express-mongo-sanitize");
-const xssClean = require("xss-clean");
+// Équivalent exact de xss-clean (abandonné), 2026-11-11 : `middleware/inputHtmlEscape.js`.
+const xssClean = require("./middleware/inputHtmlEscape");
 const hpp = require("hpp");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
