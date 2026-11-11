@@ -1,0 +1,43 @@
+# ============================================================================
+# FUSION AUTOMATIQUE DES MISES À JOUR DEPENDABOT — SOUS CONDITIONS (2026-11-11)
+# ============================================================================
+#
+# Ce que font les grandes fintechs : les correctifs et mineures de
+# dépendances passent seuls, MAIS seulement après TOUTE l'intégration continue
+# (tests + règle commune des failles, `scripts/audit-gate.cjs`).
+#
+#   · auteur : Dependabot uniquement ;
+#   · type : correctif (patch) ou mineure — jamais une majeure ;
+#   · `gh pr merge --auto` : GitHub attend les contrôles OBLIGATOIRES de la
+#     branche (protection de branche) ; un seul rouge, rien n'est fusionné ;
+#   · rien n'est DÉPLOYÉ : la mise en production reste manuelle (Render, OVH,
+#     EAS), après lecture du résumé de la semaine ;
+#   · actions tierces épinglées sur une empreinte de commit, jamais une
+#     étiquette qu'on pourrait déplacer.
+name: Dependabot — fusion automatique
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Métadonnées de la mise à jour
+        id: meta
+        # dependabot/fetch-metadata v3.1.0
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Fusion automatique au vert (correctif ou mineure seulement)
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
