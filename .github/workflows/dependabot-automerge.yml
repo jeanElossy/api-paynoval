@@ -1,0 +1,82 @@
+# ============================================================================
+# FUSION AUTOMATIQUE DES MISES À JOUR DEPENDABOT — APRÈS LES TESTS (2026-11-11)
+# ============================================================================
+#
+# Ce que font les grandes fintechs : les correctifs et mineures de
+# dépendances passent seuls, MAIS seulement après TOUTE l'intégration continue
+# (tests + règle commune des failles, `scripts/audit-gate.cjs`).
+#
+# POURQUOI `workflow_run` ET PAS `gh pr merge --auto` : `--auto` attend les
+# contrôles obligatoires d'une protection de branche. Sur l'offre GitHub Free,
+# un dépôt privé n'a PAS de protection de branche (mesuré le 2026-11-11 :
+# « Upgrade to GitHub Pro ») ; sans contrôle obligatoire, GitHub fusionne
+# IMMÉDIATEMENT, avant même la fin des tests. Ici, la fusion ne part que d'une
+# intégration continue TERMINÉE EN SUCCÈS, quel que soit l'abonnement.
+#
+# Conditions, toutes requises — une seule manque, rien n'est fusionné :
+#   · l'intégration continue « CI » a RÉUSSI, sur une demande de fusion ;
+#   · demande ouverte par Dependabot, depuis ce dépôt, vers la branche cible ;
+#   · tous les commits sont de Dependabot (aucun ajout humain non relu) ;
+#   · le commit testé est EXACTEMENT celui qu'on fusionne (`--match-head-commit`) ;
+#   · chaque dépendance du lot est un correctif ou une mineure — type absent
+#     ou illisible ⇒ on ne fusionne pas (fermé par défaut).
+#
+# Sécurité du déclencheur : ce flux tourne avec les droits du dépôt, il
+# n'extrait donc AUCUN code de la demande et n'exécute rien qui en vienne ; il
+# ne lit que des métadonnées par l'API. Le nom de branche passe par une
+# variable d'environnement, jamais interpolé dans le script.
+#
+# Rien n'est DÉPLOYÉ : la mise en production reste manuelle (Render, OVH, EAS).
+name: Dependabot — fusion automatique
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fusion si correctif ou mineure, sur le commit exact qui a passé les tests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TARGET_BRANCH: main
+        run: |
+          set -euo pipefail
+          skip() { echo "::notice title=Dependabot::$1 — rien n'est fusionné."; exit 0; }
+
+          prs=$(gh pr list -R "$REPO" --head "$HEAD_BRANCH" --state open --json number,headRefOid,baseRefName,author)
+          [ "$(jq length <<<"$prs")" = "1" ] || skip "aucune demande unique ouverte sur cette branche"
+          number=$(jq -r '.[0].number' <<<"$prs")
+          [ "$(jq -r '.[0].author.login' <<<"$prs")" = "app/dependabot" ] || skip "demande n° $number non ouverte par Dependabot"
+          [ "$(jq -r '.[0].baseRefName' <<<"$prs")" = "$TARGET_BRANCH" ] || skip "demande n° $number hors de la branche $TARGET_BRANCH"
+          [ "$(jq -r '.[0].headRefOid' <<<"$prs")" = "$HEAD_SHA" ] || skip "demande n° $number : un commit plus récent attend ses propres tests"
+
+          authors=$(gh api "repos/$REPO/pulls/$number/commits" --jq '[.[].author.login // "?"] | unique | join(",")')
+          [ "$authors" = "dependabot[bot]" ] || skip "demande n° $number : commits d'un autre auteur ($authors)"
+
+          message=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.message)
+          deps=$(grep -cE '^- dependency-name:' <<<"$message" || true)
+          types=$(grep -E '^[[:space:]]+update-type:' <<<"$message" | sed -E 's/^[[:space:]]+update-type:[[:space:]]*//' || true)
+          ntypes=$(grep -c . <<<"$types" || true)
+          { [ "$deps" -ge 1 ] && [ "$deps" = "$ntypes" ]; } || skip "demande n° $number : type de mise à jour illisible ($deps dépendances, $ntypes types)"
+          if grep -qvE '^version-update:semver-(patch|minor)$' <<<"$types"; then
+            skip "demande n° $number : au moins une montée majeure, à relire à la main"
+          fi
+
+          gh pr merge "$number" -R "$REPO" --squash --match-head-commit "$HEAD_SHA"
+          echo "✅ Demande n° $number fusionnée ($deps dépendance(s), correctifs ou mineures, intégration continue verte)."

@@ -1,51 +1,62 @@
-# Montée de version automatisée des dépendances.
+# Mises à jour automatiques des dépendances — comme les grandes fintechs (2026-11-11).
 #
-# ── Pourquoi ce fichier existe ────────────────────────────────────────────────
+# Avant : une demande par paquet, plafonnée à 5. Les cinq du 9 septembre n'ont
+# jamais été traitées, si bien que Dependabot n'en proposait PLUS AUCUNE depuis
+# deux mois ; la configuration de la passerelle visait la mauvaise racine et
+# celle du mobile n'était pas lue (branche par défaut `main` vide).
 #
-# `npm audit` tourne déjà en intégration continue dans les cinq dépôts (voir
-# `.github/workflows/ci.yml`). Il SIGNALE — il ne corrige rien. Le seuil agit
-# comme un cliquet : il empêche d'empirer, il ne fait pas progresser.
-#
-# Mesuré le 2026-09-02 sur `paynoval-backend` : 5 vulnérabilités (1 élevée,
-# 4 modérées), toutes sous le seuil `critical` du dépôt. La chaîne passait donc
-# au vert avec elles, indéfiniment. C'est exactement la moitié qui manquait.
-#
-# ── Le rythme ─────────────────────────────────────────────────────────────────
-#
-# Hebdomadaire, plafonné à 5 demandes ouvertes. Un flux quotidien illimité finit
-# ignoré, et une mise à jour qu'on n'examine pas ne vaut pas mieux que pas de
-# mise à jour du tout.
-#
-# Les montées de version MAJEURES sont exclues : elles se décident, elles ne se
-# subissent pas un lundi matin. Les correctifs de sécurité, eux, arrivent
-# presque toujours en patch ou en mineure.
+# Désormais :
+#   · une demande REGROUPÉE par semaine pour le code livré, une pour l'outillage ;
+#   · 7 JOURS D'ATTENTE avant d'adopter une version publiée (`cooldown`) : la
+#     plupart des paquets piégés sont repérés et retirés en quelques jours. Les
+#     correctifs de SÉCURITÉ (alertes Dependabot) n'attendent pas ;
+#   · aucune montée MAJEURE automatique : elle se planifie et se recette ;
+#   · chaque demande passe l'intégration continue (tests + `audit-gate`) ; la
+#     fusion automatique (`dependabot-automerge.yml`) n'intervient qu'au vert,
+#     pour un correctif ou une mineure ; rien n'est déployé automatiquement.
 version: 2
 
 updates:
   - package-ecosystem: npm
     directory: "/"
+    target-branch: main
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+      time: "05:00"
+      timezone: Africa/Abidjan
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
     labels:
       - dependencies
-      - security
     commit-message:
       prefix: "chore(deps)"
       include: scope
+    groups:
+      livre-correctifs-et-mineures:
+        dependency-type: production
+        update-types: [minor, patch]
+      outillage-correctifs-et-mineures:
+        dependency-type: development
+        update-types: [minor, patch]
     ignore:
-      # Une majeure se planifie. Dependabot la proposerait sans savoir ce
-      # qu'elle casse, et la demande resterait ouverte des mois.
+      # Une majeure se planifie, avec recette : jamais un lundi matin.
       - dependency-name: "*"
         update-types:
           - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: main
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
     commit-message:
       prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]
