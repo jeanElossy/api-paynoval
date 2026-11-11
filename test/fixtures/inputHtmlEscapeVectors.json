@@ -1,0 +1,223 @@
+{
+ "_lisezmoi": "Produits par xss-clean 0.1.4 avant son retrait (2026-11-11). middleware/inputHtmlEscape.js doit les reproduire à l'identique : rien ne change pour les données ni pour les mots de passe.",
+ "clean": [
+  {
+   "input": "a<b",
+   "output": "a&lt;b"
+  },
+  {
+   "input": "  espaces autour  ",
+   "output": "espaces autour"
+  },
+  {
+   "input": "<script>alert(1)</script>",
+   "output": "&lt;script>alert(1)&lt;/script>"
+  },
+  {
+   "input": "déjà &lt; échappé",
+   "output": "déjà &lt; échappé"
+  },
+  {
+   "input": "a > b & c",
+   "output": "a > b & c"
+  },
+  {
+   "input": "",
+   "output": ""
+  },
+  {
+   "input": "😀 <👍>",
+   "output": "😀 &lt;👍>"
+  },
+  {
+   "input": "<img>",
+   "output": "&lt;img>"
+  },
+  {
+   "input": {
+    "password": "Mot<dePasse>&1",
+    "email": "a@b.ci"
+   },
+   "output": {
+    "password": "Mot&lt;dePasse>&1",
+    "email": "a@b.ci"
+   }
+  },
+  {
+   "input": {
+    "nested": {
+     "deep": [
+      "<x>",
+      {
+       "y": "<z>"
+      }
+     ],
+     "n": 15000,
+     "ok": true,
+     "nul": null
+    }
+   },
+   "output": {
+    "nested": {
+     "deep": [
+      "&lt;x>",
+      {
+       "y": "&lt;z>"
+      }
+     ],
+     "n": 15000,
+     "ok": true,
+     "nul": null
+    }
+   }
+  },
+  {
+   "input": {
+    "clé<": "valeur",
+    "liste": [
+     "  a  ",
+     "<b>"
+    ]
+   },
+   "output": {
+    "clé&lt;": "valeur",
+    "liste": [
+     "  a  ",
+     "&lt;b>"
+    ]
+   }
+  },
+  {
+   "input": [
+    1,
+    "<2>",
+    null,
+    false
+   ],
+   "output": [
+    1,
+    "&lt;2>",
+    null,
+    false
+   ]
+  },
+  {
+   "input": {
+    "montant": "15000.00",
+    "devise": "XOF",
+    "note": "Côte d'Ivoire — <urgent>"
+   },
+   "output": {
+    "montant": "15000.00",
+    "devise": "XOF",
+    "note": "Côte d'Ivoire — &lt;urgent>"
+   }
+  },
+  {
+   "input": {
+    "vide": "",
+    "espaces": "   "
+   },
+   "output": {
+    "vide": "",
+    "espaces": "   "
+   }
+  },
+  {
+   "input": 42,
+   "output": "42"
+  },
+  {
+   "input": true,
+   "output": "true"
+  },
+  {
+   "input": null,
+   "output": null
+  }
+ ],
+ "middleware": [
+  {
+   "input": {
+    "body": {
+     "password": "a<b",
+     "name": "Zoé <3"
+    },
+    "query": {
+     "q": "<x>"
+    },
+    "params": {
+     "id": "<i>"
+    }
+   },
+   "output": {
+    "body": {
+     "password": "a&lt;b",
+     "name": "Zoé &lt;3"
+    },
+    "query": {
+     "q": "&lt;x>"
+    },
+    "params": {
+     "id": "&lt;i>"
+    }
+   }
+  },
+  {
+   "input": {
+    "body": "texte <brut>  ",
+    "query": {},
+    "params": {}
+   },
+   "output": {
+    "body": "texte &lt;brut>",
+    "query": {},
+    "params": {}
+   }
+  },
+  {
+   "input": {
+    "query": {
+     "page": "1"
+    }
+   },
+   "output": {
+    "body": null,
+    "query": {
+     "page": "1"
+    },
+    "params": null
+   }
+  },
+  {
+   "input": {
+    "body": {
+     "tableau": [
+      "<1>",
+      "2"
+     ]
+    },
+    "query": {
+     "<k>": "v"
+    },
+    "params": {
+     "a": "b"
+    }
+   },
+   "output": {
+    "body": {
+     "tableau": [
+      "&lt;1>",
+      "2"
+     ]
+    },
+    "query": {
+     "&lt;k>": "v"
+    },
+    "params": {
+     "a": "b"
+    }
+   }
+  }
+ ]
+}
