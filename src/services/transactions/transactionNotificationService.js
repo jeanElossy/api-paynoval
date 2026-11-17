@@ -81,7 +81,8 @@ function normalizeCurrencyCode(code) {
 function buildCurrencySuffix(code) {
   const upper = normalizeCurrencyCode(code);
 
-  if (upper === "XOF" || upper === "XAF" || upper === "CFA") return "F CFA";
+  // « FCFA » (2026-11-17) : la même graphie que l'application et les e-mails.
+  if (upper === "XOF" || upper === "XAF" || upper === "CFA") return "FCFA";
   if (upper === "CAD") return "$CAD";
   if (upper === "USD") return "$USD";
   if (upper === "EUR") return "€";

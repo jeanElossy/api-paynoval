@@ -35,7 +35,7 @@ const CANCELLATION_FEES_BY_COUNTRY = {
     percent: 0,
     feeId: null,
     source: "COUNTRY_CI_CANCEL_300_XOF",
-    label: "300 F CFA",
+    label: "300 FCFA",
   },
 };
 
@@ -129,7 +129,7 @@ function resolveCancellationFeeRule({ countryCode, currency } = {}) {
    * barème `CANCELLATION` publié au back-office.
    */
   const PAR_DEVISE = {
-    XOF: { amount: 300, label: "300 F CFA" },
+    XOF: { amount: 300, label: "300 FCFA" },
     XAF: { amount: 300, label: "300 XAF" },
     CAD: { amount: 2.99, label: "$CAD 2.99" },
     USD: { amount: 2.99, label: "$2.99" },

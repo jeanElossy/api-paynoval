@@ -42,8 +42,10 @@ const INTERNAL_TOKEN = String(process.env.INTERNAL_TOKEN || config?.internalToke
 /* Currency symbols + country mapping                                  */
 /* ------------------------------------------------------------------ */
 const CURRENCY_SYMBOLS = {
-  XOF: "F CFA",
-  XAF: "F CFA",
+  // « FCFA » (2026-11-17) : la même graphie que l'application et les e-mails.
+  // L'ancienne graphie « F CFA » reste LUE en entrée (`aml.buildCurrencyOrMatch`).
+  XOF: "FCFA",
+  XAF: "FCFA",
   EUR: "€",
   USD: "$",
   CAD: "$CAD",
