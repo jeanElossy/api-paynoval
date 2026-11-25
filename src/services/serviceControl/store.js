@@ -129,9 +129,18 @@ function createServiceControlStore(deps) {
    * Waits for the first load (boot), bounded: a request arriving in the very
    * first second must not be refused "status unavailable" only because the
    * process just started.
+   *
+   * ⚠️ IDLE IS NOT A READ FAILURE (2026-11-25). Reads only happen on demand,
+   * so after more than `lkgMaxMs` without any request the last known state
+   * looked "too old": the FIRST money request after a quiet period was refused
+   * `SERVICE_STATUS_UNAVAILABLE` (« Ce service est momentanément
+   * indisponible »), the background refresh succeeded, and the second attempt
+   * passed — transfers, deposits and withdrawals alike. Whenever the state
+   * would be judged unavailable, the request now waits (bounded) for a fresh
+   * read before deciding. A read that really fails still closes money.
    */
   async function ready(timeoutMs = 1500) {
-    if (snapshot) return get();
+    if (snapshot && status() !== "unavailable") return get();
 
     const pending = refresh();
     let timer = null;
